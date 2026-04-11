@@ -1,0 +1,10 @@
+[package]
+name = "ratterm"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+bevy = { version = "0.14", default-features = true }
+portable-pty = "0.8"
+vte = "0.13"
