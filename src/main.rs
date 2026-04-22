@@ -8,14 +8,15 @@ use std::thread;
 
 use anyhow::{Context, ensure};
 use bevy::app::AppExit;
+use bevy::asset::RenderAssetUsages;
+use bevy::camera::ClearColorConfig;
+use bevy::ecs::message::{MessageReader, MessageWriter};
+use bevy::image::ImageSampler;
 use bevy::input::ButtonState;
 use bevy::input::keyboard::{Key, KeyboardInput};
+use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
-use bevy::render::camera::ClearColorConfig;
-use bevy::render::mesh::{Indices, PrimitiveTopology};
-use bevy::render::render_asset::RenderAssetUsages;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-use bevy::render::texture::ImageSampler;
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use ratatui::Terminal;
 use ratatui::style::{Color as TuiColor, Style};
@@ -58,7 +59,7 @@ fn main() -> anyhow::Result<()> {
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "ratterm".into(),
-                resolution: (WINDOW_WIDTH, WINDOW_HEIGHT).into(),
+                resolution: (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32).into(),
                 ..default()
             }),
             ..default()
@@ -201,28 +202,27 @@ fn setup_scene(
     mut images: ResMut<Assets<Image>>,
     mut soft_terminal: NonSendMut<SoftTerminal>,
 ) {
-    commands.spawn(Camera2dBundle {
-        camera: Camera {
+    commands.spawn((
+        Camera2d,
+        Camera {
             order: 0,
             ..default()
         },
-        ..default()
-    });
-    commands.spawn(Camera3dBundle {
-        camera: Camera {
+    ));
+    commands.spawn((
+        Camera3d::default(),
+        Camera {
             order: 1,
             clear_color: ClearColorConfig::None,
             ..default()
         },
-        projection: OrthographicProjection {
+        Projection::Orthographic(OrthographicProjection {
             near: -2000.0,
             far: 2000.0,
-            ..OrthographicProjection::default()
-        }
-        .into(),
-        transform: Transform::from_xyz(0.0, 0.0, 800.0).looking_at(Vec3::ZERO, Vec3::Y),
-        ..default()
-    });
+            ..OrthographicProjection::default_3d()
+        }),
+        Transform::from_xyz(0.0, 0.0, 800.0).looking_at(Vec3::ZERO, Vec3::Y),
+    ));
 
     let pixmap_width = soft_terminal.terminal.backend().get_pixmap_width() as u32;
     let pixmap_height = soft_terminal.terminal.backend().get_pixmap_height() as u32;
@@ -238,7 +238,7 @@ fn setup_scene(
         TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::default(),
     );
-    image.data = soft_terminal.terminal.backend().get_pixmap_data_as_rgba();
+    image.data = Some(soft_terminal.terminal.backend().get_pixmap_data_as_rgba());
     image.sampler = ImageSampler::nearest();
 
     let image_handle = images.add(image);
@@ -254,30 +254,22 @@ fn setup_scene(
         center: viewport_center,
     });
 
-    commands.spawn(SpriteBundle {
-        texture: image_handle,
-        sprite: Sprite {
-            custom_size: Some(viewport_size),
-            ..default()
-        },
-        transform: Transform::from_translation(Vec3::new(
-            viewport_center.x,
-            viewport_center.y,
-            0.0,
-        )),
-        ..default()
-    });
+    let mut sprite = Sprite::from_image(image_handle);
+    sprite.custom_size = Some(viewport_size);
+    commands.spawn((
+        sprite,
+        Transform::from_translation(Vec3::new(viewport_center.x, viewport_center.y, 0.0)),
+    ));
 
-    commands.spawn(PointLightBundle {
-        point_light: PointLight {
+    commands.spawn((
+        PointLight {
             intensity: 90_000.0,
             range: 1600.0,
             shadows_enabled: true,
             ..default()
         },
-        transform: Transform::from_xyz(0.0, 260.0, 900.0),
-        ..default()
-    });
+        Transform::from_xyz(0.0, 260.0, 900.0),
+    ));
 
     spawn_3d_asset_showcase(&mut commands, &mut meshes, &mut materials);
 }
@@ -290,10 +282,8 @@ fn spawn_3d_asset_showcase(
     let root = commands
         .spawn((
             AssetShowcase,
-            SpatialBundle {
-                transform: Transform::from_xyz(0.0, 0.0, CURSOR_DEPTH),
-                ..default()
-            },
+            Transform::from_xyz(0.0, 0.0, CURSOR_DEPTH),
+            Visibility::Visible,
         ))
         .id();
     let material = materials.add(StandardMaterial {
@@ -317,33 +307,30 @@ fn spawn_3d_asset_showcase(
             );
             commands.entity(root).with_children(|parent| {
                 for mesh in loaded_meshes {
-                    parent.spawn(PbrBundle {
-                        mesh: meshes.add(mesh),
-                        material: material.clone(),
-                        transform: Transform::default(),
-                        ..default()
-                    });
+                    parent.spawn((
+                        Mesh3d(meshes.add(mesh)),
+                        MeshMaterial3d(material.clone()),
+                        Transform::default(),
+                    ));
                 }
             });
         }
         Some(Err(error)) => {
             warn!("failed to load OBJ model from model/: {error:#}");
             commands.entity(root).with_children(|parent| {
-                parent.spawn(PbrBundle {
-                    mesh: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
-                    material,
-                    ..default()
-                });
+                parent.spawn((
+                    Mesh3d(meshes.add(Cuboid::new(1.0, 1.0, 1.0))),
+                    MeshMaterial3d(material),
+                ));
             });
         }
         _ => {
             warn!("no OBJ model found in model/; using cube cursor fallback");
             commands.entity(root).with_children(|parent| {
-                parent.spawn(PbrBundle {
-                    mesh: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
-                    material,
-                    ..default()
-                });
+                parent.spawn((
+                    Mesh3d(meshes.add(Cuboid::new(1.0, 1.0, 1.0))),
+                    MeshMaterial3d(material),
+                ));
             });
         }
     }
@@ -461,8 +448,8 @@ fn sync_asset_to_terminal_cursor(
 
     let world_x = viewport.center.x - viewport.size.x * 0.5 + (cursor_col + 0.5) * cell_width;
     let world_y = viewport.center.y + viewport.size.y * 0.5 - (cursor_row + 0.5) * cell_height;
-    let spin = time.elapsed_seconds() * 1.4;
-    let bob = (time.elapsed_seconds() * 2.2).sin() * cell_height * 0.08;
+    let spin = time.elapsed_secs() * 1.4;
+    let bob = (time.elapsed_secs() * 2.2).sin() * cell_height * 0.08;
 
     for (mut transform, mut visibility) in &mut query {
         transform.translation = Vec3::new(world_x, world_y + bob, CURSOR_DEPTH);
@@ -476,7 +463,7 @@ fn sync_asset_to_terminal_cursor(
     }
 }
 
-fn pump_pty_output(mut runtime: NonSendMut<TerminalRuntime>, mut app_exit: EventWriter<AppExit>) {
+fn pump_pty_output(mut runtime: NonSendMut<TerminalRuntime>, mut app_exit: MessageWriter<AppExit>) {
     loop {
         match runtime.rx.try_recv() {
             Ok(chunk) => runtime.parser.process(&chunk),
@@ -484,7 +471,7 @@ fn pump_pty_output(mut runtime: NonSendMut<TerminalRuntime>, mut app_exit: Event
             Err(TryRecvError::Disconnected) => {
                 if !runtime.pty_disconnected {
                     runtime.pty_disconnected = true;
-                    app_exit.send(AppExit::Success);
+                    app_exit.write(AppExit::Success);
                 }
                 break;
             }
@@ -493,7 +480,7 @@ fn pump_pty_output(mut runtime: NonSendMut<TerminalRuntime>, mut app_exit: Event
 }
 
 fn handle_keyboard_input(
-    mut keyboard_events: EventReader<KeyboardInput>,
+    mut keyboard_events: MessageReader<KeyboardInput>,
     keys: Res<ButtonInput<KeyCode>>,
     runtime: NonSend<TerminalRuntime>,
 ) {
@@ -593,6 +580,6 @@ fn redraw_soft_terminal(
     if let Some(handle) = soft_terminal.image_handle.as_ref()
         && let Some(image) = images.get_mut(handle)
     {
-        image.data = soft_terminal.terminal.backend().get_pixmap_data_as_rgba();
+        image.data = Some(soft_terminal.terminal.backend().get_pixmap_data_as_rgba());
     }
 }
