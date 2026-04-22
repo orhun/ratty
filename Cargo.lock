@@ -2853,7 +2853,7 @@ dependencies = [
  "vec_map",
  "wasm-bindgen",
  "web-sys",
- "windows 0.58.0",
+ "windows 0.61.3",
 ]
 
 [[package]]
@@ -5256,13 +5256,14 @@ dependencies = [
 
 [[package]]
 name = "soft_ratatui"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3feb6245cb79340071a69f3ac2170cd502e2ae4c8ee1911533937a0439f02499"
+checksum = "eded9ed12fbe2430cc00d20c7694223036a0849b10f6ba53b57b673c1ba15a30"
 dependencies = [
  "cosmic-text 0.14.2",
  "ratatui-core",
  "rustc-hash 2.1.2",
+ "unicode-width",
 ]
 
 [[package]]
