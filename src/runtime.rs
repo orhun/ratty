@@ -87,4 +87,18 @@ impl TerminalRuntime {
             let _ = writer.flush();
         }
     }
+
+    pub fn resize(&mut self, cols: u16, rows: u16) {
+        if cols == 0 || rows == 0 {
+            return;
+        }
+
+        let _ = self._master.resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+        self.parser.screen_mut().set_size(rows, cols);
+    }
 }

@@ -8,6 +8,9 @@ use crate::config::{VIEW_PADDING, WINDOW_HEIGHT, WINDOW_WIDTH};
 use crate::model::spawn_3d_asset_showcase;
 use crate::terminal::TerminalSurface;
 
+#[derive(Component)]
+pub struct TerminalSprite;
+
 #[derive(Resource, Clone, Copy)]
 pub struct TerminalViewport {
     pub size: Vec2,
@@ -76,6 +79,7 @@ pub fn setup_scene(
     let mut sprite = Sprite::from_image(image_handle);
     sprite.custom_size = Some(viewport_size);
     commands.spawn((
+        TerminalSprite,
         sprite,
         Transform::from_translation(Vec3::new(viewport_center.x, viewport_center.y, 0.0)),
     ));

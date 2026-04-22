@@ -37,6 +37,18 @@ impl TerminalSurface {
             rows,
         }
     }
+
+    pub fn resize(&mut self, cols: u16, rows: u16) {
+        if cols == 0 || rows == 0 {
+            return;
+        }
+
+        self.tui.backend_mut().resize(cols, rows);
+        let _ = self.tui.resize(Rect::new(0, 0, cols, rows));
+        self.tui.backend_mut().cursor = false;
+        self.cols = cols;
+        self.rows = rows;
+    }
 }
 
 pub struct TerminalWidget<'a> {
