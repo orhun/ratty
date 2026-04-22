@@ -9,16 +9,16 @@ use bevy::prelude::*;
 use crate::config::CURSOR_DEPTH;
 
 #[derive(Component)]
-pub struct AssetShowcase;
+pub struct CursorModel;
 
-pub fn spawn_3d_asset_showcase(
+pub fn spawn_cursor_model(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
 ) {
     let root = commands
         .spawn((
-            AssetShowcase,
+            CursorModel,
             Transform::from_xyz(0.0, 0.0, CURSOR_DEPTH),
             Visibility::Visible,
         ))

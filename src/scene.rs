@@ -5,7 +5,6 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use crate::config::{WINDOW_HEIGHT, WINDOW_WIDTH};
-use crate::model::spawn_3d_asset_showcase;
 use crate::terminal::TerminalSurface;
 
 #[derive(Component)]
@@ -17,10 +16,13 @@ pub struct TerminalViewport {
     pub center: Vec2,
 }
 
+#[derive(Resource)]
+pub struct ModelLoadState {
+    pub loaded: bool,
+}
+
 pub fn setup_scene(
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut terminal: NonSendMut<TerminalSurface>,
 ) {
@@ -90,6 +92,5 @@ pub fn setup_scene(
         },
         Transform::from_xyz(0.0, 260.0, 900.0),
     ));
-
-    spawn_3d_asset_showcase(&mut commands, &mut meshes, &mut materials);
+    commands.insert_resource(ModelLoadState { loaded: false });
 }

@@ -10,9 +10,10 @@ use bevy::window::{PrimaryWindow, WindowResized};
 
 use crate::config::CURSOR_DEPTH;
 use crate::config::CURSOR_SCALE_FACTOR;
-use crate::model::AssetShowcase;
+use crate::model::CursorModel;
+use crate::model::spawn_cursor_model;
 use crate::runtime::TerminalRuntime;
-use crate::scene::{TerminalSprite, TerminalViewport};
+use crate::scene::{ModelLoadState, TerminalSprite, TerminalViewport};
 use crate::terminal::{TerminalSurface, TerminalWidget};
 
 pub fn handle_keyboard_input(
@@ -89,6 +90,10 @@ pub fn redraw_soft_terminal(
     runtime: NonSend<TerminalRuntime>,
     mut terminal: NonSendMut<TerminalSurface>,
     mut images: ResMut<Assets<Image>>,
+    mut model_load_state: ResMut<ModelLoadState>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let screen = runtime.parser.screen();
 
@@ -100,6 +105,11 @@ pub fn redraw_soft_terminal(
         && let Some(image) = images.get_mut(handle)
     {
         image.data = Some(terminal.tui.backend().get_pixmap_data_as_rgba());
+
+        if !model_load_state.loaded {
+            spawn_cursor_model(&mut commands, &mut meshes, &mut materials);
+            model_load_state.loaded = true;
+        }
     }
 }
 
@@ -163,7 +173,7 @@ pub fn sync_asset_to_terminal_cursor(
     terminal: NonSend<TerminalSurface>,
     viewport: Res<TerminalViewport>,
     time: Res<Time>,
-    mut query: Query<(&mut Transform, &mut Visibility), With<AssetShowcase>>,
+    mut query: Query<(&mut Transform, &mut Visibility), With<CursorModel>>,
 ) {
     let cols = terminal.cols.max(1) as f32;
     let rows = terminal.rows.max(1) as f32;
