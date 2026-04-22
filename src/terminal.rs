@@ -4,7 +4,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color as TuiColor, Modifier, Style};
 use ratatui::widgets::Widget;
-use soft_ratatui::{CosmicText, SoftBackend};
+use soft_ratatui::{ParleyText, SoftBackend};
 
 use crate::config::{TERMINAL_FONT_SIZE, THEME_BG, THEME_FG};
 use crate::mouse::TerminalSelection;
@@ -15,7 +15,7 @@ static TERMINAL_FONT_DATA: &[u8] = include_bytes!(concat!(
 ));
 
 pub struct TerminalSurface {
-    pub tui: Terminal<SoftBackend<CosmicText>>,
+    pub tui: Terminal<SoftBackend<ParleyText>>,
     pub image_handle: Option<Handle<Image>>,
     pub cols: u16,
     pub rows: u16,
@@ -24,7 +24,7 @@ pub struct TerminalSurface {
 impl TerminalSurface {
     pub fn new(cols: u16, rows: u16) -> Self {
         let backend =
-            SoftBackend::<CosmicText>::new(cols, rows, TERMINAL_FONT_SIZE, TERMINAL_FONT_DATA);
+            SoftBackend::<ParleyText>::new(cols, rows, TERMINAL_FONT_SIZE, TERMINAL_FONT_DATA);
 
         let mut tui =
             Terminal::new(backend).expect("soft_ratatui backend is infallible for Terminal::new");

@@ -9,6 +9,6 @@ arboard = "3.6"
 bevy = { version = "0.18.1", default-features = true }
 portable-pty = "0.8"
 ratatui = "0.30"
-soft_ratatui = { version = "0.2.1", default-features = false, features = ["cosmic-text"] }
+soft_ratatui = { version = "0.2.2", default-features = false, features = ["parley-vello"] }
 tobj = "4.0"
 vt100 = "0.16"
