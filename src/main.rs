@@ -1,6 +1,7 @@
 mod config;
 mod keyboard;
 mod model;
+mod mouse;
 mod plugin;
 mod runtime;
 mod scene;

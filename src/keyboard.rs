@@ -1,13 +1,47 @@
+use bevy::ecs::world::FromWorld;
 use bevy::input::ButtonState;
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
 
+use arboard::Clipboard;
+
+use crate::mouse::TerminalSelection;
 use crate::runtime::TerminalRuntime;
+
+pub struct TerminalClipboard {
+    clipboard: Option<Clipboard>,
+}
+
+impl FromWorld for TerminalClipboard {
+    fn from_world(_world: &mut World) -> Self {
+        Self {
+            clipboard: Clipboard::new().ok(),
+        }
+    }
+}
+
+impl TerminalClipboard {
+    fn copy(&mut self, text: &str) {
+        let Some(clipboard) = self.clipboard.as_mut() else {
+            warn!("clipboard unavailable for copy");
+            return;
+        };
+
+        if let Err(error) = clipboard.set_text(text.to_owned()) {
+            warn!("failed to copy terminal selection to clipboard: {error}");
+        }
+    }
+
+    fn paste(&mut self) -> Option<String> {
+        let clipboard = self.clipboard.as_mut()?;
+        clipboard.get_text().ok()
+    }
+}
 
 #[derive(Default)]
 pub struct TerminalKeyboard {
-    ctrl_pressed: bool,
-    alt_pressed: bool,
+    pub(crate) ctrl_pressed: bool,
+    pub(crate) alt_pressed: bool,
 }
 
 impl TerminalKeyboard {
@@ -41,9 +75,41 @@ impl TerminalKeyboard {
 pub fn handle_keyboard_input(
     mut keyboard_events: MessageReader<KeyboardInput>,
     mut keyboard: Local<TerminalKeyboard>,
+    mut selection: ResMut<TerminalSelection>,
+    mut clipboard: NonSendMut<TerminalClipboard>,
     runtime: NonSend<TerminalRuntime>,
 ) {
     for event in keyboard_events.read() {
+        if event.state == ButtonState::Pressed && !event.repeat {
+            if is_ctrl_alt_shortcut(&keyboard, KeyCode::KeyC, event.key_code) {
+                if let Some(text) = selection.selected_text(runtime.parser.screen())
+                    && !text.is_empty()
+                {
+                    clipboard.copy(&text);
+                }
+                selection.clear();
+                continue;
+            }
+
+            if is_ctrl_alt_shortcut(&keyboard, KeyCode::KeyV, event.key_code) {
+                if let Some(text) = clipboard.paste() {
+                    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+                    let mut bytes = Vec::from(b"\x1b[200~".as_slice());
+                    bytes.extend_from_slice(normalized.as_bytes());
+                    bytes.extend_from_slice(b"\x1b[201~");
+                    runtime.write_input(&bytes);
+                } else {
+                    warn!("failed to read clipboard contents for paste");
+                }
+                selection.clear();
+                continue;
+            }
+        }
+
+        if event.state == ButtonState::Pressed && !is_modifier_key(event.key_code) {
+            selection.clear();
+        }
+
         if let Some(input) = keyboard.handle_event(event) {
             runtime.write_input(&input);
         }
@@ -98,6 +164,28 @@ fn translate_key(
     }
 
     bytes
+}
+
+fn is_ctrl_alt_shortcut(
+    keyboard: &TerminalKeyboard,
+    shortcut_key: KeyCode,
+    event_key: KeyCode,
+) -> bool {
+    event_key == shortcut_key && keyboard.ctrl_pressed && keyboard.alt_pressed
+}
+
+fn is_modifier_key(key: KeyCode) -> bool {
+    matches!(
+        key,
+        KeyCode::ControlLeft
+            | KeyCode::ControlRight
+            | KeyCode::AltLeft
+            | KeyCode::AltRight
+            | KeyCode::ShiftLeft
+            | KeyCode::ShiftRight
+            | KeyCode::SuperLeft
+            | KeyCode::SuperRight
+    )
 }
 
 fn ctrl_keycode_byte(key: KeyCode) -> Option<u8> {

@@ -7,6 +7,7 @@ use ratatui::widgets::Widget;
 use soft_ratatui::{CosmicText, SoftBackend};
 
 use crate::config::{TERMINAL_FONT_SIZE, THEME_BG, THEME_FG};
+use crate::mouse::TerminalSelection;
 
 static TERMINAL_FONT_DATA: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -53,12 +54,14 @@ impl TerminalSurface {
 
 pub struct TerminalWidget<'a> {
     pub screen: &'a vt100::Screen,
+    pub selection: &'a TerminalSelection,
 }
 
 impl Widget for TerminalWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         buf.set_style(area, Style::default().fg(THEME_FG).bg(THEME_BG));
 
+        let selection = self.selection.normalized_bounds();
         let (rows, cols) = self.screen.size();
         let draw_rows = rows.min(area.height);
         let draw_cols = cols.min(area.width);
@@ -72,12 +75,16 @@ impl Widget for TerminalWidget<'_> {
                     continue;
                 }
 
-                let style = vt100_cell_style(vt_cell);
+                let mut style = vt100_cell_style(vt_cell);
                 let symbol = if vt_cell.has_contents() {
                     vt_cell.contents()
                 } else {
                     " "
                 };
+
+                if selection.is_some_and(|bounds| bounds.contains(row, col)) {
+                    style = style.add_modifier(Modifier::REVERSED);
+                }
 
                 buf[(area.x + col, area.y + row)]
                     .set_symbol(symbol)

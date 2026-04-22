@@ -10,6 +10,7 @@ use crate::config::CURSOR_DEPTH;
 use crate::config::CURSOR_SCALE_FACTOR;
 use crate::model::CursorModel;
 use crate::model::spawn_cursor_model;
+use crate::mouse::TerminalSelection;
 use crate::runtime::TerminalRuntime;
 use crate::scene::{ModelLoadState, TerminalSprite, TerminalViewport};
 use crate::terminal::{TerminalSurface, TerminalWidget};
@@ -36,6 +37,7 @@ pub fn pump_pty_output(
 pub fn redraw_soft_terminal(
     runtime: NonSend<TerminalRuntime>,
     mut terminal: NonSendMut<TerminalSurface>,
+    selection: Res<TerminalSelection>,
     mut images: ResMut<Assets<Image>>,
     mut model_load_state: ResMut<ModelLoadState>,
     mut commands: Commands,
@@ -45,7 +47,13 @@ pub fn redraw_soft_terminal(
     let screen = runtime.parser.screen();
 
     let _ = terminal.tui.draw(|frame| {
-        frame.render_widget(TerminalWidget { screen }, frame.area());
+        frame.render_widget(
+            TerminalWidget {
+                screen,
+                selection: &selection,
+            },
+            frame.area(),
+        );
     });
 
     if let Some(handle) = terminal.image_handle.as_ref()

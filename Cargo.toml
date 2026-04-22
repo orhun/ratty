@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0"
+arboard = "3.6"
 bevy = { version = "0.18.1", default-features = true }
 portable-pty = "0.8"
 ratatui = "0.30"
