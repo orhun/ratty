@@ -4,7 +4,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color as TuiColor, Modifier, Style};
 use ratatui::widgets::Widget;
-use soft_ratatui::{CosmicText, SoftBackend};
+use soft_ratatui::{EmbeddedTTF, SoftBackend};
 
 use crate::config::{TERMINAL_FONT_SIZE, THEME_BG, THEME_FG};
 
@@ -12,9 +12,11 @@ static TERMINAL_FONT_DATA: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/fonts/UbuntuMonoLigaturized-Regular.ttf"
 ));
+static TERMINAL_FONT: std::sync::OnceLock<soft_ratatui::rusttype::Font<'static>> =
+    std::sync::OnceLock::new();
 
 pub struct TerminalSurface {
-    pub tui: Terminal<SoftBackend<CosmicText>>,
+    pub tui: Terminal<SoftBackend<EmbeddedTTF>>,
     pub image_handle: Option<Handle<Image>>,
     pub cols: u16,
     pub rows: u16,
@@ -22,8 +24,20 @@ pub struct TerminalSurface {
 
 impl TerminalSurface {
     pub fn new(cols: u16, rows: u16) -> Self {
-        let backend =
-            SoftBackend::<CosmicText>::new(cols, rows, TERMINAL_FONT_SIZE, TERMINAL_FONT_DATA);
+        let font_regular = TERMINAL_FONT
+            .get_or_init(|| {
+                soft_ratatui::rusttype::Font::try_from_bytes(TERMINAL_FONT_DATA)
+                    .expect("embedded terminal font failed to load")
+            })
+            .clone();
+        let backend = SoftBackend::<EmbeddedTTF>::new(
+            cols,
+            rows,
+            TERMINAL_FONT_SIZE as u32,
+            font_regular,
+            None,
+            None,
+        );
 
         let mut tui =
             Terminal::new(backend).expect("soft_ratatui backend is infallible for Terminal::new");
