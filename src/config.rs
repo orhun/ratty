@@ -7,7 +7,7 @@ pub const DEFAULT_ROWS: u16 = 32;
 pub const TERMINAL_SCROLLBACK: usize = 10_000;
 pub const CURSOR_DEPTH: f32 = 10.0;
 pub const CURSOR_SCALE_FACTOR: f32 = 6.;
-pub const TERMINAL_FONT_SIZE: i32 = 18;
+pub const TERMINAL_FONT_SIZE: i32 = 13;
 
 pub const THEME_BG: TuiColor = TuiColor::Rgb(31, 31, 40);
 pub const THEME_FG: TuiColor = TuiColor::Rgb(220, 215, 186);

@@ -10,7 +10,7 @@ use crate::config::{TERMINAL_FONT_SIZE, THEME_BG, THEME_FG};
 
 static TERMINAL_FONT_DATA: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/assets/fonts/UbuntuMonoLigaturized-Regular.ttf"
+    "/assets/fonts/JetBrainsMonoNerdFontCompleteMono.ttf"
 ));
 
 pub struct TerminalSurface {
