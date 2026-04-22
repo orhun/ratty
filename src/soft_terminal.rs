@@ -1,12 +1,16 @@
 use bevy::prelude::*;
 use ratatui::Terminal;
-use soft_ratatui::embedded_graphics_unicodefonts::{
-    mono_8x13_atlas, mono_8x13_bold_atlas, mono_8x13_italic_atlas,
-};
-use soft_ratatui::{EmbeddedGraphics, SoftBackend};
+use soft_ratatui::{CosmicText, SoftBackend};
+
+use crate::config::TERMINAL_FONT_SIZE;
+
+static TERMINAL_FONT_DATA: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/fonts/CaskaydiaCoveNerdFontComplete-Regular.otf"
+));
 
 pub struct SoftTerminal {
-    pub terminal: Terminal<SoftBackend<EmbeddedGraphics>>,
+    pub terminal: Terminal<SoftBackend<CosmicText>>,
     pub image_handle: Option<Handle<Image>>,
     pub cols: u16,
     pub rows: u16,
@@ -14,13 +18,8 @@ pub struct SoftTerminal {
 
 impl SoftTerminal {
     pub fn new(cols: u16, rows: u16) -> Self {
-        let backend = SoftBackend::<EmbeddedGraphics>::new(
-            cols,
-            rows,
-            mono_8x13_atlas(),
-            Some(mono_8x13_bold_atlas()),
-            Some(mono_8x13_italic_atlas()),
-        );
+        let backend =
+            SoftBackend::<CosmicText>::new(cols, rows, TERMINAL_FONT_SIZE, TERMINAL_FONT_DATA);
 
         let mut terminal =
             Terminal::new(backend).expect("soft_ratatui backend is infallible for Terminal::new");
