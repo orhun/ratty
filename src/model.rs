@@ -29,6 +29,7 @@ pub fn spawn_cursor_model(
         metallic: 0.0,
         perceptual_roughness: 0.28,
         reflectance: 0.6,
+        cull_mode: None,
         ..default()
     });
 

@@ -7,6 +7,7 @@ use arboard::Clipboard;
 
 use crate::mouse::TerminalSelection;
 use crate::runtime::TerminalRuntime;
+use crate::scene::TerminalPresentation;
 use crate::terminal::TerminalRedrawState;
 
 pub struct TerminalClipboard {
@@ -77,11 +78,19 @@ pub fn handle_keyboard_input(
     mut keyboard_events: MessageReader<KeyboardInput>,
     mut keyboard: Local<TerminalKeyboard>,
     mut selection: ResMut<TerminalSelection>,
+    mut presentation: ResMut<TerminalPresentation>,
     mut clipboard: NonSendMut<TerminalClipboard>,
     runtime: NonSend<TerminalRuntime>,
     mut redraw: ResMut<TerminalRedrawState>,
 ) {
     for event in keyboard_events.read() {
+        if event.state == ButtonState::Pressed && !event.repeat && event.key_code == KeyCode::F2 {
+            presentation.toggle();
+            selection.clear();
+            redraw.request();
+            continue;
+        }
+
         if event.state == ButtonState::Pressed && !event.repeat {
             if is_ctrl_alt_shortcut(&keyboard, KeyCode::KeyC, event.key_code) {
                 if let Some(text) = selection.selected_text(runtime.parser.screen())

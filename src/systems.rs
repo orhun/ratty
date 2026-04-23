@@ -6,12 +6,16 @@ use bevy::prelude::*;
 use bevy::window::{PrimaryWindow, WindowResized};
 
 use crate::config::CURSOR_DEPTH;
+use crate::config::CURSOR_PLANE_OFFSET;
 use crate::config::CURSOR_SCALE_FACTOR;
 use crate::model::CursorModel;
 use crate::model::spawn_cursor_model;
 use crate::mouse::TerminalSelection;
+use crate::scene::{
+    ModelLoadState, TerminalPlane, TerminalPlaneBack, TerminalPresentation,
+    TerminalPresentationMode, TerminalSprite, TerminalViewport,
+};
 use crate::runtime::TerminalRuntime;
-use crate::scene::{ModelLoadState, TerminalSprite, TerminalViewport};
 use crate::terminal::{TerminalRedrawState, TerminalSurface, TerminalWidget};
 
 pub fn pump_pty_output(
@@ -46,15 +50,18 @@ pub fn redraw_soft_terminal(
     runtime: NonSend<TerminalRuntime>,
     mut terminal: NonSendMut<TerminalSurface>,
     selection: Res<TerminalSelection>,
+    presentation: Res<TerminalPresentation>,
     mut redraw: ResMut<TerminalRedrawState>,
     mut images: ResMut<Assets<Image>>,
     mut model_load_state: ResMut<ModelLoadState>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    plane_materials: Query<&MeshMaterial3d<StandardMaterial>, With<TerminalPlane>>,
 ) {
     let needs_redraw = redraw.take();
-    if !needs_redraw && model_load_state.loaded {
+    let force_live_redraw = presentation.mode == TerminalPresentationMode::Plane3d;
+    if !needs_redraw && !force_live_redraw && model_load_state.loaded {
         return;
     }
 
@@ -71,6 +78,14 @@ pub fn redraw_soft_terminal(
 
     terminal.sync_image(&mut images);
 
+    if let Some(image_handle) = terminal.image_handle.as_ref() {
+        for material_handle in &plane_materials {
+            if let Some(material) = materials.get_mut(&material_handle.0) {
+                material.base_color_texture = Some(image_handle.clone());
+            }
+        }
+    }
+
     if !model_load_state.loaded {
         spawn_cursor_model(&mut commands, &mut meshes, &mut materials);
         model_load_state.loaded = true;
@@ -85,6 +100,15 @@ pub fn handle_window_resize(
     mut redraw: ResMut<TerminalRedrawState>,
     mut viewport: ResMut<TerminalViewport>,
     mut sprite_query: Query<&mut Sprite, With<TerminalSprite>>,
+    mut plane_query: Query<&mut Transform, (With<TerminalPlane>, Without<TerminalSprite>)>,
+    mut plane_back_query: Query<
+        &mut Transform,
+        (
+            With<TerminalPlaneBack>,
+            Without<TerminalPlane>,
+            Without<TerminalSprite>,
+        ),
+    >,
     mut images: ResMut<Assets<Image>>,
 ) {
     let Ok(primary_window) = primary_window.single() else {
@@ -122,15 +146,46 @@ pub fn handle_window_resize(
     for mut sprite in &mut sprite_query {
         sprite.custom_size = Some(viewport_size);
     }
+
+    for mut transform in &mut plane_query {
+        transform.scale = viewport_size.extend(1.0);
+    }
+
+    for mut transform in &mut plane_back_query {
+        transform.scale = viewport_size.extend(1.0);
+    }
 }
 
 pub fn sync_asset_to_terminal_cursor(
     runtime: NonSend<TerminalRuntime>,
     terminal: NonSend<TerminalSurface>,
     viewport: Res<TerminalViewport>,
+    presentation: Res<TerminalPresentation>,
     time: Res<Time>,
-    mut query: Query<(&mut Transform, &mut Visibility), With<CursorModel>>,
+    plane_query: Query<&Transform, (With<TerminalPlane>, Without<CursorModel>)>,
+    mut query: Query<
+        (&mut Transform, &mut Visibility),
+        (With<CursorModel>, Without<TerminalPlane>),
+    >,
 ) {
+    let (translation, rotation, scale, cursor_visibility) =
+        cursor_pose(&runtime, &terminal, &viewport, presentation.mode, time.elapsed_secs(), &plane_query);
+    for (mut transform, mut visibility) in &mut query {
+        transform.translation = translation;
+        transform.rotation = rotation;
+        transform.scale = Vec3::splat(scale.max(0.001));
+        *visibility = cursor_visibility;
+    }
+}
+
+fn cursor_pose(
+    runtime: &TerminalRuntime,
+    terminal: &TerminalSurface,
+    viewport: &TerminalViewport,
+    mode: TerminalPresentationMode,
+    elapsed_secs: f32,
+    plane_query: &Query<&Transform, (With<TerminalPlane>, Without<CursorModel>)>,
+) -> (Vec3, Quat, f32, Visibility) {
     let cols = terminal.cols.max(1) as f32;
     let rows = terminal.rows.max(1) as f32;
     let cell_width = viewport.size.x / cols;
@@ -142,19 +197,36 @@ pub fn sync_asset_to_terminal_cursor(
     let cursor_col = cursor_col.min(terminal.cols.saturating_sub(1)) as f32;
     let cursor_row = cursor_row.min(terminal.rows.saturating_sub(1)) as f32;
 
-    let world_x = viewport.center.x - viewport.size.x * 0.5 + (cursor_col + 0.5) * cell_width;
-    let world_y = viewport.center.y + viewport.size.y * 0.5 - (cursor_row + 0.5) * cell_height;
-    let spin = time.elapsed_secs() * 1.4;
-    let bob = (time.elapsed_secs() * 2.2).sin() * cell_height * 0.08;
+    let local_x = viewport.center.x - viewport.size.x * 0.5 + (cursor_col + 0.5) * cell_width;
+    let local_y = viewport.center.y + viewport.size.y * 0.5 - (cursor_row + 0.5) * cell_height;
+    let spin = elapsed_secs * 1.4;
+    let bob = (elapsed_secs * 2.2).sin() * cell_height * 0.08;
 
-    for (mut transform, mut visibility) in &mut query {
-        transform.translation = Vec3::new(world_x, world_y + bob, CURSOR_DEPTH);
-        transform.rotation = Quat::from_rotation_y(spin) * Quat::from_rotation_x(-0.25);
-        transform.scale = Vec3::splat(scale.max(0.001));
-        *visibility = if screen.hide_cursor() {
-            Visibility::Hidden
-        } else {
-            Visibility::Visible
-        };
-    }
+    let (translation, rotation, visibility) = match mode {
+        TerminalPresentationMode::Flat2d => (
+            Vec3::new(local_x, local_y + bob, CURSOR_DEPTH),
+            Quat::from_rotation_y(spin) * Quat::from_rotation_x(-0.25),
+            if screen.hide_cursor() {
+                Visibility::Hidden
+            } else {
+                Visibility::Visible
+            },
+        ),
+        TerminalPresentationMode::Plane3d => {
+            let plane_transform = plane_query
+                .single()
+                .expect("terminal plane should exist while app is running");
+            let plane_local_x = (cursor_col + 0.5) / cols - 0.5;
+            let plane_local_y = 0.5 - (cursor_row + 0.5) / rows;
+            let local_position = Vec3::new(plane_local_x, plane_local_y, CURSOR_PLANE_OFFSET);
+            (
+                plane_transform.transform_point(local_position),
+                plane_transform.rotation
+                    * (Quat::from_rotation_y(spin) * Quat::from_rotation_x(-0.25)),
+                Visibility::Visible,
+            )
+        }
+    };
+
+    (translation, rotation, scale, visibility)
 }

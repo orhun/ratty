@@ -4,11 +4,14 @@ Under construction ⚠️ Cheese ahead! 🧀
 
 ![](assets/img/demo.gif)
 
-Project goals:
+Features:
 
 - Spinning rat cursor
+- 2D or 3D mode
+
+Project goals:
+
 - Custom terminal protocol for rendering 3D assets
-- Other cheesy stuff
 
 [**Sponsor the development of ratty!**](https://github.com/sponsors/orhun/)
 

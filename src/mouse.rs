@@ -1,11 +1,12 @@
 use bevy::ecs::message::MessageReader;
 use bevy::input::ButtonState;
-use bevy::input::mouse::MouseButton;
-use bevy::input::mouse::MouseButtonInput;
+use bevy::input::mouse::{MouseButton, MouseButtonInput, MouseWheel, MouseScrollUnit};
 use bevy::prelude::*;
 use bevy::window::{CursorMoved, PrimaryWindow};
 
-use crate::scene::TerminalViewport;
+use crate::scene::{
+    TerminalPlaneView, TerminalPresentation, TerminalPresentationMode, TerminalViewport,
+};
 use crate::terminal::TerminalSurface;
 
 #[derive(Resource, Clone, Default)]
@@ -150,9 +151,12 @@ impl TerminalSelection {
 pub fn handle_mouse_input(
     mut cursor_events: MessageReader<CursorMoved>,
     mut button_events: MessageReader<MouseButtonInput>,
+    mut wheel_events: MessageReader<MouseWheel>,
     primary_window: Query<Entity, With<PrimaryWindow>>,
     terminal: NonSend<TerminalSurface>,
     viewport: Res<TerminalViewport>,
+    presentation: Res<TerminalPresentation>,
+    mut plane_view: ResMut<TerminalPlaneView>,
     mut selection: ResMut<TerminalSelection>,
     mut redraw: ResMut<crate::terminal::TerminalRedrawState>,
 ) {
@@ -166,7 +170,25 @@ pub fn handle_mouse_input(
         }
 
         selection.set_cursor_position(event.position);
-        if selection.dragging
+        if presentation.mode == TerminalPresentationMode::Plane3d {
+            if plane_view.rotating {
+                if let Some(last) = plane_view.last_rotate_cursor {
+                    let delta = event.position - last;
+                    plane_view.yaw += delta.x * 0.005;
+                    plane_view.pitch -= delta.y * 0.005;
+                    redraw.request();
+                }
+                plane_view.last_rotate_cursor = Some(event.position);
+            } else if plane_view.panning {
+                if let Some(last) = plane_view.last_pan_cursor {
+                    let delta = event.position - last;
+                    plane_view.camera_offset.x -= delta.x * plane_view.zoom;
+                    plane_view.camera_offset.y += delta.y * plane_view.zoom;
+                    redraw.request();
+                }
+                plane_view.last_pan_cursor = Some(event.position);
+            }
+        } else if selection.dragging
             && let Some(cell) = position_to_cell(event.position, &viewport, &terminal)
             && selection.update(cell)
         {
@@ -181,7 +203,10 @@ pub fn handle_mouse_input(
 
         match (event.button, event.state) {
             (MouseButton::Left, ButtonState::Pressed) => {
-                if let Some(pos) = selection.cursor_position()
+                if presentation.mode == TerminalPresentationMode::Plane3d {
+                    plane_view.rotating = true;
+                    plane_view.last_rotate_cursor = selection.cursor_position();
+                } else if let Some(pos) = selection.cursor_position()
                     && let Some(cell) = position_to_cell(pos, &viewport, &terminal)
                     && selection.begin(cell)
                 {
@@ -189,9 +214,38 @@ pub fn handle_mouse_input(
                 }
             }
             (MouseButton::Left, ButtonState::Released) => {
-                let _ = selection.end();
+                if presentation.mode == TerminalPresentationMode::Plane3d {
+                    plane_view.rotating = false;
+                    plane_view.last_rotate_cursor = selection.cursor_position();
+                } else {
+                    let _ = selection.end();
+                }
+            }
+            (MouseButton::Right, ButtonState::Pressed)
+                if presentation.mode == TerminalPresentationMode::Plane3d =>
+            {
+                plane_view.panning = true;
+                plane_view.last_pan_cursor = selection.cursor_position();
+            }
+            (MouseButton::Right, ButtonState::Released)
+                if presentation.mode == TerminalPresentationMode::Plane3d =>
+            {
+                plane_view.panning = false;
+                plane_view.last_pan_cursor = selection.cursor_position();
             }
             _ => {}
+        }
+    }
+
+    for event in wheel_events.read() {
+        let delta = match event.unit {
+            MouseScrollUnit::Line => event.y * 0.1,
+            MouseScrollUnit::Pixel => event.y * 0.001,
+        };
+
+        if presentation.mode == TerminalPresentationMode::Plane3d && delta != 0.0 {
+            plane_view.zoom = (plane_view.zoom - delta).clamp(0.1, 4.0);
+            redraw.request();
         }
     }
 }

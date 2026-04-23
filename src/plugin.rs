@@ -2,7 +2,7 @@ use bevy::prelude::*;
 
 use crate::keyboard::{TerminalClipboard, handle_keyboard_input};
 use crate::mouse::{TerminalSelection, handle_mouse_input};
-use crate::scene::setup_scene;
+use crate::scene::{apply_terminal_presentation, setup_scene};
 use crate::systems::{
     handle_window_resize, pump_pty_output, redraw_soft_terminal, sync_asset_to_terminal_cursor,
 };
@@ -20,6 +20,12 @@ impl Plugin for TerminalPlugin {
             .add_systems(Update, handle_keyboard_input)
             .add_systems(Update, handle_mouse_input)
             .add_systems(Update, handle_window_resize)
+            .add_systems(
+                Update,
+                apply_terminal_presentation
+                    .after(handle_keyboard_input)
+                    .after(handle_mouse_input),
+            )
             .add_systems(
                 Update,
                 redraw_soft_terminal
