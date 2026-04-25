@@ -1,12 +1,17 @@
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::io::Cursor;
+use std::path::Path;
 
 use anyhow::{Context, ensure};
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
+use rust_embed::RustEmbed;
 
 use crate::config::{AppConfig, CURSOR_DEPTH};
+
+#[derive(RustEmbed)]
+#[folder = "assets/objects/"]
+struct EmbeddedObjects;
 
 #[derive(Component)]
 pub struct CursorModel;
@@ -34,16 +39,26 @@ pub fn spawn_cursor_model(
         ..default()
     });
 
-    let maybe_obj_path = discover_obj_model_path(Some(app_config.cursor.model.path.as_path()));
-    let maybe_meshes = maybe_obj_path
-        .as_ref()
-        .map(|path| load_obj_meshes(path).map(|loaded| (path, loaded)));
+    let configured_path = app_config.cursor.model.path.as_path();
+    let maybe_meshes = if let Some(file_name) = configured_path.file_name().and_then(|name| name.to_str())
+        && let Some(file) = EmbeddedObjects::get(file_name)
+    {
+        Some(
+            load_obj_meshes_from_bytes(file_name, &file.data)
+                .map(|meshes| (format!("embedded:{file_name}"), meshes)),
+        )
+    } else {
+        Some(
+            load_obj_meshes_from_path(configured_path)
+                .map(|meshes| (configured_path.display().to_string(), meshes)),
+        )
+    };
 
     match maybe_meshes {
-        Some(Ok((path, loaded_meshes))) if !loaded_meshes.is_empty() => {
+        Some(Ok((source, loaded_meshes))) if !loaded_meshes.is_empty() => {
             info!(
                 "loaded cursor model from {} ({} mesh parts)",
-                path.display(),
+                source,
                 loaded_meshes.len()
             );
             commands.entity(root).with_children(|parent| {
@@ -57,7 +72,7 @@ pub fn spawn_cursor_model(
             });
         }
         Some(Err(error)) => {
-            warn!("failed to load OBJ model from assets/model: {error:#}");
+            warn!("failed to load cursor OBJ model: {error:#}");
             commands.entity(root).with_children(|parent| {
                 parent.spawn((
                     Mesh3d(meshes.add(Cuboid::new(1.0, 1.0, 1.0))),
@@ -66,7 +81,7 @@ pub fn spawn_cursor_model(
             });
         }
         _ => {
-            warn!("no OBJ model found in assets/model; using cube cursor fallback");
+            warn!("no cursor OBJ model found; using cube cursor fallback");
             commands.entity(root).with_children(|parent| {
                 parent.spawn((
                     Mesh3d(meshes.add(Cuboid::new(1.0, 1.0, 1.0))),
@@ -77,39 +92,7 @@ pub fn spawn_cursor_model(
     }
 }
 
-fn discover_obj_model_path(configured_path: Option<&Path>) -> Option<PathBuf> {
-    if let Some(path) = configured_path {
-        return Some(path.to_path_buf());
-    }
-
-    let entries = fs::read_dir("assets/model").ok()?;
-    let mut candidates = Vec::new();
-
-    for entry in entries {
-        let entry = entry.ok()?;
-        let path = entry.path();
-        let is_obj = path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| ext.eq_ignore_ascii_case("obj"))
-            .unwrap_or(false);
-        if is_obj {
-            let modified = entry
-                .metadata()
-                .ok()
-                .and_then(|meta| meta.modified().ok())
-                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-            candidates.push((path, modified));
-        }
-    }
-
-    candidates
-        .into_iter()
-        .max_by_key(|(_, modified)| *modified)
-        .map(|(path, _)| path)
-}
-
-fn load_obj_meshes(path: &Path) -> anyhow::Result<Vec<Mesh>> {
+fn load_obj_meshes_from_path(path: &Path) -> anyhow::Result<Vec<Mesh>> {
     let options = tobj::LoadOptions {
         triangulate: true,
         single_index: true,
@@ -119,7 +102,27 @@ fn load_obj_meshes(path: &Path) -> anyhow::Result<Vec<Mesh>> {
     };
     let (models, _) = tobj::load_obj(path, &options)
         .with_context(|| format!("failed to read {}", path.display()))?;
+    build_meshes(models, path.display().to_string())
+}
 
+fn load_obj_meshes_from_bytes(name: &str, bytes: &[u8]) -> anyhow::Result<Vec<Mesh>> {
+    let options = tobj::LoadOptions {
+        triangulate: true,
+        single_index: true,
+        ignore_lines: true,
+        ignore_points: true,
+        ..default()
+    };
+    let (models, _) = tobj::load_obj_buf(
+        &mut Cursor::new(bytes),
+        &options,
+        |_path| Ok((Vec::new(), Default::default())),
+    )
+    .with_context(|| format!("failed to read embedded {name}"))?;
+    build_meshes(models, format!("embedded:{name}"))
+}
+
+fn build_meshes(models: Vec<tobj::Model>, source: String) -> anyhow::Result<Vec<Mesh>> {
     let mut output = Vec::new();
     for model in models {
         let source_mesh = model.mesh;
@@ -167,8 +170,7 @@ fn load_obj_meshes(path: &Path) -> anyhow::Result<Vec<Mesh>> {
 
     ensure!(
         !output.is_empty(),
-        "no mesh content inside {}",
-        path.display()
+        "no mesh content inside {source}",
     );
     Ok(output)
 }

@@ -45,7 +45,14 @@ impl AppConfig {
         let mut config: Self =
             toml::from_str(&contents).with_context(|| format!("failed to parse {}", path.display()))?;
         let config_dir = path.parent().unwrap_or_else(|| Path::new("."));
-        if config.cursor.model.path.is_relative() {
+        if config.cursor.model.path.is_relative()
+            && config
+                .cursor
+                .model
+                .path
+                .parent()
+                .is_some_and(|parent| !parent.as_os_str().is_empty())
+        {
             config.cursor.model.path = config_dir.join(&config.cursor.model.path);
         }
         Ok(config)
@@ -239,7 +246,7 @@ impl Default for CursorModelConfig {
             scale_factor: 6.0,
             x_offset: 0.1,
             plane_offset: 18.0,
-            path: PathBuf::from("assets/model/CairoSpinyMouse.obj"),
+            path: PathBuf::from("CairoSpinyMouse.obj"),
         }
     }
 }
