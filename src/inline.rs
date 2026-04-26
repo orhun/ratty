@@ -13,11 +13,6 @@ pub struct TerminalInlineObjectSprite;
 #[derive(Component)]
 pub struct TerminalInlineObjectPlane;
 
-#[derive(Resource)]
-pub struct TerminalInlineObjectMesh {
-    pub quad: Handle<Mesh>,
-}
-
 #[derive(Resource, Default)]
 pub struct TerminalInlineObjects {
     pending_bytes: Vec<u8>,

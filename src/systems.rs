@@ -3,16 +3,16 @@ use std::sync::mpsc::TryRecvError;
 use bevy::app::AppExit;
 use bevy::ecs::message::{MessageReader, MessageWriter};
 use bevy::image::ImageSampler;
-use bevy::mesh::VertexAttributeValues;
+use bevy::mesh::{Indices, VertexAttributeValues};
 use bevy::prelude::*;
+use bevy::render::render_resource::PrimitiveTopology;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use ratatui::style::Color as TuiColor;
 use bevy::window::{PrimaryWindow, WindowResized};
 
 use crate::config::{AppConfig, CURSOR_DEPTH};
 use crate::inline::{
-    TerminalInlineObjectMesh, TerminalInlineObjectPlane, TerminalInlineObjectSprite,
-    InlineObject, TerminalInlineObjects,
+    InlineObject, TerminalInlineObjectPlane, TerminalInlineObjectSprite, TerminalInlineObjects,
 };
 use crate::model::CursorModel;
 use crate::model::spawn_cursor_model;
@@ -94,14 +94,19 @@ pub fn sync_inline_objects(
     terminal: NonSend<TerminalSurface>,
     viewport: Res<TerminalViewport>,
     presentation: Res<TerminalPresentation>,
+    plane_warp: Res<TerminalPlaneWarp>,
+    time: Res<Time>,
     plane_query: Query<Entity, With<TerminalPlane>>,
     sprite_query: Query<Entity, With<TerminalInlineObjectSprite>>,
     plane_image_query: Query<Entity, With<TerminalInlineObjectPlane>>,
-    quad_mesh: Res<TerminalInlineObjectMesh>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
+    mut meshes: ResMut<Assets<Mesh>>,
 ) {
-    if !inline_objects.needs_sync(viewport.size, terminal.cols, terminal.rows) {
+    let force_warp_sync = presentation.mode == TerminalPresentationMode::Plane3d
+        && plane_warp.amount > 0.0
+        && !inline_objects.anchors.is_empty();
+    if !force_warp_sync && !inline_objects.needs_sync(viewport.size, terminal.cols, terminal.rows) {
         return;
     }
 
@@ -118,6 +123,7 @@ pub fn sync_inline_objects(
 
     let cell_width = viewport.size.x / terminal.cols.max(1) as f32;
     let cell_height = viewport.size.y / terminal.rows.max(1) as f32;
+    let elapsed_secs = time.elapsed_secs();
     let renderable_ids = inline_objects
         .anchors
         .iter()
@@ -190,10 +196,53 @@ pub fn sync_inline_objects(
         let local_x = (anchor.col as f32 + columns as f32 * 0.5) / terminal.cols.max(1) as f32
             - 0.5;
         let local_y = 0.5 - (anchor.row as f32 + rows as f32 * 0.5) / terminal.rows.max(1) as f32;
+        let x_segments = columns.clamp(2, 24);
+        let y_segments = rows.clamp(2, 24);
+        let vertex_count = ((x_segments + 1) * (y_segments + 1)) as usize;
+        let mut positions = Vec::with_capacity(vertex_count);
+        let mut normals = Vec::with_capacity(vertex_count);
+        let mut uvs = Vec::with_capacity(vertex_count);
+        let mut indices = Vec::with_capacity((x_segments * y_segments * 6) as usize);
+
+        for y in 0..=y_segments {
+            let v = y as f32 / y_segments as f32;
+            let py = local_y + (0.5 - v) * local_height;
+            for x in 0..=x_segments {
+                let u = x as f32 / x_segments as f32;
+                let px = local_x + (u - 0.5) * local_width;
+                positions.push([
+                    px,
+                    py,
+                    plane_surface_z(px, py, plane_warp.amount, elapsed_secs) + 1.5,
+                ]);
+                normals.push([0.0, 0.0, 1.0]);
+                uvs.push([u, v]);
+            }
+        }
+
+        for y in 0..y_segments {
+            for x in 0..x_segments {
+                let row = y * (x_segments + 1);
+                let next_row = (y + 1) * (x_segments + 1);
+                let i0 = row + x;
+                let i1 = i0 + 1;
+                let i2 = next_row + x;
+                let i3 = i2 + 1;
+                indices.extend_from_slice(&[i0, i2, i1, i1, i2, i3]);
+            }
+        }
+
+        let mesh = meshes.add(
+            Mesh::new(PrimitiveTopology::TriangleList, bevy::asset::RenderAssetUsages::default())
+                .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+                .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+                .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
+                .with_inserted_indices(Indices::U32(indices)),
+        );
         let plane_child = commands
             .spawn((
                 TerminalInlineObjectPlane,
-                Mesh3d(quad_mesh.quad.clone()),
+                Mesh3d(mesh),
                 MeshMaterial3d(materials.add(StandardMaterial {
                     base_color: Color::WHITE,
                     base_color_texture: Some(image_handle),
@@ -201,11 +250,7 @@ pub fn sync_inline_objects(
                     unlit: true,
                     ..default()
                 })),
-                Transform {
-                    translation: Vec3::new(local_x, local_y, 1.5),
-                    scale: Vec3::new(local_width, local_height, 1.0),
-                    ..default()
-                },
+                Transform::default(),
             ))
             .id();
         plane_children.push(plane_child);
@@ -446,16 +491,8 @@ fn cursor_pose(
                 .expect("terminal plane should exist while app is running");
             let plane_local_x = cursor_x / cols - 0.5;
             let plane_local_y = 0.5 - (cursor_row + 0.5) / rows;
-            let surface_z = if plane_warp_amount > 0.0 {
-                let pulse = plane_warp_amount * (0.96 + 0.04 * (elapsed_secs * 2.2).sin());
-                let radius =
-                    (plane_local_x * plane_local_x + plane_local_y * plane_local_y).sqrt();
-                let core = (-radius * 9.0).exp();
-                let ring = (-(radius - 0.22).powi(2) * 18.0).exp();
-                -(core * 360.0 + ring * 72.0) * pulse
-            } else {
-                0.0
-            };
+            let surface_z =
+                plane_surface_z(plane_local_x, plane_local_y, plane_warp_amount, elapsed_secs);
             let local_position = Vec3::new(
                 plane_local_x,
                 plane_local_y,
@@ -475,6 +512,18 @@ fn cursor_pose(
     };
 
     (translation, rotation, scale, visibility)
+}
+
+fn plane_surface_z(local_x: f32, local_y: f32, warp_amount: f32, elapsed_secs: f32) -> f32 {
+    if warp_amount <= 0.0 {
+        return 0.0;
+    }
+
+    let pulse = warp_amount * (0.96 + 0.04 * (elapsed_secs * 2.2).sin());
+    let radius = (local_x * local_x + local_y * local_y).sqrt();
+    let core = (-radius * 9.0).exp();
+    let ring = (-(radius - 0.22).powi(2) * 18.0).exp();
+    -(core * 360.0 + ring * 72.0) * pulse
 }
 
 pub fn animate_terminal_plane_warp(
