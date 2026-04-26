@@ -2,7 +2,7 @@
 
 Under construction ⚠️ Cheese ahead! 🧀
 
-<video src="https://github.com/user-attachments/assets/6e5e82fa-d9bd-4c30-a387-d86f0859280d">
+<video src="https://github.com/user-attachments/assets/6e5e82fa-d9bd-4c30-a387-d86f0859280d" alt="Ratty Demo"/>
 
 Features:
 
