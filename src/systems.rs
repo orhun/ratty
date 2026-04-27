@@ -433,6 +433,7 @@ pub fn apply_inline_objects(
 }
 
 pub fn sync_rgp_objects(
+    app_config: Res<AppConfig>,
     terminal: NonSend<TerminalSurface>,
     viewport: Res<TerminalViewport>,
     presentation: Res<TerminalPresentation>,
@@ -452,12 +453,26 @@ pub fn sync_rgp_objects(
             continue;
         };
         let layout = inline_layout(anchor, &terminal, &viewport, cell_width, cell_height);
-        let scale = layout.pixel_width.max(layout.pixel_height).max(1.0) * 0.9;
+        let base_scale = layout.pixel_width.max(layout.pixel_height).max(1.0) * 0.9;
+        let scale = base_scale * anchor.style.scale.max(0.001);
+        let (spin, tilt, bob) = if anchor.style.animate {
+            (
+                elapsed_secs * app_config.cursor.animation.spin_speed,
+                elapsed_secs * app_config.cursor.animation.spin_speed * 0.7,
+                (elapsed_secs * app_config.cursor.animation.bob_speed).sin()
+                    * cell_height
+                    * app_config.cursor.animation.bob_amplitude,
+            )
+        } else {
+            (0.0, 0.0, 0.0)
+        };
 
         match presentation.mode {
             TerminalPresentationMode::Flat2d => {
-                transform.translation = Vec3::new(layout.center_x, layout.center_y, CURSOR_DEPTH);
-                transform.rotation = Quat::IDENTITY;
+                transform.translation =
+                    Vec3::new(layout.center_x, layout.center_y + bob, CURSOR_DEPTH);
+                transform.rotation =
+                    Quat::from_rotation_y(spin) * Quat::from_rotation_x(tilt);
                 transform.scale = Vec3::splat(scale);
                 *visibility = Visibility::Visible;
             }
@@ -475,7 +490,8 @@ pub fn sync_rgp_objects(
                         layout.local_y,
                         local_z,
                     ));
-                transform.rotation = plane_transform.rotation;
+                transform.rotation = plane_transform.rotation
+                    * (Quat::from_rotation_y(spin) * Quat::from_rotation_x(tilt));
                 transform.scale = Vec3::splat(scale);
                 *visibility = Visibility::Visible;
             }

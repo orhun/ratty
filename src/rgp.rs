@@ -2,6 +2,12 @@ pub const RGP_APC_START: &[u8] = b"\x1b_ratty;g;";
 const ST: &[u8] = b"\x1b\\";
 const C1_ST: u8 = 0x9c;
 
+#[derive(Clone, Copy, Default)]
+pub struct RgpPlacementStyle {
+    pub animate: bool,
+    pub scale: f32,
+}
+
 pub fn consume_sequence(sequence: &[u8]) -> Option<RgpOperation> {
     if !sequence.starts_with(RGP_APC_START) {
         return None;
@@ -24,6 +30,8 @@ pub fn consume_sequence(sequence: &[u8]) -> Option<RgpOperation> {
     let mut col = None;
     let mut width = None;
     let mut height = None;
+    let mut animate = false;
+    let mut scale = None;
     for part in parts.filter(|part| !part.is_empty()) {
         let Some((key, value)) = part.split_once('=') else {
             continue;
@@ -36,6 +44,8 @@ pub fn consume_sequence(sequence: &[u8]) -> Option<RgpOperation> {
             "col" => col = value.parse().ok(),
             "w" => width = value.parse().ok(),
             "h" => height = value.parse().ok(),
+            "animate" => animate = value == "1",
+            "scale" => scale = value.parse().ok(),
             _ => {}
         }
     }
@@ -54,6 +64,10 @@ pub fn consume_sequence(sequence: &[u8]) -> Option<RgpOperation> {
                 col: col?,
                 columns: width?,
                 rows: height?,
+                style: RgpPlacementStyle {
+                    animate,
+                    scale: scale.unwrap_or(1.0),
+                },
             },
         }),
         "d" => Some(RgpOperation::Delete { object_id: id }),
@@ -67,6 +81,7 @@ pub struct RgpAnchor {
     pub col: u16,
     pub columns: u32,
     pub rows: u32,
+    pub style: RgpPlacementStyle,
 }
 
 pub enum RgpOperation {
@@ -87,7 +102,7 @@ pub enum RgpOperation {
 }
 
 pub fn support_reply() -> Vec<u8> {
-    b"\x1b_ratty;g;s;v=1;fmt=obj|glb;path=1\x1b\\".to_vec()
+    b"\x1b_ratty;g;s;v=1;fmt=obj|glb;path=1;anim=1\x1b\\".to_vec()
 }
 
 pub fn register_reply(object_id: u32, status: u8) -> Vec<u8> {

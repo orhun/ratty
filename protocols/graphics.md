@@ -64,7 +64,7 @@ ESC _ ratty;g;s ESC \
 Ratty replies:
 
 ```text
-ESC _ ratty;g;s;v=1;fmt=obj|glb;path=1 ESC \
+ESC _ ratty;g;s;v=1;fmt=obj|glb;path=1;anim=1 ESC \
 ```
 
 Fields:
@@ -72,6 +72,7 @@ Fields:
 - `v=1`: protocol version
 - `fmt=glb`: `obj` and `glb` are supported in v1
 - `path=1`: path-based object registration is supported
+- `anim=1`: `animate=1` placement is supported
 
 If no reply arrives, the terminal does not support the protocol.
 
@@ -116,7 +117,7 @@ Places a previously registered object into terminal cell space.
 Client sends:
 
 ```text
-ESC _ ratty;g;p;id=42;row=12;col=8;w=4;h=2 ESC \
+ESC _ ratty;g;p;id=42;row=12;col=8;w=4;h=2;animate=1;scale=1.0 ESC \
 ```
 
 Fields:
@@ -126,6 +127,8 @@ Fields:
 - `col`: anchor column
 - `w`: width in terminal cells
 - `h`: height in terminal cells
+- `animate`: optional, `1` enables default animation
+- `scale`: optional scale factor, defaults to `1.0`
 
 ### 4. Delete Object
 
@@ -154,7 +157,7 @@ ESC _ ratty;g;r;id=7;fmt=obj;path=CairoSpinyMouse.obj ESC \
 Place it in the terminal at row 5, column 10, spanning 3×2 cells:
 
 ```text
-ESC _ ratty;g;p;id=7;row=5;col=10;w=3;h=2 ESC \
+ESC _ ratty;g;p;id=7;row=5;col=10;w=3;h=2;animate=1;scale=1.0 ESC \
 ```
 
 Delete it:

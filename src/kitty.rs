@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use base64::Engine as _;
 
-use crate::inline::{InlineAnchor, InlineObject, KittyInlineObject, RasterObject};
+use crate::inline::{InlineAnchor, InlineObject, InlineStyle, KittyInlineObject, RasterObject};
 
 pub const KITTY_APC_START: &[u8] = b"\x1b_G";
 const ST: &[u8] = b"\x1b\\";
@@ -293,6 +293,7 @@ pub fn refresh_kitty_placeholder_anchors(
                 col: left,
                 columns,
                 rows,
+                style: InlineStyle::default(),
             };
             changed |= anchors
                 .insert(object_id, new_anchor)

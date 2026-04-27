@@ -5,7 +5,13 @@ use bevy::prelude::*;
 
 use crate::kitty::{KittyOperation, KittyParserState, refresh_kitty_placeholder_anchors};
 use crate::model::{ObjectSource, load_object_source};
-use crate::rgp::{consume_sequence as consume_rgp_sequence, register_reply, support_reply, RgpOperation};
+use crate::rgp::{
+    RgpOperation,
+    RgpPlacementStyle,
+    consume_sequence as consume_rgp_sequence,
+    register_reply,
+    support_reply,
+};
 const APC_START: &[u8] = b"\x1b_";
 const ST: &[u8] = b"\x1b\\";
 const C1_ST: u8 = 0x9c;
@@ -166,6 +172,7 @@ impl TerminalInlineObjects {
                     col: anchor.col,
                     columns: anchor.columns,
                     rows: anchor.rows,
+                    style: InlineStyle::default(),
                 });
                 self.objects
                     .insert(object_id, InlineObject::KittyImage(image.rasterize()));
@@ -176,6 +183,7 @@ impl TerminalInlineObjects {
                         col: anchor.col,
                         columns: anchor.columns,
                         rows: anchor.rows,
+                        style: InlineStyle::default(),
                     },
                 );
                 (true, None)
@@ -189,6 +197,7 @@ impl TerminalInlineObjects {
                             col: anchor.col,
                             columns: anchor.columns,
                             rows: anchor.rows,
+                            style: InlineStyle::default(),
                         },
                     );
                 }
@@ -256,6 +265,7 @@ impl TerminalInlineObjects {
                             col: anchor.col,
                             columns: anchor.columns,
                             rows: anchor.rows,
+                            style: anchor.style.into(),
                         },
                     );
                 }
@@ -361,4 +371,20 @@ pub struct InlineAnchor {
     pub col: u16,
     pub columns: u32,
     pub rows: u32,
+    pub style: InlineStyle,
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct InlineStyle {
+    pub animate: bool,
+    pub scale: f32,
+}
+
+impl From<RgpPlacementStyle> for InlineStyle {
+    fn from(value: RgpPlacementStyle) -> Self {
+        Self {
+            animate: value.animate,
+            scale: value.scale,
+        }
+    }
 }
