@@ -151,7 +151,10 @@ pub fn setup_scene(
     let back_image_handle = images.add(back_image);
     terminal.back_image_handle = Some(back_image_handle.clone());
 
-    let viewport_size = Vec2::new(app_config.window.width as f32, app_config.window.height as f32);
+    let viewport_size = Vec2::new(
+        app_config.window.width as f32,
+        app_config.window.height as f32,
+    );
     let viewport_center = Vec2::ZERO;
     commands.insert_resource(TerminalViewport {
         size: viewport_size,
@@ -206,7 +209,7 @@ pub fn setup_scene(
 
     commands.spawn((
         PointLight {
-            intensity: 90_000.0,
+            intensity: 150_000.0,
             range: 1600.0,
             shadows_enabled: true,
             ..default()
@@ -346,9 +349,12 @@ fn terminal_plane_mesh(x_segments: u32, y_segments: u32) -> Mesh {
         }
     }
 
-    Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
-        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
-        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
-        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
-        .with_inserted_indices(Indices::U32(indices))
+    Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
+    .with_inserted_indices(Indices::U32(indices))
 }

@@ -1,0 +1,11 @@
+[package]
+name = "ratatui-ratty"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ratatui-core = "0.1.0"
+
+[dev-dependencies]
+crossterm = "0.29"
+ratatui = "0.30"
