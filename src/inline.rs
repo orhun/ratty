@@ -9,7 +9,6 @@ use crate::rgp::{
     RgpOperation,
     RgpPlacementStyle,
     consume_sequence as consume_rgp_sequence,
-    register_reply,
     support_reply,
 };
 const APC_START: &[u8] = b"\x1b_";
@@ -224,7 +223,8 @@ impl TerminalInlineObjects {
                 path,
             } => {
                 if format != "obj" && format != "glb" {
-                    Some(register_reply(object_id, 1))
+                    warn!("unsupported RGP object format `{format}` for object {object_id}");
+                    None
                 } else {
                     match load_object_source(Path::new(&path)) {
                         Ok((source, source_data)) => {
@@ -247,22 +247,28 @@ impl TerminalInlineObjects {
                                 }),
                             );
                             self.dirty = true;
-                            Some(register_reply(object_id, 0))
+                            None
                         }
                         Err(error) => {
                             warn!("failed to load RGP object {object_id}: {error:#}");
-                            Some(register_reply(object_id, 4))
+                            None
                         }
                     }
                 }
             }
             RgpOperation::Place { object_id, anchor } => {
                 if self.objects.contains_key(&object_id) {
+                    let row = anchor
+                        .row
+                        .saturating_sub(anchor.rows.saturating_sub(1).div_ceil(2) as u16);
+                    let col = anchor
+                        .col
+                        .saturating_sub(anchor.columns.saturating_sub(1).div_ceil(2) as u16);
                     self.set_anchor(
                         object_id,
                         InlineAnchor {
-                            row: anchor.row,
-                            col: anchor.col,
+                            row,
+                            col,
                             columns: anchor.columns,
                             rows: anchor.rows,
                             style: anchor.style.into(),
@@ -349,7 +355,7 @@ pub struct KittyInlineObject {
 pub enum RgpInlineObject {
     Obj {
         meshes: Vec<Mesh>,
-        handles: Option<Vec<Handle<Mesh>>>,
+        handles: Option<(u32, Vec<Handle<Mesh>>)>,
     },
     Gltf {
         asset_path: String,
@@ -378,6 +384,9 @@ pub struct InlineAnchor {
 pub struct InlineStyle {
     pub animate: bool,
     pub scale: f32,
+    pub depth: f32,
+    pub color: Option<[u8; 3]>,
+    pub brightness: f32,
 }
 
 impl From<RgpPlacementStyle> for InlineStyle {
@@ -385,6 +394,9 @@ impl From<RgpPlacementStyle> for InlineStyle {
         Self {
             animate: value.animate,
             scale: value.scale,
+            depth: value.depth,
+            color: value.color,
+            brightness: value.brightness,
         }
     }
 }

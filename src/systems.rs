@@ -1,4 +1,5 @@
 use std::sync::mpsc::TryRecvError;
+use std::collections::HashMap;
 
 use bevy::app::AppExit;
 use bevy::ecs::message::{MessageReader, MessageWriter};
@@ -39,6 +40,9 @@ struct InlineLayout {
     pixel_width: f32,
     pixel_height: f32,
 }
+
+#[derive(Component)]
+pub struct BrightnessAdjusted;
 
 pub fn pump_pty_output(
     mut runtime: NonSendMut<TerminalRuntime>,
@@ -165,6 +169,7 @@ pub fn sync_inline_objects(
             .get(&object_id)
             .expect("inline object anchor should exist");
         let layout = inline_layout(anchor, &terminal, &viewport, cell_width, cell_height);
+        let style = anchor.style;
         match inline_objects
             .objects
             .get_mut(&object_id)
@@ -189,6 +194,7 @@ pub fn sync_inline_objects(
                     &mut commands,
                     object_id,
                     object,
+                    style,
                     &mut materials,
                     &mut meshes,
                     &asset_server,
@@ -345,30 +351,52 @@ fn spawn_rgp_object(
     commands: &mut Commands,
     object_id: u32,
     object: &mut crate::inline::RgpInlineObject,
+    style: crate::inline::InlineStyle,
     materials: &mut Assets<StandardMaterial>,
     meshes: &mut Assets<Mesh>,
     asset_server: &AssetServer,
 ) {
     match object {
         crate::inline::RgpInlineObject::Obj { meshes: source_meshes, handles } => {
-            let mesh_handles = if let Some(existing_handles) = handles.as_ref() {
-                existing_handles.clone()
+            let depth_key = (style.depth.max(0.0) * 100.0).round() as u32;
+            let mesh_handles = if let Some((existing_key, existing_handles)) = handles.as_ref() {
+                if *existing_key == depth_key {
+                    existing_handles.clone()
+                } else {
+                    let mesh_handles = source_meshes
+                        .iter()
+                        .cloned()
+                        .map(|mesh| meshes.add(extrude_mesh(mesh, style.depth)))
+                        .collect::<Vec<_>>();
+                    *handles = Some((depth_key, mesh_handles.clone()));
+                    mesh_handles
+                }
             } else {
                 let mesh_handles = source_meshes
                     .iter()
                     .cloned()
-                    .map(|mesh| meshes.add(mesh))
+                    .map(|mesh| meshes.add(extrude_mesh(mesh, style.depth)))
                     .collect::<Vec<_>>();
-                *handles = Some(mesh_handles.clone());
+                *handles = Some((depth_key, mesh_handles.clone()));
                 mesh_handles
             };
+            let use_lighting = style.depth > 0.0;
+            let [r, g, b] = match style.color {
+                Some([r, g, b]) => [r, g, b],
+                None => [255, 255, 255],
+            };
             let material = materials.add(StandardMaterial {
-                base_color: Color::WHITE,
-                emissive: LinearRgba::rgb(0.35, 0.35, 0.35),
+                base_color: Color::srgb_u8(r, g, b),
+                emissive: if use_lighting {
+                    LinearRgba::rgb(0.02, 0.02, 0.02)
+                } else {
+                    LinearRgba::rgb(0.0, 0.0, 0.0)
+                },
                 metallic: 0.0,
-                perceptual_roughness: 0.28,
-                reflectance: 0.6,
+                perceptual_roughness: if use_lighting { 0.88 } else { 1.0 },
+                reflectance: if use_lighting { 0.18 } else { 0.0 },
                 cull_mode: None,
+                unlit: !use_lighting,
                 ..default()
             });
             let root = commands
@@ -455,6 +483,11 @@ pub fn sync_rgp_objects(
         let layout = inline_layout(anchor, &terminal, &viewport, cell_width, cell_height);
         let base_scale = layout.pixel_width.max(layout.pixel_height).max(1.0) * 0.9;
         let scale = base_scale * anchor.style.scale.max(0.001);
+        let base_oblique = if anchor.style.depth > 0.0 {
+            Quat::from_rotation_y(0.75) * Quat::from_rotation_x(0.35)
+        } else {
+            Quat::IDENTITY
+        };
         let (spin, tilt, bob) = if anchor.style.animate {
             (
                 elapsed_secs * app_config.cursor.animation.spin_speed,
@@ -470,9 +503,15 @@ pub fn sync_rgp_objects(
         match presentation.mode {
             TerminalPresentationMode::Flat2d => {
                 transform.translation =
-                    Vec3::new(layout.center_x, layout.center_y + bob, CURSOR_DEPTH);
+                    Vec3::new(
+                        layout.center_x,
+                        layout.center_y + bob,
+                        CURSOR_DEPTH + anchor.style.depth * 4.0,
+                    );
                 transform.rotation =
-                    Quat::from_rotation_y(spin) * Quat::from_rotation_x(tilt);
+                    base_oblique
+                        * Quat::from_rotation_y(spin)
+                        * Quat::from_rotation_x(tilt);
                 transform.scale = Vec3::splat(scale);
                 *visibility = Visibility::Visible;
             }
@@ -483,7 +522,8 @@ pub fn sync_rgp_objects(
                 };
                 let local_z =
                     plane_surface_z(layout.local_x, layout.local_y, plane_warp.amount, elapsed_secs)
-                        + 8.0;
+                        + 8.0
+                        + anchor.style.depth * 1.5;
                 transform.translation =
                     plane_transform.transform_point(Vec3::new(
                         layout.local_x,
@@ -491,12 +531,176 @@ pub fn sync_rgp_objects(
                         local_z,
                     ));
                 transform.rotation = plane_transform.rotation
-                    * (Quat::from_rotation_y(spin) * Quat::from_rotation_x(tilt));
+                    * (base_oblique
+                        * Quat::from_rotation_y(spin)
+                        * Quat::from_rotation_x(tilt));
                 transform.scale = Vec3::splat(scale);
                 *visibility = Visibility::Visible;
             }
         }
     }
+}
+
+pub fn apply_instance_brightness(
+    app_config: Res<AppConfig>,
+    inline_objects: Res<TerminalInlineObjects>,
+    rgp_roots: Query<(Entity, &TerminalRgpObject)>,
+    cursor_roots: Query<Entity, With<CursorModel>>,
+    parent_query: Query<&ChildOf>,
+    mut material_query: Query<
+        (Entity, &mut MeshMaterial3d<StandardMaterial>, &ChildOf),
+        Without<BrightnessAdjusted>,
+    >,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut commands: Commands,
+) {
+    let rgp_brightness = rgp_roots
+        .iter()
+        .filter_map(|(entity, object)| {
+            let brightness = inline_objects
+                .anchors
+                .get(&object.object_id)
+                .map(|anchor| anchor.style.brightness)?;
+            Some((entity, brightness))
+        })
+        .collect::<HashMap<_, _>>();
+    let cursor_roots = cursor_roots.iter().collect::<Vec<_>>();
+
+    for (entity, mut material_handle, parent) in &mut material_query {
+        let mut current = parent.parent();
+        let mut brightness = None;
+
+        loop {
+            if let Some(value) = rgp_brightness.get(&current) {
+                brightness = Some(*value);
+                break;
+            }
+            if cursor_roots.contains(&current) {
+                brightness = Some(app_config.cursor.model.brightness);
+                break;
+            }
+            let Ok(next) = parent_query.get(current) else {
+                break;
+            };
+            current = next.parent();
+        }
+
+        let Some(brightness) = brightness else {
+            continue;
+        };
+
+        let Some(source_material) = materials.get(&material_handle.0).cloned() else {
+            continue;
+        };
+        let mut adjusted = source_material;
+        let linear = adjusted.base_color.to_linear();
+        adjusted.base_color = Color::linear_rgba(
+            linear.red * brightness,
+            linear.green * brightness,
+            linear.blue * brightness,
+            linear.alpha,
+        );
+        adjusted.emissive = LinearRgba::new(
+            adjusted.emissive.red * brightness,
+            adjusted.emissive.green * brightness,
+            adjusted.emissive.blue * brightness,
+            adjusted.emissive.alpha,
+        );
+        material_handle.0 = materials.add(adjusted);
+        commands.entity(entity).insert(BrightnessAdjusted);
+    }
+}
+
+fn extrude_mesh(mesh: Mesh, depth: f32) -> Mesh {
+    if depth <= 0.0 {
+        return mesh;
+    }
+
+    let Some(VertexAttributeValues::Float32x3(source_positions)) =
+        mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+    else {
+        return mesh;
+    };
+    let Some(indices) = mesh.indices() else {
+        return mesh;
+    };
+
+    let indices = match indices {
+        Indices::U16(values) => values.iter().map(|&value| value as u32).collect::<Vec<_>>(),
+        Indices::U32(values) => values.clone(),
+    };
+    if indices.len() < 3 {
+        return mesh;
+    }
+
+    let thickness = depth * 0.03;
+    let half = thickness * 0.5;
+    let source_len = source_positions.len() as u32;
+
+    let mut positions = Vec::<[f32; 3]>::with_capacity(source_positions.len() * 2);
+    let mut normals = Vec::<[f32; 3]>::with_capacity(source_positions.len() * 2);
+
+    for &[x, y, z] in source_positions {
+        positions.push([x, y, z + half]);
+        normals.push([0.0, 0.0, 1.0]);
+    }
+    for &[x, y, z] in source_positions {
+        positions.push([x, y, z - half]);
+        normals.push([0.0, 0.0, -1.0]);
+    }
+
+    let mut out_indices = Vec::<u32>::with_capacity(indices.len() * 4);
+    for triangle in indices.chunks_exact(3) {
+        out_indices.extend_from_slice(triangle);
+        out_indices.extend_from_slice(&[
+            triangle[2] + source_len,
+            triangle[1] + source_len,
+            triangle[0] + source_len,
+        ]);
+    }
+
+    let mut edge_counts = HashMap::<(u32, u32), u32>::new();
+    for triangle in indices.chunks_exact(3) {
+        for edge in [(triangle[0], triangle[1]), (triangle[1], triangle[2]), (triangle[2], triangle[0])] {
+            let key = if edge.0 < edge.1 { edge } else { (edge.1, edge.0) };
+            *edge_counts.entry(key).or_insert(0) += 1;
+        }
+    }
+
+    for ((a, b), count) in edge_counts {
+        if count != 1 {
+            continue;
+        }
+
+        let front_a = source_positions[a as usize];
+        let front_b = source_positions[b as usize];
+        let edge = Vec3::new(front_b[0] - front_a[0], front_b[1] - front_a[1], front_b[2] - front_a[2]);
+        let side_normal = Vec3::new(edge.y, -edge.x, 0.0).normalize_or_zero();
+
+        let base = positions.len() as u32;
+        positions.extend_from_slice(&[
+            [front_a[0], front_a[1], front_a[2] + half],
+            [front_b[0], front_b[1], front_b[2] + half],
+            [front_b[0], front_b[1], front_b[2] - half],
+            [front_a[0], front_a[1], front_a[2] - half],
+        ]);
+        for _ in 0..4 {
+            normals.push([side_normal.x, side_normal.y, side_normal.z]);
+        }
+        out_indices.extend_from_slice(&[
+            base,
+            base + 1,
+            base + 2,
+            base,
+            base + 2,
+            base + 3,
+        ]);
+    }
+
+    Mesh::new(PrimitiveTopology::TriangleList, Default::default())
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+        .with_inserted_indices(Indices::U32(out_indices))
 }
 
 pub fn redraw_soft_terminal(

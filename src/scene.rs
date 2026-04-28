@@ -209,12 +209,31 @@ pub fn setup_scene(
 
     commands.spawn((
         PointLight {
-            intensity: 150_000.0,
-            range: 1600.0,
+            intensity: 190_000.0,
+            range: 2200.0,
             shadows_enabled: true,
             ..default()
         },
-        Transform::from_xyz(0.0, 260.0, 900.0),
+        Transform::from_xyz(220.0, 320.0, 1000.0),
+    ));
+    commands.spawn((
+        DirectionalLight {
+            illuminance: 15_000.0,
+            shadows_enabled: false,
+            ..default()
+        },
+        Transform::from_rotation(
+            Quat::from_euler(EulerRot::ZYX, 0.0, -0.9, -0.45),
+        ),
+    ));
+    commands.spawn((
+        PointLight {
+            intensity: 45_000.0,
+            range: 1800.0,
+            shadows_enabled: false,
+            ..default()
+        },
+        Transform::from_xyz(-280.0, -120.0, 700.0),
     ));
     commands.insert_resource(TerminalPresentation {
         mode: TerminalPresentationMode::Flat2d,

@@ -1,10 +1,12 @@
 use std::io;
 
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode};
 use ratatui::{
     DefaultTerminal,
+    layout::Constraint,
     layout::Rect,
-    style::{Color, Style, Stylize},
+    style::{Color, Style},
+    text::{Line, Span},
     widgets::{Block, Paragraph, Widget},
 };
 use ratatui_ratty::{RattyGraphic, RattyGraphicSettings};
@@ -24,24 +26,32 @@ fn run(terminal: &mut DefaultTerminal) -> io::Result<()> {
             .scale(1.0),
     );
     graphic.register()?;
-    let mut area = Rect::new(6, 6, 24, 10);
+    let mut area = Rect::new(0, 0, 24, 10);
+    let mut centered = false;
 
     loop {
         terminal.draw(|frame| {
             let screen = frame.area();
-            let help = [
-                "q: quit",
-                "Arrows: move",
-                "Shift+Arrows: resize",
-                "+/-: scale",
-                "a: toggle animate",
-                "c: clear",
-                "r: reset",
-            ]
-            .join("  ");
-
-            Paragraph::new(help)
-                .block(Block::bordered().title("Ratty Graphics Protocl Demo".bold()))
+            Paragraph::new(Line::from(vec![
+                Span::styled("arrows", Style::default().fg(Color::Cyan)),
+                Span::raw(": move  "),
+                Span::styled("+/-", Style::default().fg(Color::Cyan)),
+                Span::raw(format!(": scale ({:.1})  ", graphic.settings().scale)),
+                Span::styled("[/]", Style::default().fg(Color::Cyan)),
+                Span::raw(format!(": brightness ({:.1})  ", graphic.settings().brightness)),
+                Span::styled("a", Style::default().fg(Color::Cyan)),
+                Span::raw(format!(": animate ({})  ", u8::from(graphic.settings().animate))),
+                Span::styled("c", Style::default().fg(Color::Cyan)),
+                Span::raw(": clear  "),
+                Span::styled("r", Style::default().fg(Color::Cyan)),
+                Span::raw(": reset  "),
+                Span::styled("q", Style::default().fg(Color::Cyan)),
+                Span::raw(": quit"),
+            ]))
+                .block(Block::bordered().title(Span::styled(
+                    "Ratty Graphics Protocol Demo",
+                    Style::default().fg(Color::Yellow),
+                )))
                 .render(Rect::new(0, 0, screen.width, 3), frame.buffer_mut());
 
             let viewport = Rect::new(0, 3, screen.width, screen.height.saturating_sub(3));
@@ -53,6 +63,13 @@ fn run(terminal: &mut DefaultTerminal) -> io::Result<()> {
                 viewport.width.saturating_sub(2),
                 viewport.height.saturating_sub(2),
             );
+            if !centered {
+                area = inner.centered(
+                    Constraint::Length(area.width.min(inner.width.max(1))),
+                    Constraint::Length(area.height.min(inner.height.max(1))),
+                );
+                centered = true;
+            }
             fill_background(inner, frame.buffer_mut());
             let bounded = clamp_rect(area, inner);
 
@@ -73,9 +90,11 @@ fn run(terminal: &mut DefaultTerminal) -> io::Result<()> {
                     graphic.settings_mut().animate = !animate;
                 }
                 (KeyCode::Char('r'), _) => {
-                    area = Rect::new(6, 6, 24, 10);
+                    area = Rect::new(0, 0, 24, 10);
                     graphic.settings_mut().animate = true;
                     graphic.settings_mut().scale = 1.0;
+                    graphic.settings_mut().brightness = 0.9;
+                    centered = false;
                 }
                 (KeyCode::Char('+'), _) | (KeyCode::Char('='), _) => {
                     graphic.settings_mut().scale += 0.1;
@@ -83,17 +102,12 @@ fn run(terminal: &mut DefaultTerminal) -> io::Result<()> {
                 (KeyCode::Char('-'), _) => {
                     graphic.settings_mut().scale = (graphic.settings().scale - 0.1).max(0.1);
                 }
-                (KeyCode::Left, KeyModifiers::SHIFT) => {
-                    area.width = area.width.saturating_sub(1).max(1);
+                (KeyCode::Char(']'), _) => {
+                    graphic.settings_mut().brightness += 0.1;
                 }
-                (KeyCode::Right, KeyModifiers::SHIFT) => {
-                    area.width = area.width.saturating_add(1);
-                }
-                (KeyCode::Up, KeyModifiers::SHIFT) => {
-                    area.height = area.height.saturating_sub(1).max(1);
-                }
-                (KeyCode::Down, KeyModifiers::SHIFT) => {
-                    area.height = area.height.saturating_add(1);
+                (KeyCode::Char('['), _) => {
+                    graphic.settings_mut().brightness =
+                        (graphic.settings().brightness - 0.1).max(0.1);
                 }
                 (KeyCode::Left, _) => {
                     area.x = area.x.saturating_sub(1);

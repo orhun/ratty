@@ -37,6 +37,9 @@ pub struct RattyGraphicSettings<'a> {
     pub format: ObjectFormat,
     pub animate: bool,
     pub scale: f32,
+    pub depth: f32,
+    pub color: Option<[u8; 3]>,
+    pub brightness: f32,
 }
 
 impl<'a> RattyGraphicSettings<'a> {
@@ -48,6 +51,9 @@ impl<'a> RattyGraphicSettings<'a> {
             path,
             animate: true,
             scale: 1.0,
+            depth: 0.0,
+            color: None,
+            brightness: 1.0,
         }
     }
 
@@ -68,6 +74,21 @@ impl<'a> RattyGraphicSettings<'a> {
 
     pub fn scale(mut self, scale: f32) -> Self {
         self.scale = scale;
+        self
+    }
+
+    pub fn depth(mut self, depth: f32) -> Self {
+        self.depth = depth;
+        self
+    }
+
+    pub fn color(mut self, color: [u8; 3]) -> Self {
+        self.color = Some(color);
+        self
+    }
+
+    pub fn brightness(mut self, brightness: f32) -> Self {
+        self.brightness = brightness;
         self
     }
 }
@@ -104,15 +125,23 @@ impl<'a> RattyGraphic<'a> {
     }
 
     pub fn place_sequence(&self, area: Rect) -> String {
+        let center_row = area.y.saturating_add(area.height.saturating_sub(1) / 2);
+        let center_col = area.x.saturating_add(area.width.saturating_sub(1) / 2);
         format!(
-            "\x1b_ratty;g;p;id={};row={};col={};w={};h={};animate={};scale={}\x1b\\",
+            "\x1b_ratty;g;p;id={};row={};col={};w={};h={};animate={};scale={};depth={};color={};brightness={}\x1b\\",
             self.settings.id,
-            area.y,
-            area.x,
+            center_row,
+            center_col,
             area.width.max(1),
             area.height.max(1),
             u8::from(self.settings.animate),
             self.settings.scale,
+            self.settings.depth,
+            self.settings
+                .color
+                .map(|[r, g, b]| format!("{r:02x}{g:02x}{b:02x}"))
+                .unwrap_or_else(|| "ffffff".to_string()),
+            self.settings.brightness,
         )
     }
 

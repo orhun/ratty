@@ -241,6 +241,7 @@ pub struct CursorModelConfig {
     pub scale_factor: f32,
     pub x_offset: f32,
     pub plane_offset: f32,
+    pub brightness: f32,
     pub path: PathBuf,
 }
 
@@ -251,6 +252,7 @@ impl Default for CursorModelConfig {
             scale_factor: 6.0,
             x_offset: 0.1,
             plane_offset: 18.0,
+            brightness: 1.0,
             path: PathBuf::from("CairoSpinyMouse.obj"),
         }
     }

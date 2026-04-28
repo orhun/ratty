@@ -28,6 +28,7 @@ cursor = "#7e9cd8"
 [cursor.model]
 path = "CairoSpinyMouse.obj"
 scale_factor = 6.0
+brightness = 0.5
 x_offset = 0.5
 plane_offset = 18.0
 visible = true

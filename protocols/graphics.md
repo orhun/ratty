@@ -64,7 +64,7 @@ ESC _ ratty;g;s ESC \
 Ratty replies:
 
 ```text
-ESC _ ratty;g;s;v=1;fmt=obj|glb;path=1;anim=1 ESC \
+ESC _ ratty;g;s;v=1;fmt=obj|glb;path=1;anim=1;depth=1;color=1;brightness=1 ESC \
 ```
 
 Fields:
@@ -73,6 +73,9 @@ Fields:
 - `fmt=glb`: `obj` and `glb` are supported in v1
 - `path=1`: path-based object registration is supported
 - `anim=1`: `animate=1` placement is supported
+- `depth=1`: `depth=<f32>` placement is supported
+- `color=1`: `color=<RRGGBB>` placement is supported
+- `brightness=1`: `brightness=<f32>` placement is supported
 
 If no reply arrives, the terminal does not support the protocol.
 
@@ -94,22 +97,6 @@ This registers object `42` using an object asset.
 - `fmt`: payload format, `obj` or `glb` in v1
 - `path`: object path known to Ratty
 
-#### Reply
-
-Ratty replies:
-
-```text
-ESC _ ratty;g;r;id=42;status=0 ESC \
-```
-
-Possible status values:
-
-- `0`: success
-- `1`: unsupported format
-- `2`: object not found
-- `3`: invalid request
-- `4`: load failure
-
 ### 3. Place Object
 
 Places a previously registered object into terminal cell space.
@@ -117,18 +104,21 @@ Places a previously registered object into terminal cell space.
 Client sends:
 
 ```text
-ESC _ ratty;g;p;id=42;row=12;col=8;w=4;h=2;animate=1;scale=1.0 ESC \
+ESC _ ratty;g;p;id=42;row=12;col=8;w=4;h=2;animate=1;scale=1.0;depth=2.5;color=ff8844;brightness=1.0 ESC \
 ```
 
 Fields:
 
 - `id`: registered object id
-- `row`: anchor row
-- `col`: anchor column
+- `row`: anchor row at the center of the placement
+- `col`: anchor column at the center of the placement
 - `w`: width in terminal cells
 - `h`: height in terminal cells
 - `animate`: optional, `1` enables default animation
 - `scale`: optional scale factor, defaults to `1.0`
+- `depth`: optional z-offset, defaults to `0.0`
+- `color`: optional RGB color as `RRGGBB`
+- `brightness`: optional brightness multiplier, defaults to `1.0`
 
 ### 4. Delete Object
 
@@ -157,7 +147,7 @@ ESC _ ratty;g;r;id=7;fmt=obj;path=CairoSpinyMouse.obj ESC \
 Place it in the terminal at row 5, column 10, spanning 3×2 cells:
 
 ```text
-ESC _ ratty;g;p;id=7;row=5;col=10;w=3;h=2;animate=1;scale=1.0 ESC \
+ESC _ ratty;g;p;id=7;row=5;col=10;w=3;h=2;animate=1;scale=1.0;depth=1.5;color=7fd0ff;brightness=1.0 ESC \
 ```
 
 Delete it:

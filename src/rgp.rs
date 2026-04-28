@@ -6,6 +6,9 @@ const C1_ST: u8 = 0x9c;
 pub struct RgpPlacementStyle {
     pub animate: bool,
     pub scale: f32,
+    pub depth: f32,
+    pub color: Option<[u8; 3]>,
+    pub brightness: f32,
 }
 
 pub fn consume_sequence(sequence: &[u8]) -> Option<RgpOperation> {
@@ -32,6 +35,9 @@ pub fn consume_sequence(sequence: &[u8]) -> Option<RgpOperation> {
     let mut height = None;
     let mut animate = false;
     let mut scale = None;
+    let mut depth = None;
+    let mut color = None;
+    let mut brightness = None;
     for part in parts.filter(|part| !part.is_empty()) {
         let Some((key, value)) = part.split_once('=') else {
             continue;
@@ -46,6 +52,9 @@ pub fn consume_sequence(sequence: &[u8]) -> Option<RgpOperation> {
             "h" => height = value.parse().ok(),
             "animate" => animate = value == "1",
             "scale" => scale = value.parse().ok(),
+            "depth" => depth = value.parse().ok(),
+            "color" | "tint" => color = parse_color(value),
+            "brightness" => brightness = value.parse().ok(),
             _ => {}
         }
     }
@@ -67,6 +76,9 @@ pub fn consume_sequence(sequence: &[u8]) -> Option<RgpOperation> {
                 style: RgpPlacementStyle {
                     animate,
                     scale: scale.unwrap_or(1.0),
+                    depth: depth.unwrap_or(0.0),
+                    color,
+                    brightness: brightness.unwrap_or(1.0),
                 },
             },
         }),
@@ -102,9 +114,18 @@ pub enum RgpOperation {
 }
 
 pub fn support_reply() -> Vec<u8> {
-    b"\x1b_ratty;g;s;v=1;fmt=obj|glb;path=1;anim=1\x1b\\".to_vec()
+    b"\x1b_ratty;g;s;v=1;fmt=obj|glb;path=1;anim=1;depth=1;color=1;brightness=1\x1b\\".to_vec()
 }
 
-pub fn register_reply(object_id: u32, status: u8) -> Vec<u8> {
-    format!("\x1b_ratty;g;r;id={object_id};status={status}\x1b\\").into_bytes()
+fn parse_color(value: &str) -> Option<[u8; 3]> {
+    let value = value.strip_prefix('#').unwrap_or(value);
+    if value.len() != 6 {
+        return None;
+    }
+
+    Some([
+        u8::from_str_radix(&value[0..2], 16).ok()?,
+        u8::from_str_radix(&value[2..4], 16).ok()?,
+        u8::from_str_radix(&value[4..6], 16).ok()?,
+    ])
 }
