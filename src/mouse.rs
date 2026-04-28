@@ -2,8 +2,10 @@ use bevy::ecs::message::MessageReader;
 use bevy::input::ButtonState;
 use bevy::input::mouse::{MouseButton, MouseButtonInput, MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
-use bevy::window::{CursorMoved, PrimaryWindow};
+use bevy::window::{CursorMoved, PrimaryWindow, Window};
+use vt100::{MouseProtocolEncoding, MouseProtocolMode};
 
+use crate::runtime::TerminalRuntime;
 use crate::scene::{
     TerminalPlaneView, TerminalPresentation, TerminalPresentationMode, TerminalViewport,
 };
@@ -15,6 +17,14 @@ pub struct TerminalSelection {
     end: Option<UVec2>,
     dragging: bool,
     cursor_position: Option<Vec2>,
+}
+
+#[derive(Default)]
+pub(crate) struct ForwardedMouseState {
+    left_pressed: bool,
+    middle_pressed: bool,
+    right_pressed: bool,
+    last_cell: Option<UVec2>,
 }
 
 #[derive(Copy, Clone)]
@@ -152,17 +162,23 @@ pub fn handle_mouse_input(
     mut cursor_events: MessageReader<CursorMoved>,
     mut button_events: MessageReader<MouseButtonInput>,
     mut wheel_events: MessageReader<MouseWheel>,
-    primary_window: Query<Entity, With<PrimaryWindow>>,
+    primary_window: Query<(Entity, &Window), With<PrimaryWindow>>,
+    runtime: NonSend<TerminalRuntime>,
     terminal: NonSend<TerminalSurface>,
     viewport: Res<TerminalViewport>,
     presentation: Res<TerminalPresentation>,
     mut plane_view: ResMut<TerminalPlaneView>,
     mut selection: ResMut<TerminalSelection>,
+    mut forwarded_mouse: Local<ForwardedMouseState>,
     mut redraw: ResMut<crate::terminal::TerminalRedrawState>,
 ) {
-    let Ok(primary_window) = primary_window.single() else {
+    let Ok((primary_window, window)) = primary_window.single() else {
         return;
     };
+    let mouse_mode = runtime.parser.screen().mouse_protocol_mode();
+    let mouse_encoding = runtime.parser.screen().mouse_protocol_encoding();
+    let forward_mouse = presentation.mode == TerminalPresentationMode::Flat2d
+        && mouse_mode != MouseProtocolMode::None;
 
     for event in cursor_events.read() {
         if event.window != primary_window {
@@ -188,6 +204,37 @@ pub fn handle_mouse_input(
                 }
                 plane_view.last_pan_cursor = Some(event.position);
             }
+        } else if forward_mouse {
+            if let Some(cell) = position_to_cell(event.position, &viewport, &terminal) {
+                if forwarded_mouse.last_cell != Some(cell)
+                    && match mouse_mode {
+                        MouseProtocolMode::ButtonMotion => {
+                            forwarded_mouse.left_pressed
+                                || forwarded_mouse.middle_pressed
+                                || forwarded_mouse.right_pressed
+                        }
+                        MouseProtocolMode::AnyMotion => true,
+                        _ => false,
+                    }
+                {
+                    let button_code = if forwarded_mouse.left_pressed {
+                        32
+                    } else if forwarded_mouse.middle_pressed {
+                        33
+                    } else if forwarded_mouse.right_pressed {
+                        34
+                    } else {
+                        35
+                    };
+                    runtime.write_input(&encode_mouse_event(
+                        cell,
+                        button_code,
+                        false,
+                        mouse_encoding,
+                    ));
+                    forwarded_mouse.last_cell = Some(cell);
+                }
+            }
         } else if selection.dragging
             && let Some(cell) = position_to_cell(event.position, &viewport, &terminal)
             && selection.update(cell)
@@ -203,7 +250,17 @@ pub fn handle_mouse_input(
 
         match (event.button, event.state) {
             (MouseButton::Left, ButtonState::Pressed) => {
-                if presentation.mode == TerminalPresentationMode::Plane3d {
+                if forward_mouse {
+                    forwarded_mouse.left_pressed = true;
+                    if let Some(cell) = window
+                        .cursor_position()
+                        .or(selection.cursor_position())
+                        .and_then(|position| position_to_cell(position, &viewport, &terminal))
+                    {
+                        runtime.write_input(&encode_mouse_event(cell, 0, false, mouse_encoding));
+                        forwarded_mouse.last_cell = Some(cell);
+                    }
+                } else if presentation.mode == TerminalPresentationMode::Plane3d {
                     plane_view.rotating = true;
                     plane_view.last_rotate_cursor = selection.cursor_position();
                 } else if let Some(pos) = selection.cursor_position()
@@ -214,11 +271,65 @@ pub fn handle_mouse_input(
                 }
             }
             (MouseButton::Left, ButtonState::Released) => {
-                if presentation.mode == TerminalPresentationMode::Plane3d {
+                if forward_mouse {
+                    forwarded_mouse.left_pressed = false;
+                    if let Some(cell) = window
+                        .cursor_position()
+                        .or(selection.cursor_position())
+                        .and_then(|position| position_to_cell(position, &viewport, &terminal))
+                    {
+                        runtime.write_input(&encode_mouse_event(cell, 0, true, mouse_encoding));
+                        forwarded_mouse.last_cell = Some(cell);
+                    }
+                } else if presentation.mode == TerminalPresentationMode::Plane3d {
                     plane_view.rotating = false;
                     plane_view.last_rotate_cursor = selection.cursor_position();
                 } else {
                     let _ = selection.end();
+                }
+            }
+            (MouseButton::Middle, ButtonState::Pressed) if forward_mouse => {
+                forwarded_mouse.middle_pressed = true;
+                if let Some(cell) = window
+                    .cursor_position()
+                    .or(selection.cursor_position())
+                    .and_then(|position| position_to_cell(position, &viewport, &terminal))
+                {
+                    runtime.write_input(&encode_mouse_event(cell, 1, false, mouse_encoding));
+                    forwarded_mouse.last_cell = Some(cell);
+                }
+            }
+            (MouseButton::Middle, ButtonState::Released) if forward_mouse => {
+                forwarded_mouse.middle_pressed = false;
+                if let Some(cell) = window
+                    .cursor_position()
+                    .or(selection.cursor_position())
+                    .and_then(|position| position_to_cell(position, &viewport, &terminal))
+                {
+                    runtime.write_input(&encode_mouse_event(cell, 1, true, mouse_encoding));
+                    forwarded_mouse.last_cell = Some(cell);
+                }
+            }
+            (MouseButton::Right, ButtonState::Pressed) if forward_mouse => {
+                forwarded_mouse.right_pressed = true;
+                if let Some(cell) = window
+                    .cursor_position()
+                    .or(selection.cursor_position())
+                    .and_then(|position| position_to_cell(position, &viewport, &terminal))
+                {
+                    runtime.write_input(&encode_mouse_event(cell, 2, false, mouse_encoding));
+                    forwarded_mouse.last_cell = Some(cell);
+                }
+            }
+            (MouseButton::Right, ButtonState::Released) if forward_mouse => {
+                forwarded_mouse.right_pressed = false;
+                if let Some(cell) = window
+                    .cursor_position()
+                    .or(selection.cursor_position())
+                    .and_then(|position| position_to_cell(position, &viewport, &terminal))
+                {
+                    runtime.write_input(&encode_mouse_event(cell, 2, true, mouse_encoding));
+                    forwarded_mouse.last_cell = Some(cell);
                 }
             }
             (MouseButton::Right, ButtonState::Pressed)
@@ -243,9 +354,44 @@ pub fn handle_mouse_input(
             MouseScrollUnit::Pixel => event.y * 0.001,
         };
 
-        if presentation.mode == TerminalPresentationMode::Plane3d && delta != 0.0 {
+        if forward_mouse && delta != 0.0 {
+            if let Some(cell) = window
+                .cursor_position()
+                .or(selection.cursor_position())
+                .and_then(|position| position_to_cell(position, &viewport, &terminal))
+            {
+                runtime.write_input(&encode_mouse_event(
+                    cell,
+                    if delta > 0.0 { 64 } else { 65 },
+                    false,
+                    mouse_encoding,
+                ));
+            }
+        } else if presentation.mode == TerminalPresentationMode::Plane3d && delta != 0.0 {
             plane_view.zoom = (plane_view.zoom - delta).clamp(0.1, 4.0);
             redraw.request();
+        }
+    }
+}
+
+fn encode_mouse_event(
+    cell: UVec2,
+    button_code: u16,
+    release: bool,
+    encoding: MouseProtocolEncoding,
+) -> Vec<u8> {
+    let col = cell.x + 1;
+    let row = cell.y + 1;
+    match encoding {
+        MouseProtocolEncoding::Sgr => {
+            let final_byte = if release { 'm' } else { 'M' };
+            format!("\x1b[<{button_code};{col};{row}{final_byte}").into_bytes()
+        }
+        MouseProtocolEncoding::Default | MouseProtocolEncoding::Utf8 => {
+            let code = if release { 3 } else { button_code }.saturating_add(32);
+            let x = (col + 32).min(u8::MAX as u32) as u8;
+            let y = (row + 32).min(u8::MAX as u32) as u8;
+            vec![0x1b, b'[', b'M', code as u8, x, y]
         }
     }
 }
