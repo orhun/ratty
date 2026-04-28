@@ -5,6 +5,11 @@ use std::{
 };
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use ratatui_image::{
+    Image as TerminalImage, Resize,
+    picker::{Picker, ProtocolType},
+    protocol::Protocol,
+};
 use ratatui::{
     DefaultTerminal,
     buffer::Buffer,
@@ -23,12 +28,12 @@ fn main() -> io::Result<()> {
 }
 
 fn run(terminal: &mut DefaultTerminal) -> io::Result<()> {
-    let mut document = TempleEditor::new();
+    let mut document = TempleEditor::new()?;
 
     loop {
         terminal.draw(|frame| {
             let area = frame.area();
-            let cursor = document.render(frame.buffer_mut(), area);
+            let cursor = document.render(frame, area);
             frame.set_cursor_position(cursor);
         })?;
 
@@ -52,10 +57,19 @@ struct TempleEditor<'a> {
     cursor_col: usize,
     scroll: u16,
     viewport_height: u16,
+    image: Protocol,
+    show_logo: bool,
 }
 
 impl<'a> TempleEditor<'a> {
-    fn new() -> Self {
+    fn new() -> io::Result<Self> {
+        let image_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/TempleOS.jpg");
+        let image = image::ImageReader::open(image_path)
+            .map_err(io::Error::other)?
+            .decode()
+            .map_err(io::Error::other)?;
+        let mut picker = Picker::halfblocks();
+        picker.set_protocol_type(ProtocolType::Kitty);
         let mut editor = Self {
             lines: initial_lines(),
             objects: Vec::new(),
@@ -66,12 +80,17 @@ impl<'a> TempleEditor<'a> {
             cursor_col: 0,
             scroll: 0,
             viewport_height: 1,
+            image: picker
+                .new_protocol(image, Rect::new(0, 0, 18, 12), Resize::Fit(None))
+                .map_err(io::Error::other)?,
+            show_logo: true,
         };
         editor.insert_startup_objects();
-        editor
+        Ok(editor)
     }
 
-    fn render(&mut self, buf: &mut Buffer, area: Rect) -> (u16, u16) {
+    fn render(&mut self, frame: &mut ratatui::Frame<'_>, area: Rect) -> (u16, u16) {
+        let buf = frame.buffer_mut();
         let header = Rect::new(area.x, area.y, area.width, 3);
         let body = Rect::new(
             area.x,
@@ -87,10 +106,12 @@ impl<'a> TempleEditor<'a> {
             Span::raw(": insert obj  "),
             Span::styled("enter", Style::default().fg(Color::Cyan)),
             Span::raw(": split  "),
-            Span::styled("backspace/delete", Style::default().fg(Color::Cyan)),
+            Span::styled("bckspc/del", Style::default().fg(Color::Cyan)),
             Span::raw(": edit  "),
             Span::styled("d", Style::default().fg(Color::Cyan)),
             Span::raw(": debug  "),
+            Span::styled("ctrl+l", Style::default().fg(Color::Cyan)),
+            Span::raw(": logo  "),
             Span::styled("q", Style::default().fg(Color::Cyan)),
             Span::raw(": quit"),
         ]))
@@ -100,7 +121,7 @@ impl<'a> TempleEditor<'a> {
         )))
         .render(header, buf);
 
-        let block = Block::bordered().title("TempleOS-Notes.HC");
+        let block = Block::bordered().border_style(Style::default().fg(Color::White)).title("TempleOS-Notes.HC");
         let inner = block.inner(body);
         block.render(body, buf);
 
@@ -116,6 +137,33 @@ impl<'a> TempleEditor<'a> {
         }
 
         self.sync_objects(buf, inner);
+        let image_width = inner.width.min(18);
+        let image_height = inner.height.min(12);
+        if self.show_logo && image_width > 0 && image_height > 0 {
+            let image_area = Rect::new(
+                inner.x + inner.width.saturating_sub(image_width + 1),
+                inner.y,
+                image_width,
+                image_height,
+            );
+            frame.render_widget(TerminalImage::new(&self.image), image_area);
+            let caption_y = image_area.y.saturating_add(image_area.height).saturating_sub(3);
+            if caption_y < inner.y.saturating_add(inner.height) {
+                frame.render_widget(
+                    Paragraph::new("TempleOS logo\nrendered by Kitty\nImage protocol").style(
+                        Style::default()
+                            .fg(Color::White)
+                            .italic(),
+                    ),
+                    Rect::new(
+                        image_area.x,
+                        caption_y,
+                        image_area.width,
+                        3,
+                    ),
+                );
+            }
+        }
 
         (
             inner.x.saturating_add(self.cursor_col as u16),
@@ -134,7 +182,9 @@ impl<'a> TempleEditor<'a> {
             match cell {
                 DocCell::Char(ch) => {
                     if let Some(screen_cell) = buf.cell_mut((x, y)) {
-                        screen_cell.set_char(*ch);
+                        screen_cell
+                            .set_char(*ch)
+                            .set_style(Style::default().fg(Color::White));
                     }
                 }
                 DocCell::Object(_) => {
@@ -221,6 +271,9 @@ impl<'a> TempleEditor<'a> {
             KeyCode::Delete => self.delete(),
             KeyCode::Char('d') if key.modifiers.is_empty() => {
                 self.debug_cells = !self.debug_cells;
+            }
+            KeyCode::Char('l') if key.modifiers == KeyModifiers::CONTROL => {
+                self.show_logo = !self.show_logo;
             }
             KeyCode::Char('v') if key.modifiers == KeyModifiers::CONTROL => {
                 self.insert_random_object()

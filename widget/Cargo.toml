@@ -8,4 +8,6 @@ ratatui-core = "0.1.0"
 
 [dev-dependencies]
 crossterm = "0.29"
+image = "0.25.10"
 ratatui = "0.30"
+ratatui-image = { version = "10.0.6", default-features = false, features = ["crossterm", "image-defaults"] }
