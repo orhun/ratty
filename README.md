@@ -9,12 +9,10 @@ Under construction ⚠️ Cheese ahead! 🧀
 Features:
 
 - Spinning rat cursor
-- 2D or 3D mode
-- Image support (via Kitty graphics protocol)
-
-Project goals:
-
-- Custom terminal protocol for rendering 3D assets
+- 2D and 3D terminal presentation modes
+- Inline 3D object support via [Ratty Graphics Protocol (RGP)](protocols/graphics.md)
+- Image support via Kitty Graphics Protocol
+- GPU-backed text rendering with Ratatui + Parley/Vello [\*](#rendering-pipeline)
 
 [**Sponsor the development of ratty!**](https://github.com/sponsors/orhun/)
 
