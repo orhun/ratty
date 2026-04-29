@@ -1,7 +1,8 @@
-use std::sync::mpsc::TryRecvError;
 use std::collections::HashMap;
+use std::sync::mpsc::TryRecvError;
 
 use bevy::app::AppExit;
+use bevy::ecs::system::SystemParam;
 use bevy::ecs::message::{MessageReader, MessageWriter};
 use bevy::gltf::GltfAssetLabel;
 use bevy::image::ImageSampler;
@@ -9,8 +10,8 @@ use bevy::mesh::{Indices, VertexAttributeValues};
 use bevy::prelude::*;
 use bevy::render::render_resource::PrimitiveTopology;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-use ratatui::style::Color as TuiColor;
 use bevy::window::{PrimaryWindow, WindowResized};
+use ratatui::style::Color as TuiColor;
 
 use crate::config::{AppConfig, CURSOR_DEPTH};
 use crate::inline::{
@@ -41,8 +42,147 @@ struct InlineLayout {
     pixel_height: f32,
 }
 
+struct KittyRenderContext<'a> {
+    mode: TerminalPresentationMode,
+    warp_amount: f32,
+    elapsed_secs: f32,
+    materials: &'a mut Assets<StandardMaterial>,
+    images: &'a mut Assets<Image>,
+    meshes: &'a mut Assets<Mesh>,
+    plane_children: &'a mut Vec<Entity>,
+}
+
+struct CursorPoseContext<'a, 'w, 's> {
+    runtime: &'a TerminalRuntime,
+    terminal: &'a TerminalSurface,
+    viewport: &'a TerminalViewport,
+    mode: TerminalPresentationMode,
+    plane_warp_amount: f32,
+    elapsed_secs: f32,
+    plane_query: &'a Query<'w, 's, &'static Transform, (With<TerminalPlane>, Without<CursorModel>)>,
+}
+
 #[derive(Component)]
 pub struct BrightnessAdjusted;
+
+type PlaneTransformQuery<'w, 's> =
+    Query<'w, 's, &'static Transform, (With<TerminalPlane>, Without<TerminalRgpObject>)>;
+type CursorTransformQuery<'w, 's> = Query<
+    'w,
+    's,
+    (&'static mut Transform, &'static mut Visibility),
+    (With<CursorModel>, Without<TerminalPlane>),
+>;
+type PlaneBackResizeQuery<'w, 's> = Query<
+    'w,
+    's,
+    &'static mut Transform,
+    (
+        With<TerminalPlaneBack>,
+        Without<TerminalPlane>,
+        Without<TerminalSprite>,
+    ),
+>;
+
+#[derive(SystemParam)]
+pub(crate) struct SyncInlineParams<'w, 's> {
+    commands: Commands<'w, 's>,
+    inline_objects: ResMut<'w, TerminalInlineObjects>,
+    terminal: NonSend<'w, TerminalSurface>,
+    viewport: Res<'w, TerminalViewport>,
+    presentation: Res<'w, TerminalPresentation>,
+    plane_warp: Res<'w, TerminalPlaneWarp>,
+    time: Res<'w, Time>,
+    plane_query: Query<'w, 's, (Entity, &'static Transform), With<TerminalPlane>>,
+    sprite_query: Query<'w, 's, Entity, With<TerminalInlineObjectSprite>>,
+    plane_image_query: Query<'w, 's, Entity, With<TerminalInlineObjectPlane>>,
+    rgp_query: Query<'w, 's, Entity, With<TerminalRgpObject>>,
+    asset_server: Res<'w, AssetServer>,
+    materials: ResMut<'w, Assets<StandardMaterial>>,
+    images: ResMut<'w, Assets<Image>>,
+    meshes: ResMut<'w, Assets<Mesh>>,
+}
+
+#[derive(SystemParam)]
+pub(crate) struct BrightnessParams<'w, 's> {
+    app_config: Res<'w, AppConfig>,
+    inline_objects: Res<'w, TerminalInlineObjects>,
+    rgp_roots: Query<'w, 's, (Entity, &'static TerminalRgpObject)>,
+    cursor_roots: Query<'w, 's, Entity, With<CursorModel>>,
+    parent_query: Query<'w, 's, &'static ChildOf>,
+    material_query: Query<
+        'w,
+        's,
+        (
+            Entity,
+            &'static mut MeshMaterial3d<StandardMaterial>,
+            &'static ChildOf,
+        ),
+        Without<BrightnessAdjusted>,
+    >,
+    materials: ResMut<'w, Assets<StandardMaterial>>,
+    commands: Commands<'w, 's>,
+}
+
+#[derive(SystemParam)]
+pub(crate) struct RedrawParams<'w, 's> {
+    app_config: Res<'w, AppConfig>,
+    runtime: NonSend<'w, TerminalRuntime>,
+    terminal: NonSendMut<'w, TerminalSurface>,
+    selection: Res<'w, TerminalSelection>,
+    presentation: Res<'w, TerminalPresentation>,
+    time: Res<'w, Time>,
+    redraw: ResMut<'w, TerminalRedrawState>,
+    images: ResMut<'w, Assets<Image>>,
+    model_load_state: ResMut<'w, ModelLoadState>,
+    commands: Commands<'w, 's>,
+    meshes: ResMut<'w, Assets<Mesh>>,
+    materials: ResMut<'w, Assets<StandardMaterial>>,
+    plane_materials: Query<'w, 's, &'static MeshMaterial3d<StandardMaterial>, With<TerminalPlane>>,
+    plane_back_materials:
+        Query<'w, 's, &'static MeshMaterial3d<StandardMaterial>, With<TerminalPlaneBack>>,
+    asset_server: Res<'w, AssetServer>,
+}
+
+#[derive(SystemParam)]
+pub(crate) struct ResizeParams<'w, 's> {
+    primary_window: Query<'w, 's, Entity, With<PrimaryWindow>>,
+    runtime: NonSendMut<'w, TerminalRuntime>,
+    terminal: NonSendMut<'w, TerminalSurface>,
+    redraw: ResMut<'w, TerminalRedrawState>,
+    viewport: ResMut<'w, TerminalViewport>,
+    sprite_query: Query<'w, 's, &'static mut Sprite, With<TerminalSprite>>,
+    plane_query:
+        Query<'w, 's, &'static mut Transform, (With<TerminalPlane>, Without<TerminalSprite>)>,
+    plane_back_query: PlaneBackResizeQuery<'w, 's>,
+    images: ResMut<'w, Assets<Image>>,
+}
+
+#[derive(SystemParam)]
+pub(crate) struct CursorSyncParams<'w, 's> {
+    app_config: Res<'w, AppConfig>,
+    runtime: NonSend<'w, TerminalRuntime>,
+    terminal: NonSend<'w, TerminalSurface>,
+    viewport: Res<'w, TerminalViewport>,
+    presentation: Res<'w, TerminalPresentation>,
+    plane_warp: Res<'w, TerminalPlaneWarp>,
+    time: Res<'w, Time>,
+    plane_query: Query<'w, 's, &'static Transform, (With<TerminalPlane>, Without<CursorModel>)>,
+    query: CursorTransformQuery<'w, 's>,
+}
+
+#[derive(SystemParam)]
+pub(crate) struct RgpSyncParams<'w, 's> {
+    app_config: Res<'w, AppConfig>,
+    terminal: NonSend<'w, TerminalSurface>,
+    viewport: Res<'w, TerminalViewport>,
+    presentation: Res<'w, TerminalPresentation>,
+    plane_warp: Res<'w, TerminalPlaneWarp>,
+    time: Res<'w, Time>,
+    plane_query: PlaneTransformQuery<'w, 's>,
+    inline_objects: Res<'w, TerminalInlineObjects>,
+    query: Query<'w, 's, (&'static TerminalRgpObject, &'static mut Transform, &'static mut Visibility)>,
+}
 
 pub fn pump_pty_output(
     mut runtime: NonSendMut<TerminalRuntime>,
@@ -56,13 +196,7 @@ pub fn pump_pty_output(
             Ok(chunk) => {
                 let prev_rows: Option<Vec<String>> = if !inline_objects.anchors.is_empty() {
                     let (_, cols) = runtime.parser.screen().size();
-                    Some(
-                        runtime
-                            .parser
-                            .screen()
-                            .rows(0, cols)
-                            .collect::<Vec<_>>(),
-                    )
+                    Some(runtime.parser.screen().rows(0, cols).collect::<Vec<_>>())
                 } else {
                     None
                 };
@@ -110,23 +244,24 @@ fn infer_upward_scroll(prev_rows: &[String], next_rows: &[String]) -> u16 {
     0
 }
 
-pub fn sync_inline_objects(
-    mut commands: Commands,
-    mut inline_objects: ResMut<TerminalInlineObjects>,
-    terminal: NonSend<TerminalSurface>,
-    viewport: Res<TerminalViewport>,
-    presentation: Res<TerminalPresentation>,
-    plane_warp: Res<TerminalPlaneWarp>,
-    time: Res<Time>,
-    plane_query: Query<(Entity, &Transform), With<TerminalPlane>>,
-    sprite_query: Query<Entity, With<TerminalInlineObjectSprite>>,
-    plane_image_query: Query<Entity, With<TerminalInlineObjectPlane>>,
-    rgp_query: Query<Entity, With<TerminalRgpObject>>,
-    asset_server: Res<AssetServer>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut images: ResMut<Assets<Image>>,
-    mut meshes: ResMut<Assets<Mesh>>,
-) {
+pub fn sync_inline_objects(mut params: SyncInlineParams) {
+    let SyncInlineParams {
+        commands,
+        inline_objects,
+        terminal,
+        viewport,
+        presentation,
+        plane_warp,
+        time,
+        plane_query,
+        sprite_query,
+        plane_image_query,
+        rgp_query,
+        asset_server,
+        materials,
+        images,
+        meshes,
+    } = &mut params;
     let force_warp_sync = presentation.mode == TerminalPresentationMode::Plane3d
         && plane_warp.amount > 0.0
         && !inline_objects.anchors.is_empty();
@@ -134,13 +269,13 @@ pub fn sync_inline_objects(
         return;
     }
 
-    for entity in &sprite_query {
+    for entity in sprite_query.iter() {
         commands.entity(entity).despawn();
     }
-    for entity in &plane_image_query {
+    for entity in plane_image_query.iter() {
         commands.entity(entity).despawn();
     }
-    for entity in &rgp_query {
+    for entity in rgp_query.iter() {
         commands.entity(entity).despawn();
     }
 
@@ -168,7 +303,7 @@ pub fn sync_inline_objects(
             .anchors
             .get(&object_id)
             .expect("inline object anchor should exist");
-        let layout = inline_layout(anchor, &terminal, &viewport, cell_width, cell_height);
+        let layout = inline_layout(anchor, terminal, viewport, cell_width, cell_height);
         let style = anchor.style;
         match inline_objects
             .objects
@@ -176,28 +311,31 @@ pub fn sync_inline_objects(
             .expect("inline object should exist")
         {
             InlineObject::KittyImage(object) => {
+                let mut ctx = KittyRenderContext {
+                    mode: presentation.mode,
+                    warp_amount: plane_warp.amount,
+                    elapsed_secs,
+                    materials,
+                    images,
+                    meshes,
+                    plane_children: &mut plane_children,
+                };
                 sync_kitty_inline_image(
-                    &mut commands,
+                    commands,
                     object,
                     &layout,
-                    presentation.mode,
-                    plane_warp.amount,
-                    elapsed_secs,
-                    &mut materials,
-                    &mut images,
-                    &mut meshes,
-                    &mut plane_children,
+                    &mut ctx,
                 );
             }
             InlineObject::RgpObject(object) => {
                 spawn_rgp_object(
-                    &mut commands,
+                    commands,
                     object_id,
                     object,
                     style,
-                    &mut materials,
-                    &mut meshes,
-                    &asset_server,
+                    materials,
+                    meshes,
+                    asset_server,
                 );
             }
         }
@@ -242,13 +380,7 @@ fn sync_kitty_inline_image(
     commands: &mut Commands,
     object: &mut crate::inline::KittyInlineObject,
     layout: &InlineLayout,
-    mode: TerminalPresentationMode,
-    warp_amount: f32,
-    elapsed_secs: f32,
-    materials: &mut Assets<StandardMaterial>,
-    images: &mut Assets<Image>,
-    meshes: &mut Assets<Mesh>,
-    plane_children: &mut Vec<Entity>,
+    ctx: &mut KittyRenderContext<'_>,
 ) {
     let image_handle = if let Some(handle) = object.raster.handle.as_ref() {
         handle.clone()
@@ -266,7 +398,7 @@ fn sync_kitty_inline_image(
         );
         image.sampler = ImageSampler::nearest();
         image.data = Some(object.raster.rgba.clone());
-        let handle = images.add(image);
+        let handle = ctx.images.add(image);
         object.raster.handle = Some(handle.clone());
         handle
     };
@@ -277,7 +409,7 @@ fn sync_kitty_inline_image(
         TerminalInlineObjectSprite,
         sprite,
         Transform::from_translation(Vec3::new(layout.center_x, layout.center_y, 5.0)),
-        match mode {
+        match ctx.mode {
             TerminalPresentationMode::Flat2d => Visibility::Visible,
             TerminalPresentationMode::Plane3d => Visibility::Hidden,
         },
@@ -300,7 +432,7 @@ fn sync_kitty_inline_image(
             positions.push([
                 px,
                 py,
-                plane_surface_z(px, py, warp_amount, elapsed_secs) + 1.5,
+                plane_surface_z(px, py, ctx.warp_amount, ctx.elapsed_secs) + 1.5,
             ]);
             normals.push([0.0, 0.0, 1.0]);
             uvs.push([u, v]);
@@ -319,7 +451,7 @@ fn sync_kitty_inline_image(
         }
     }
 
-    let mesh = meshes.add(
+    let mesh = ctx.meshes.add(
         Mesh::new(
             PrimitiveTopology::TriangleList,
             bevy::asset::RenderAssetUsages::default(),
@@ -329,12 +461,12 @@ fn sync_kitty_inline_image(
         .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
         .with_inserted_indices(Indices::U32(indices)),
     );
-    plane_children.push(
+    ctx.plane_children.push(
         commands
             .spawn((
                 TerminalInlineObjectPlane,
                 Mesh3d(mesh),
-                MeshMaterial3d(materials.add(StandardMaterial {
+                MeshMaterial3d(ctx.materials.add(StandardMaterial {
                     base_color: Color::WHITE,
                     base_color_texture: Some(image_handle),
                     alpha_mode: AlphaMode::Blend,
@@ -357,7 +489,10 @@ fn spawn_rgp_object(
     asset_server: &AssetServer,
 ) {
     match object {
-        crate::inline::RgpInlineObject::Obj { meshes: source_meshes, handles } => {
+        crate::inline::RgpInlineObject::Obj {
+            meshes: source_meshes,
+            handles,
+        } => {
             let depth_key = (style.depth.max(0.0) * 100.0).round() as u32;
             let mesh_handles = if let Some((existing_key, existing_handles)) = handles.as_ref() {
                 if *existing_key == depth_key {
@@ -424,7 +559,8 @@ fn spawn_rgp_object(
             let handle = if let Some(handle) = handle.as_ref() {
                 handle.clone()
             } else {
-                let scene = asset_server.load(GltfAssetLabel::Scene(0).from_asset(asset_path.clone()));
+                let scene =
+                    asset_server.load(GltfAssetLabel::Scene(0).from_asset(asset_path.clone()));
                 *handle = Some(scene.clone());
                 scene
             };
@@ -441,7 +577,13 @@ fn spawn_rgp_object(
 pub fn apply_inline_objects(
     presentation: Res<TerminalPresentation>,
     mut sprite_query: Query<&mut Visibility, With<TerminalInlineObjectSprite>>,
-    mut plane_query: Query<&mut Visibility, (With<TerminalInlineObjectPlane>, Without<TerminalInlineObjectSprite>)>,
+    mut plane_query: Query<
+        &mut Visibility,
+        (
+            With<TerminalInlineObjectPlane>,
+            Without<TerminalInlineObjectSprite>,
+        ),
+    >,
 ) {
     let sprite_visibility = match presentation.mode {
         TerminalPresentationMode::Flat2d => Visibility::Visible,
@@ -460,27 +602,28 @@ pub fn apply_inline_objects(
     }
 }
 
-pub fn sync_rgp_objects(
-    app_config: Res<AppConfig>,
-    terminal: NonSend<TerminalSurface>,
-    viewport: Res<TerminalViewport>,
-    presentation: Res<TerminalPresentation>,
-    plane_warp: Res<TerminalPlaneWarp>,
-    time: Res<Time>,
-    plane_query: Query<&Transform, (With<TerminalPlane>, Without<TerminalRgpObject>)>,
-    inline_objects: Res<TerminalInlineObjects>,
-    mut query: Query<(&TerminalRgpObject, &mut Transform, &mut Visibility)>,
-) {
+pub fn sync_rgp_objects(mut params: RgpSyncParams) {
+    let RgpSyncParams {
+        app_config,
+        terminal,
+        viewport,
+        presentation,
+        plane_warp,
+        time,
+        plane_query,
+        inline_objects,
+        query,
+    } = &mut params;
     let cell_width = viewport.size.x / terminal.cols.max(1) as f32;
     let cell_height = viewport.size.y / terminal.rows.max(1) as f32;
     let elapsed_secs = time.elapsed_secs();
 
-    for (object, mut transform, mut visibility) in &mut query {
+    for (object, mut transform, mut visibility) in query.iter_mut() {
         let Some(anchor) = inline_objects.anchors.get(&object.object_id) else {
             *visibility = Visibility::Hidden;
             continue;
         };
-        let layout = inline_layout(anchor, &terminal, &viewport, cell_width, cell_height);
+        let layout = inline_layout(anchor, terminal, viewport, cell_width, cell_height);
         let base_scale = layout.pixel_width.max(layout.pixel_height).max(1.0) * 0.9;
         let scale = base_scale * anchor.style.scale.max(0.001);
         let base_oblique = if anchor.style.depth > 0.0 {
@@ -502,16 +645,13 @@ pub fn sync_rgp_objects(
 
         match presentation.mode {
             TerminalPresentationMode::Flat2d => {
-                transform.translation =
-                    Vec3::new(
-                        layout.center_x,
-                        layout.center_y + bob,
-                        CURSOR_DEPTH + anchor.style.depth * 4.0,
-                    );
+                transform.translation = Vec3::new(
+                    layout.center_x,
+                    layout.center_y + bob,
+                    CURSOR_DEPTH + anchor.style.depth * 4.0,
+                );
                 transform.rotation =
-                    base_oblique
-                        * Quat::from_rotation_y(spin)
-                        * Quat::from_rotation_x(tilt);
+                    base_oblique * Quat::from_rotation_y(spin) * Quat::from_rotation_x(tilt);
                 transform.scale = Vec3::splat(scale);
                 *visibility = Visibility::Visible;
             }
@@ -520,20 +660,20 @@ pub fn sync_rgp_objects(
                     *visibility = Visibility::Hidden;
                     continue;
                 };
-                let local_z =
-                    plane_surface_z(layout.local_x, layout.local_y, plane_warp.amount, elapsed_secs)
-                        + 8.0
-                        + anchor.style.depth * 1.5;
-                transform.translation =
-                    plane_transform.transform_point(Vec3::new(
-                        layout.local_x,
-                        layout.local_y,
-                        local_z,
-                    ));
+                let local_z = plane_surface_z(
+                    layout.local_x,
+                    layout.local_y,
+                    plane_warp.amount,
+                    elapsed_secs,
+                ) + 8.0
+                    + anchor.style.depth * 1.5;
+                transform.translation = plane_transform.transform_point(Vec3::new(
+                    layout.local_x,
+                    layout.local_y,
+                    local_z,
+                ));
                 transform.rotation = plane_transform.rotation
-                    * (base_oblique
-                        * Quat::from_rotation_y(spin)
-                        * Quat::from_rotation_x(tilt));
+                    * (base_oblique * Quat::from_rotation_y(spin) * Quat::from_rotation_x(tilt));
                 transform.scale = Vec3::splat(scale);
                 *visibility = Visibility::Visible;
             }
@@ -541,19 +681,17 @@ pub fn sync_rgp_objects(
     }
 }
 
-pub fn apply_instance_brightness(
-    app_config: Res<AppConfig>,
-    inline_objects: Res<TerminalInlineObjects>,
-    rgp_roots: Query<(Entity, &TerminalRgpObject)>,
-    cursor_roots: Query<Entity, With<CursorModel>>,
-    parent_query: Query<&ChildOf>,
-    mut material_query: Query<
-        (Entity, &mut MeshMaterial3d<StandardMaterial>, &ChildOf),
-        Without<BrightnessAdjusted>,
-    >,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut commands: Commands,
-) {
+pub fn apply_instance_brightness(mut params: BrightnessParams) {
+    let BrightnessParams {
+        app_config,
+        inline_objects,
+        rgp_roots,
+        cursor_roots,
+        parent_query,
+        material_query,
+        materials,
+        commands,
+    } = &mut params;
     let rgp_brightness = rgp_roots
         .iter()
         .filter_map(|(entity, object)| {
@@ -566,7 +704,7 @@ pub fn apply_instance_brightness(
         .collect::<HashMap<_, _>>();
     let cursor_roots = cursor_roots.iter().collect::<Vec<_>>();
 
-    for (entity, mut material_handle, parent) in &mut material_query {
+    for (entity, mut material_handle, parent) in material_query.iter_mut() {
         let mut current = parent.parent();
         let mut brightness = None;
 
@@ -661,8 +799,16 @@ fn extrude_mesh(mesh: Mesh, depth: f32) -> Mesh {
 
     let mut edge_counts = HashMap::<(u32, u32), u32>::new();
     for triangle in indices.chunks_exact(3) {
-        for edge in [(triangle[0], triangle[1]), (triangle[1], triangle[2]), (triangle[2], triangle[0])] {
-            let key = if edge.0 < edge.1 { edge } else { (edge.1, edge.0) };
+        for edge in [
+            (triangle[0], triangle[1]),
+            (triangle[1], triangle[2]),
+            (triangle[2], triangle[0]),
+        ] {
+            let key = if edge.0 < edge.1 {
+                edge
+            } else {
+                (edge.1, edge.0)
+            };
             *edge_counts.entry(key).or_insert(0) += 1;
         }
     }
@@ -674,7 +820,11 @@ fn extrude_mesh(mesh: Mesh, depth: f32) -> Mesh {
 
         let front_a = source_positions[a as usize];
         let front_b = source_positions[b as usize];
-        let edge = Vec3::new(front_b[0] - front_a[0], front_b[1] - front_a[1], front_b[2] - front_a[2]);
+        let edge = Vec3::new(
+            front_b[0] - front_a[0],
+            front_b[1] - front_a[1],
+            front_b[2] - front_a[2],
+        );
         let side_normal = Vec3::new(edge.y, -edge.x, 0.0).normalize_or_zero();
 
         let base = positions.len() as u32;
@@ -687,14 +837,7 @@ fn extrude_mesh(mesh: Mesh, depth: f32) -> Mesh {
         for _ in 0..4 {
             normals.push([side_normal.x, side_normal.y, side_normal.z]);
         }
-        out_indices.extend_from_slice(&[
-            base,
-            base + 1,
-            base + 2,
-            base,
-            base + 2,
-            base + 3,
-        ]);
+        out_indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
 
     Mesh::new(PrimitiveTopology::TriangleList, Default::default())
@@ -703,23 +846,24 @@ fn extrude_mesh(mesh: Mesh, depth: f32) -> Mesh {
         .with_inserted_indices(Indices::U32(out_indices))
 }
 
-pub fn redraw_soft_terminal(
-    app_config: Res<AppConfig>,
-    runtime: NonSend<TerminalRuntime>,
-    mut terminal: NonSendMut<TerminalSurface>,
-    selection: Res<TerminalSelection>,
-    presentation: Res<TerminalPresentation>,
-    time: Res<Time>,
-    mut redraw: ResMut<TerminalRedrawState>,
-    mut images: ResMut<Assets<Image>>,
-    mut model_load_state: ResMut<ModelLoadState>,
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    plane_materials: Query<&MeshMaterial3d<StandardMaterial>, With<TerminalPlane>>,
-    plane_back_materials: Query<&MeshMaterial3d<StandardMaterial>, With<TerminalPlaneBack>>,
-    asset_server: Res<AssetServer>,
-) {
+pub fn redraw_soft_terminal(mut params: RedrawParams) {
+    let RedrawParams {
+        app_config,
+        runtime,
+        terminal,
+        selection,
+        presentation,
+        time,
+        redraw,
+        images,
+        model_load_state,
+        commands,
+        meshes,
+        materials,
+        plane_materials,
+        plane_back_materials,
+        asset_server,
+    } = &mut params;
     let needs_redraw = redraw.take();
     let force_live_redraw = presentation.mode == TerminalPresentationMode::Plane3d;
     if !needs_redraw && !force_live_redraw && model_load_state.loaded {
@@ -741,7 +885,7 @@ pub fn redraw_soft_terminal(
         frame.render_widget(
             TerminalWidget {
                 screen,
-                selection: &selection,
+                selection,
                 theme_fg,
                 theme_bg,
                 font_style: app_config.font.style,
@@ -755,18 +899,14 @@ pub fn redraw_soft_terminal(
         }
     });
 
-    let _ = terminal.sync_image(&mut images, time.elapsed_secs());
-    sync_terminal_debug_image(&terminal, &mut images, screen);
+    let _ = terminal.sync_image(images, time.elapsed_secs());
+    sync_terminal_debug_image(terminal, images, screen);
 
-    sync_plane_texture(
-        terminal.image_handle.as_ref(),
-        &plane_materials,
-        &mut materials,
-    );
+    sync_plane_texture(terminal.image_handle.as_ref(), plane_materials, materials);
     sync_plane_texture(
         terminal.back_image_handle.as_ref(),
-        &plane_back_materials,
-        &mut materials,
+        plane_back_materials,
+        materials,
     );
 
     if !model_load_state.first_frame_uploaded {
@@ -777,11 +917,11 @@ pub fn redraw_soft_terminal(
 
     if !model_load_state.loaded {
         spawn_cursor_model(
-            &mut commands,
-            &mut meshes,
-            &mut materials,
-            &asset_server,
-            &app_config,
+            commands,
+            meshes,
+            materials,
+            asset_server,
+            app_config,
         );
         model_load_state.loaded = true;
     }
@@ -789,23 +929,19 @@ pub fn redraw_soft_terminal(
 
 pub fn handle_window_resize(
     mut resize_events: MessageReader<WindowResized>,
-    primary_window: Query<Entity, With<PrimaryWindow>>,
-    mut runtime: NonSendMut<TerminalRuntime>,
-    mut terminal: NonSendMut<TerminalSurface>,
-    mut redraw: ResMut<TerminalRedrawState>,
-    mut viewport: ResMut<TerminalViewport>,
-    mut sprite_query: Query<&mut Sprite, With<TerminalSprite>>,
-    mut plane_query: Query<&mut Transform, (With<TerminalPlane>, Without<TerminalSprite>)>,
-    mut plane_back_query: Query<
-        &mut Transform,
-        (
-            With<TerminalPlaneBack>,
-            Without<TerminalPlane>,
-            Without<TerminalSprite>,
-        ),
-    >,
-    mut images: ResMut<Assets<Image>>,
+    mut params: ResizeParams,
 ) {
+    let ResizeParams {
+        primary_window,
+        runtime,
+        terminal,
+        redraw,
+        viewport,
+        sprite_query,
+        plane_query,
+        plane_back_query,
+        images,
+    } = &mut params;
     let Ok(primary_window) = primary_window.single() else {
         return;
     };
@@ -831,47 +967,45 @@ pub fn handle_window_resize(
 
     runtime.resize(cols, rows);
     terminal.resize(cols, rows);
-    let _ = terminal.sync_image(&mut images, 0.0);
+    let _ = terminal.sync_image(images, 0.0);
     redraw.request();
 
-    for mut sprite in &mut sprite_query {
+    for mut sprite in sprite_query.iter_mut() {
         sprite.custom_size = Some(viewport_size);
     }
 
-    for mut transform in &mut plane_query {
+    for mut transform in plane_query.iter_mut() {
         transform.scale = viewport_size.extend(1.0);
     }
 
-    for mut transform in &mut plane_back_query {
+    for mut transform in plane_back_query.iter_mut() {
         transform.scale = viewport_size.extend(1.0);
     }
 }
 
-pub fn sync_asset_to_terminal_cursor(
-    app_config: Res<AppConfig>,
-    runtime: NonSend<TerminalRuntime>,
-    terminal: NonSend<TerminalSurface>,
-    viewport: Res<TerminalViewport>,
-    presentation: Res<TerminalPresentation>,
-    plane_warp: Res<TerminalPlaneWarp>,
-    time: Res<Time>,
-    plane_query: Query<&Transform, (With<TerminalPlane>, Without<CursorModel>)>,
-    mut query: Query<
-        (&mut Transform, &mut Visibility),
-        (With<CursorModel>, Without<TerminalPlane>),
-    >,
-) {
-    let (translation, rotation, scale, cursor_visibility) = cursor_pose(
-        &app_config,
-        &runtime,
-        &terminal,
-        &viewport,
-        presentation.mode,
-        plane_warp.amount,
-        time.elapsed_secs(),
-        &plane_query,
-    );
-    for (mut transform, mut visibility) in &mut query {
+pub fn sync_asset_to_terminal_cursor(mut params: CursorSyncParams) {
+    let CursorSyncParams {
+        app_config,
+        runtime,
+        terminal,
+        viewport,
+        presentation,
+        plane_warp,
+        time,
+        plane_query,
+        query,
+    } = &mut params;
+    let pose_ctx = CursorPoseContext {
+        runtime,
+        terminal,
+        viewport,
+        mode: presentation.mode,
+        plane_warp_amount: plane_warp.amount,
+        elapsed_secs: time.elapsed_secs(),
+        plane_query,
+    };
+    let (translation, rotation, scale, cursor_visibility) = cursor_pose(app_config, &pose_ctx);
+    for (mut transform, mut visibility) in query.iter_mut() {
         transform.translation = translation;
         transform.rotation = rotation;
         transform.scale = Vec3::splat(scale.max(0.001));
@@ -879,36 +1013,27 @@ pub fn sync_asset_to_terminal_cursor(
     }
 }
 
-fn cursor_pose(
-    app_config: &AppConfig,
-    runtime: &TerminalRuntime,
-    terminal: &TerminalSurface,
-    viewport: &TerminalViewport,
-    mode: TerminalPresentationMode,
-    plane_warp_amount: f32,
-    elapsed_secs: f32,
-    plane_query: &Query<&Transform, (With<TerminalPlane>, Without<CursorModel>)>,
-) -> (Vec3, Quat, f32, Visibility) {
-    let cols = terminal.cols.max(1) as f32;
-    let rows = terminal.rows.max(1) as f32;
-    let cell_width = viewport.size.x / cols;
-    let cell_height = viewport.size.y / rows;
+fn cursor_pose(app_config: &AppConfig, ctx: &CursorPoseContext<'_, '_, '_>) -> (Vec3, Quat, f32, Visibility) {
+    let cols = ctx.terminal.cols.max(1) as f32;
+    let rows = ctx.terminal.rows.max(1) as f32;
+    let cell_width = ctx.viewport.size.x / cols;
+    let cell_height = ctx.viewport.size.y / rows;
     let scale = cell_width.min(cell_height) * app_config.cursor.model.scale_factor;
 
-    let screen = runtime.parser.screen();
+    let screen = ctx.runtime.parser.screen();
     let (cursor_row, cursor_col) = screen.cursor_position();
-    let cursor_col = cursor_col.min(terminal.cols.saturating_sub(1)) as f32;
-    let cursor_row = cursor_row.min(terminal.rows.saturating_sub(1)) as f32;
+    let cursor_col = cursor_col.min(ctx.terminal.cols.saturating_sub(1)) as f32;
+    let cursor_row = cursor_row.min(ctx.terminal.rows.saturating_sub(1)) as f32;
 
     let cursor_x = cursor_col + 0.5 + app_config.cursor.model.x_offset;
-    let local_x = viewport.center.x - viewport.size.x * 0.5 + cursor_x * cell_width;
-    let local_y = viewport.center.y + viewport.size.y * 0.5 - (cursor_row + 0.5) * cell_height;
-    let spin = elapsed_secs * app_config.cursor.animation.spin_speed;
-    let bob = (elapsed_secs * app_config.cursor.animation.bob_speed).sin()
+    let local_x = ctx.viewport.center.x - ctx.viewport.size.x * 0.5 + cursor_x * cell_width;
+    let local_y = ctx.viewport.center.y + ctx.viewport.size.y * 0.5 - (cursor_row + 0.5) * cell_height;
+    let spin = ctx.elapsed_secs * app_config.cursor.animation.spin_speed;
+    let bob = (ctx.elapsed_secs * app_config.cursor.animation.bob_speed).sin()
         * cell_height
         * app_config.cursor.animation.bob_amplitude;
 
-    let (translation, rotation, visibility) = match mode {
+    let (translation, rotation, visibility) = match ctx.mode {
         TerminalPresentationMode::Flat2d => (
             Vec3::new(local_x, local_y + bob, CURSOR_DEPTH),
             Quat::from_rotation_y(spin) * Quat::from_rotation_x(-0.25),
@@ -919,13 +1044,18 @@ fn cursor_pose(
             },
         ),
         TerminalPresentationMode::Plane3d => {
-            let plane_transform = plane_query
+            let plane_transform = ctx
+                .plane_query
                 .single()
                 .expect("terminal plane should exist while app is running");
             let plane_local_x = cursor_x / cols - 0.5;
             let plane_local_y = 0.5 - (cursor_row + 0.5) / rows;
-            let surface_z =
-                plane_surface_z(plane_local_x, plane_local_y, plane_warp_amount, elapsed_secs);
+            let surface_z = plane_surface_z(
+                plane_local_x,
+                plane_local_y,
+                ctx.plane_warp_amount,
+                ctx.elapsed_secs,
+            );
             let local_position = Vec3::new(
                 plane_local_x,
                 plane_local_y,

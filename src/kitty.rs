@@ -34,7 +34,7 @@ impl KittyParserState {
         let content = &sequence[KITTY_APC_START.len()..content_end];
         let separator = content.iter().position(|byte| *byte == b';')?;
         let header = std::str::from_utf8(&content[..separator]).ok()?;
-    let payload = &content[separator + 1..];
+        let payload = &content[separator + 1..];
 
         let mut params = HashMap::new();
         for part in header.split(',').filter(|part| !part.is_empty()) {
@@ -78,7 +78,9 @@ impl KittyParserState {
                 }
 
                 let transfer = self.transfer.as_mut()?;
-                let chunk = base64::engine::general_purpose::STANDARD.decode(payload).ok()?;
+                let chunk = base64::engine::general_purpose::STANDARD
+                    .decode(payload)
+                    .ok()?;
                 transfer.bytes.extend_from_slice(&chunk);
 
                 if params.get("m").copied().unwrap_or("0") == "1" {
@@ -109,12 +111,20 @@ impl KittyParserState {
                 anchor: KittyAnchor {
                     row: cursor_position.0,
                     col: cursor_position.1,
-                    columns: params.get("c").and_then(|value| value.parse().ok()).unwrap_or(1),
-                    rows: params.get("r").and_then(|value| value.parse().ok()).unwrap_or(1),
+                    columns: params
+                        .get("c")
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(1),
+                    rows: params
+                        .get("r")
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(1),
                 },
             }),
             "d" => Some(match params.get("i").and_then(|value| value.parse().ok()) {
-                Some(object_id) => KittyOperation::Delete { object_id: Some(object_id) },
+                Some(object_id) => KittyOperation::Delete {
+                    object_id: Some(object_id),
+                },
                 None => KittyOperation::Delete { object_id: None },
             }),
             _ => Some(KittyOperation::Ignored),
@@ -190,38 +200,36 @@ struct KittyTransfer {
 impl KittyTransfer {
     fn finalize(&self) -> Option<KittyImage> {
         let (width, height, rgba) = match self.format {
-        100 => {
-            let image = image::load_from_memory_with_format(
-                &self.bytes,
-                image::ImageFormat::Png,
-            )
-            .ok()?;
-            let rgba = image.to_rgba8();
-            (rgba.width(), rgba.height(), rgba.into_raw())
-        }
-        24 => {
-            let width = self.width?;
-            let height = self.height?;
-            let expected = width as usize * height as usize * 3;
-            if self.bytes.len() != expected {
-                return None;
+            100 => {
+                let image =
+                    image::load_from_memory_with_format(&self.bytes, image::ImageFormat::Png)
+                        .ok()?;
+                let rgba = image.to_rgba8();
+                (rgba.width(), rgba.height(), rgba.into_raw())
             }
-            let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
-            for rgb in self.bytes.chunks_exact(3) {
-                rgba.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
+            24 => {
+                let width = self.width?;
+                let height = self.height?;
+                let expected = width as usize * height as usize * 3;
+                if self.bytes.len() != expected {
+                    return None;
+                }
+                let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
+                for rgb in self.bytes.chunks_exact(3) {
+                    rgba.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
+                }
+                (width, height, rgba)
             }
-            (width, height, rgba)
-        }
-        32 => {
-            let width = self.width?;
-            let height = self.height?;
-            let expected = width as usize * height as usize * 4;
-            if self.bytes.len() != expected {
-                return None;
+            32 => {
+                let width = self.width?;
+                let height = self.height?;
+                let expected = width as usize * height as usize * 4;
+                if self.bytes.len() != expected {
+                    return None;
+                }
+                (width, height, self.bytes.clone())
             }
-            (width, height, self.bytes.clone())
-        }
-        _ => return None,
+            _ => return None,
         };
 
         Some(KittyImage {
@@ -232,7 +240,6 @@ impl KittyTransfer {
         })
     }
 }
-
 
 pub fn refresh_kitty_placeholder_anchors(
     objects: &HashMap<u32, InlineObject>,
@@ -261,7 +268,7 @@ pub fn refresh_kitty_placeholder_anchors(
             let Some(cell) = screen.cell(row, col) else {
                 continue;
             };
-            if cell.contents().chars().next() != Some('\u{10EEEE}') {
+            if !cell.contents().starts_with('\u{10EEEE}') {
                 continue;
             }
             let vt100::Color::Rgb(r, g, b) = cell.fgcolor() else {

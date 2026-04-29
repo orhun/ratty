@@ -12,7 +12,7 @@ pub const CONFIG_PATH: &str = "config/ratty.toml";
 pub const TERMINAL_TEXTURE_LABEL: &str = "ratty.parley_ratatui";
 pub const CURSOR_DEPTH: f32 = 10.0;
 
-#[derive(Resource, Debug, Clone, Deserialize)]
+#[derive(Resource, Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct AppConfig {
     pub window: WindowConfig,
@@ -60,21 +60,6 @@ impl AppConfig {
     }
 }
 
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            window: WindowConfig::default(),
-            terminal: TerminalConfig::default(),
-            shell: ShellConfig::default(),
-            env: BTreeMap::new(),
-            bindings: BindingsConfig::default(),
-            font: FontConfig::default(),
-            theme: ThemeConfig::default(),
-            cursor: CursorConfig::default(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct WindowConfig {
@@ -111,20 +96,11 @@ impl Default for TerminalConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct ShellConfig {
     pub program: Option<PathBuf>,
     pub args: Vec<String>,
-}
-
-impl Default for ShellConfig {
-    fn default() -> Self {
-        Self {
-            program: None,
-            args: Vec::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -179,9 +155,10 @@ impl Default for FontConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Default)]
 pub enum FontStyleConfig {
     #[serde(rename = "Regular")]
+    #[default]
     Regular,
     #[serde(rename = "Bold")]
     Bold,
@@ -189,12 +166,6 @@ pub enum FontStyleConfig {
     Italic,
     #[serde(rename = "BoldItalic")]
     BoldItalic,
-}
-
-impl Default for FontStyleConfig {
-    fn default() -> Self {
-        Self::Regular
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -218,20 +189,11 @@ impl Default for ThemeConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct CursorConfig {
     pub model: CursorModelConfig,
     pub animation: CursorAnimationConfig,
-}
-
-impl Default for CursorConfig {
-    fn default() -> Self {
-        Self {
-            model: CursorModelConfig::default(),
-            animation: CursorAnimationConfig::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

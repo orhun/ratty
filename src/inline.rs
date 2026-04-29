@@ -6,10 +6,7 @@ use bevy::prelude::*;
 use crate::kitty::{KittyOperation, KittyParserState, refresh_kitty_placeholder_anchors};
 use crate::model::{ObjectSource, load_object_source};
 use crate::rgp::{
-    RgpOperation,
-    RgpPlacementStyle,
-    consume_sequence as consume_rgp_sequence,
-    support_reply,
+    RgpOperation, RgpPlacementStyle, consume_sequence as consume_rgp_sequence, support_reply,
 };
 const APC_START: &[u8] = b"\x1b_";
 const ST: &[u8] = b"\x1b\\";
@@ -66,7 +63,8 @@ impl TerminalInlineObjects {
                 return replies;
             };
             let sequence = self.pending_bytes[start..end].to_vec();
-            let (handled, reply) = self.handle_apc_sequence(&sequence, parser.screen().cursor_position());
+            let (handled, reply) =
+                self.handle_apc_sequence(&sequence, parser.screen().cursor_position());
             if let Some(reply) = reply {
                 replies.push(reply);
             }
@@ -146,10 +144,7 @@ impl TerminalInlineObjects {
             return (true, reply);
         }
 
-        let Some(operation) = self
-            .kitty
-            .consume_sequence(sequence, cursor_position)
-        else {
+        let Some(operation) = self.kitty.consume_sequence(sequence, cursor_position) else {
             return (false, None);
         };
 
@@ -228,11 +223,7 @@ impl TerminalInlineObjects {
                 } else {
                     match load_object_source(Path::new(&path)) {
                         Ok((source, source_data)) => {
-                            info!(
-                                "registered RGP object {} from {}",
-                                object_id,
-                                source,
-                            );
+                            info!("registered RGP object {} from {}", object_id, source,);
                             self.objects.insert(
                                 object_id,
                                 InlineObject::RgpObject(match source_data {

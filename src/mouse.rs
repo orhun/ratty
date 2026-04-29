@@ -1,4 +1,5 @@
 use bevy::ecs::message::MessageReader;
+use bevy::ecs::system::SystemParam;
 use bevy::input::ButtonState;
 use bevy::input::mouse::{MouseButton, MouseButtonInput, MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
@@ -158,20 +159,35 @@ impl TerminalSelection {
     }
 }
 
+#[derive(SystemParam)]
+pub struct MouseSystemParams<'w, 's> {
+    primary_window: Query<'w, 's, (Entity, &'static Window), With<PrimaryWindow>>,
+    runtime: NonSend<'w, TerminalRuntime>,
+    terminal: NonSend<'w, TerminalSurface>,
+    viewport: Res<'w, TerminalViewport>,
+    presentation: Res<'w, TerminalPresentation>,
+    plane_view: ResMut<'w, TerminalPlaneView>,
+    selection: ResMut<'w, TerminalSelection>,
+    redraw: ResMut<'w, crate::terminal::TerminalRedrawState>,
+}
+
 pub fn handle_mouse_input(
     mut cursor_events: MessageReader<CursorMoved>,
     mut button_events: MessageReader<MouseButtonInput>,
     mut wheel_events: MessageReader<MouseWheel>,
-    primary_window: Query<(Entity, &Window), With<PrimaryWindow>>,
-    runtime: NonSend<TerminalRuntime>,
-    terminal: NonSend<TerminalSurface>,
-    viewport: Res<TerminalViewport>,
-    presentation: Res<TerminalPresentation>,
-    mut plane_view: ResMut<TerminalPlaneView>,
-    mut selection: ResMut<TerminalSelection>,
+    mut params: MouseSystemParams,
     mut forwarded_mouse: Local<ForwardedMouseState>,
-    mut redraw: ResMut<crate::terminal::TerminalRedrawState>,
 ) {
+    let MouseSystemParams {
+        primary_window,
+        runtime,
+        terminal,
+        viewport,
+        presentation,
+        plane_view,
+        selection,
+        redraw,
+    } = &mut params;
     let Ok((primary_window, window)) = primary_window.single() else {
         return;
     };
@@ -205,38 +221,37 @@ pub fn handle_mouse_input(
                 plane_view.last_pan_cursor = Some(event.position);
             }
         } else if forward_mouse {
-            if let Some(cell) = position_to_cell(event.position, &viewport, &terminal) {
-                if forwarded_mouse.last_cell != Some(cell)
-                    && match mouse_mode {
-                        MouseProtocolMode::ButtonMotion => {
-                            forwarded_mouse.left_pressed
-                                || forwarded_mouse.middle_pressed
-                                || forwarded_mouse.right_pressed
-                        }
-                        MouseProtocolMode::AnyMotion => true,
-                        _ => false,
+            if let Some(cell) = position_to_cell(event.position, viewport, terminal)
+                && forwarded_mouse.last_cell != Some(cell)
+                && match mouse_mode {
+                    MouseProtocolMode::ButtonMotion => {
+                        forwarded_mouse.left_pressed
+                            || forwarded_mouse.middle_pressed
+                            || forwarded_mouse.right_pressed
                     }
-                {
-                    let button_code = if forwarded_mouse.left_pressed {
-                        32
-                    } else if forwarded_mouse.middle_pressed {
-                        33
-                    } else if forwarded_mouse.right_pressed {
-                        34
-                    } else {
-                        35
-                    };
-                    runtime.write_input(&encode_mouse_event(
-                        cell,
-                        button_code,
-                        false,
-                        mouse_encoding,
-                    ));
-                    forwarded_mouse.last_cell = Some(cell);
+                    MouseProtocolMode::AnyMotion => true,
+                    _ => false,
                 }
+            {
+                let button_code = if forwarded_mouse.left_pressed {
+                    32
+                } else if forwarded_mouse.middle_pressed {
+                    33
+                } else if forwarded_mouse.right_pressed {
+                    34
+                } else {
+                    35
+                };
+                runtime.write_input(&encode_mouse_event(
+                    cell,
+                    button_code,
+                    false,
+                    mouse_encoding,
+                ));
+                forwarded_mouse.last_cell = Some(cell);
             }
         } else if selection.dragging
-            && let Some(cell) = position_to_cell(event.position, &viewport, &terminal)
+            && let Some(cell) = position_to_cell(event.position, viewport, terminal)
             && selection.update(cell)
         {
             redraw.request();
@@ -255,7 +270,7 @@ pub fn handle_mouse_input(
                     if let Some(cell) = window
                         .cursor_position()
                         .or(selection.cursor_position())
-                        .and_then(|position| position_to_cell(position, &viewport, &terminal))
+                        .and_then(|position| position_to_cell(position, viewport, terminal))
                     {
                         runtime.write_input(&encode_mouse_event(cell, 0, false, mouse_encoding));
                         forwarded_mouse.last_cell = Some(cell);
@@ -264,7 +279,7 @@ pub fn handle_mouse_input(
                     plane_view.rotating = true;
                     plane_view.last_rotate_cursor = selection.cursor_position();
                 } else if let Some(pos) = selection.cursor_position()
-                    && let Some(cell) = position_to_cell(pos, &viewport, &terminal)
+                    && let Some(cell) = position_to_cell(pos, viewport, terminal)
                     && selection.begin(cell)
                 {
                     redraw.request();
@@ -276,7 +291,7 @@ pub fn handle_mouse_input(
                     if let Some(cell) = window
                         .cursor_position()
                         .or(selection.cursor_position())
-                        .and_then(|position| position_to_cell(position, &viewport, &terminal))
+                        .and_then(|position| position_to_cell(position, viewport, terminal))
                     {
                         runtime.write_input(&encode_mouse_event(cell, 0, true, mouse_encoding));
                         forwarded_mouse.last_cell = Some(cell);
@@ -293,7 +308,7 @@ pub fn handle_mouse_input(
                 if let Some(cell) = window
                     .cursor_position()
                     .or(selection.cursor_position())
-                    .and_then(|position| position_to_cell(position, &viewport, &terminal))
+                    .and_then(|position| position_to_cell(position, viewport, terminal))
                 {
                     runtime.write_input(&encode_mouse_event(cell, 1, false, mouse_encoding));
                     forwarded_mouse.last_cell = Some(cell);
@@ -304,7 +319,7 @@ pub fn handle_mouse_input(
                 if let Some(cell) = window
                     .cursor_position()
                     .or(selection.cursor_position())
-                    .and_then(|position| position_to_cell(position, &viewport, &terminal))
+                    .and_then(|position| position_to_cell(position, viewport, terminal))
                 {
                     runtime.write_input(&encode_mouse_event(cell, 1, true, mouse_encoding));
                     forwarded_mouse.last_cell = Some(cell);
@@ -315,7 +330,7 @@ pub fn handle_mouse_input(
                 if let Some(cell) = window
                     .cursor_position()
                     .or(selection.cursor_position())
-                    .and_then(|position| position_to_cell(position, &viewport, &terminal))
+                    .and_then(|position| position_to_cell(position, viewport, terminal))
                 {
                     runtime.write_input(&encode_mouse_event(cell, 2, false, mouse_encoding));
                     forwarded_mouse.last_cell = Some(cell);
@@ -326,7 +341,7 @@ pub fn handle_mouse_input(
                 if let Some(cell) = window
                     .cursor_position()
                     .or(selection.cursor_position())
-                    .and_then(|position| position_to_cell(position, &viewport, &terminal))
+                    .and_then(|position| position_to_cell(position, viewport, terminal))
                 {
                     runtime.write_input(&encode_mouse_event(cell, 2, true, mouse_encoding));
                     forwarded_mouse.last_cell = Some(cell);
@@ -358,7 +373,7 @@ pub fn handle_mouse_input(
             if let Some(cell) = window
                 .cursor_position()
                 .or(selection.cursor_position())
-                .and_then(|position| position_to_cell(position, &viewport, &terminal))
+                .and_then(|position| position_to_cell(position, viewport, terminal))
             {
                 runtime.write_input(&encode_mouse_event(
                     cell,

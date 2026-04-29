@@ -1,4 +1,5 @@
 use bevy::ecs::world::FromWorld;
+use bevy::ecs::system::SystemParam;
 use bevy::input::ButtonState;
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
@@ -131,11 +132,17 @@ impl FromWorld for TerminalKeyBindings {
 
         for binding in &app_config.bindings.keys {
             let Some(binding) = KeyBinding::from_config(binding) else {
-                warn!("ignoring invalid key binding: key={} with={}", binding.key, binding.with);
+                warn!(
+                    "ignoring invalid key binding: key={} with={}",
+                    binding.key, binding.with
+                );
                 continue;
             };
 
-            if let Some(index) = bindings.iter().position(|existing| existing.same_trigger(&binding)) {
+            if let Some(index) = bindings
+                .iter()
+                .position(|existing| existing.same_trigger(&binding))
+            {
                 bindings.remove(index);
             }
 
@@ -216,22 +223,30 @@ impl TerminalKeyboard {
     }
 }
 
+#[derive(SystemParam)]
+pub struct KeyboardSystemParams<'w, 's> {
+    selection: ResMut<'w, TerminalSelection>,
+    plane_warp: ResMut<'w, TerminalPlaneWarp>,
+    presentation: ResMut<'w, TerminalPresentation>,
+    clipboard: NonSendMut<'w, TerminalClipboard>,
+    runtime: NonSendMut<'w, TerminalRuntime>,
+    terminal: NonSendMut<'w, TerminalSurface>,
+    viewport: Res<'w, TerminalViewport>,
+    bindings: Res<'w, TerminalKeyBindings>,
+    redraw: ResMut<'w, TerminalRedrawState>,
+    _marker: std::marker::PhantomData<&'s ()>,
+}
+
 pub fn handle_keyboard_input(
     mut keyboard_events: MessageReader<KeyboardInput>,
     mut keyboard: Local<TerminalKeyboard>,
-    mut selection: ResMut<TerminalSelection>,
-    mut plane_warp: ResMut<TerminalPlaneWarp>,
-    mut presentation: ResMut<TerminalPresentation>,
-    mut clipboard: NonSendMut<TerminalClipboard>,
-    mut runtime: NonSendMut<TerminalRuntime>,
-    mut terminal: NonSendMut<TerminalSurface>,
-    viewport: Res<TerminalViewport>,
-    bindings: Res<TerminalKeyBindings>,
-    mut redraw: ResMut<TerminalRedrawState>,
+    mut params: KeyboardSystemParams,
 ) {
     for event in keyboard_events.read() {
         if event.state == ButtonState::Pressed
-            && let Some(action) = bindings.action_for(event.key_code, keyboard.modifiers())
+            && let Some(action) = params
+                .bindings
+                .action_for(event.key_code, keyboard.modifiers())
         {
             if event.repeat
                 && !matches!(
@@ -248,9 +263,9 @@ pub fn handle_keyboard_input(
             match action {
                 BindingAction::None => {}
                 BindingAction::ToggleMode => {
-                    presentation.toggle();
-                    selection.clear();
-                    redraw.request();
+                    params.presentation.toggle();
+                    params.selection.clear();
+                    params.redraw.request();
                     continue;
                 }
                 BindingAction::IncreaseWarp | BindingAction::DecreaseWarp => {
@@ -259,33 +274,33 @@ pub fn handle_keyboard_input(
                     } else {
                         -0.08
                     };
-                    plane_warp.adjust(delta);
-                    redraw.request();
+                    params.plane_warp.adjust(delta);
+                    params.redraw.request();
                     continue;
                 }
                 BindingAction::Copy => {
-                    if let Some(text) = selection.selected_text(runtime.parser.screen())
+                    if let Some(text) = params.selection.selected_text(params.runtime.parser.screen())
                         && !text.is_empty()
                     {
-                        clipboard.copy(&text);
+                        params.clipboard.copy(&text);
                     }
-                    if selection.clear() {
-                        redraw.request();
+                    if params.selection.clear() {
+                        params.redraw.request();
                     }
                     continue;
                 }
                 BindingAction::Paste => {
-                    if let Some(text) = clipboard.paste() {
+                    if let Some(text) = params.clipboard.paste() {
                         let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
                         let mut bytes = Vec::from(b"\x1b[200~".as_slice());
                         bytes.extend_from_slice(normalized.as_bytes());
                         bytes.extend_from_slice(b"\x1b[201~");
-                        runtime.write_input(&bytes);
+                        params.runtime.write_input(&bytes);
                     } else {
                         warn!("failed to read clipboard contents for paste");
                     }
-                    if selection.clear() {
-                        redraw.request();
+                    if params.selection.clear() {
+                        params.redraw.request();
                     }
                     continue;
                 }
@@ -295,13 +310,15 @@ pub fn handle_keyboard_input(
                     } else {
                         -1
                     };
-                    if terminal.adjust_font_size(delta) {
-                        let char_dims = terminal.char_dimensions().max(UVec2::ONE);
-                        let cols = ((viewport.size.x / char_dims.x as f32).floor() as u16).max(1);
-                        let rows = ((viewport.size.y / char_dims.y as f32).floor() as u16).max(1);
-                        runtime.resize(cols, rows);
-                        terminal.resize(cols, rows);
-                        redraw.request();
+                    if params.terminal.adjust_font_size(delta) {
+                        let char_dims = params.terminal.char_dimensions().max(UVec2::ONE);
+                        let cols =
+                            ((params.viewport.size.x / char_dims.x as f32).floor() as u16).max(1);
+                        let rows =
+                            ((params.viewport.size.y / char_dims.y as f32).floor() as u16).max(1);
+                        params.runtime.resize(cols, rows);
+                        params.terminal.resize(cols, rows);
+                        params.redraw.request();
                     }
                     continue;
                 }
@@ -310,15 +327,18 @@ pub fn handle_keyboard_input(
 
         if event.state == ButtonState::Pressed
             && !is_modifier_key(event.key_code)
-            && selection.clear()
+            && params.selection.clear()
         {
-            redraw.request();
+            params.redraw.request();
         }
 
         if let Some(input) =
-            keyboard.handle_event_with_modes(event, runtime.parser.screen().application_cursor())
+            keyboard.handle_event_with_modes(
+                event,
+                params.runtime.parser.screen().application_cursor(),
+            )
         {
-            runtime.write_input(&input);
+            params.runtime.write_input(&input);
         }
     }
 }
@@ -420,14 +440,12 @@ fn translate_key(
 ) -> Vec<u8> {
     let mut bytes = Vec::new();
 
-    if ctrl_pressed {
-        if let Some(ctrl) = ctrl_keycode_byte(key_code) {
-            if alt_pressed {
-                bytes.push(0x1b);
-            }
-            bytes.push(ctrl);
-            return bytes;
+    if ctrl_pressed && let Some(ctrl) = ctrl_keycode_byte(key_code) {
+        if alt_pressed {
+            bytes.push(0x1b);
         }
+        bytes.push(ctrl);
+        return bytes;
     }
 
     if alt_pressed {

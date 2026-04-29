@@ -101,15 +101,21 @@ pub fn load_object_source(path: &Path) -> anyhow::Result<(String, ObjectSource)>
         .map(|ext| ext.to_ascii_lowercase())
         .unwrap_or_default();
 
-    if let Some(file_name) = Path::new(&candidate).file_name().and_then(|name| name.to_str())
+    if let Some(file_name) = Path::new(&candidate)
+        .file_name()
+        .and_then(|name| name.to_str())
         && let Some(file) = EmbeddedObjects::get(file_name)
     {
         return match extension.as_str() {
             "obj" => load_obj_meshes_from_bytes(file_name, &file.data)
                 .map(|meshes| (format!("embedded:{file_name}"), ObjectSource::Obj(meshes))),
             "glb" | "gltf" => {
-                let asset_path = ensure_scene_asset_path(&candidate, Some((file_name, &file.data)))?;
-                Ok((format!("embedded:{file_name}"), ObjectSource::Gltf(asset_path)))
+                let asset_path =
+                    ensure_scene_asset_path(&candidate, Some((file_name, &file.data)))?;
+                Ok((
+                    format!("embedded:{file_name}"),
+                    ObjectSource::Gltf(asset_path),
+                ))
             }
             _ => bail!("unsupported object format for {}", candidate),
         };
@@ -168,7 +174,10 @@ fn object_asset_path(path: &Path) -> anyhow::Result<String> {
     }
 
     if path.is_absolute() {
-        bail!("absolute path is outside the asset root: {}", path.display());
+        bail!(
+            "absolute path is outside the asset root: {}",
+            path.display()
+        );
     }
 
     let mut candidate = PathBuf::from(path);
@@ -180,7 +189,10 @@ fn object_asset_path(path: &Path) -> anyhow::Result<String> {
         .to_str()
         .context("asset path is not valid UTF-8")?
         .replace('\\', "/");
-    Ok(candidate.strip_prefix("assets/").unwrap_or(&candidate).to_string())
+    Ok(candidate
+        .strip_prefix("assets/")
+        .unwrap_or(&candidate)
+        .to_string())
 }
 
 fn load_obj_meshes_from_path(path: &Path) -> anyhow::Result<Vec<Mesh>> {
@@ -189,7 +201,6 @@ fn load_obj_meshes_from_path(path: &Path) -> anyhow::Result<Vec<Mesh>> {
         single_index: true,
         ignore_lines: true,
         ignore_points: true,
-        ..default()
     };
     let (models, _) = tobj::load_obj(path, &options)
         .with_context(|| format!("failed to read {}", path.display()))?;
@@ -202,13 +213,10 @@ fn load_obj_meshes_from_bytes(name: &str, bytes: &[u8]) -> anyhow::Result<Vec<Me
         single_index: true,
         ignore_lines: true,
         ignore_points: true,
-        ..default()
     };
-    let (models, _) = tobj::load_obj_buf(
-        &mut Cursor::new(bytes),
-        &options,
-        |_path| Ok((Vec::new(), Default::default())),
-    )
+    let (models, _) = tobj::load_obj_buf(&mut Cursor::new(bytes), &options, |_path| {
+        Ok((Vec::new(), Default::default()))
+    })
     .with_context(|| format!("failed to read embedded {name}"))?;
     build_meshes(models, format!("embedded:{name}"))
 }

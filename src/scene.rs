@@ -1,5 +1,7 @@
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::ClearColorConfig;
+use bevy::ecs::system::SystemParam;
+use bevy::ecs::query::With;
 use bevy::image::ImageSampler;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
@@ -94,6 +96,37 @@ impl Default for TerminalPlaneView {
 pub struct ModelLoadState {
     pub loaded: bool,
     pub first_frame_uploaded: bool,
+}
+
+type SpriteVisibilityQuery<'w, 's> =
+    Query<'w, 's, &'static mut Visibility, With<TerminalSprite>>;
+type PlaneVisibilityQuery<'w, 's> =
+    Query<'w, 's, &'static mut Visibility, With<TerminalPlane>>;
+type PlaneBackVisibilityQuery<'w, 's> =
+    Query<'w, 's, &'static mut Visibility, With<TerminalPlaneBack>>;
+type PlaneTransformQuery<'w, 's> =
+    Query<'w, 's, &'static mut Transform, With<TerminalPlane>>;
+type PlaneBackTransformQuery<'w, 's> =
+    Query<'w, 's, &'static mut Transform, With<TerminalPlaneBack>>;
+type PlaneCameraQuery<'w, 's> = Query<
+    'w,
+    's,
+    (&'static mut Projection, &'static mut Transform),
+    With<TerminalPlaneCamera>,
+>;
+
+#[derive(SystemParam)]
+pub(crate) struct PresentationParams<'w, 's> {
+    visibility_queries: ParamSet<'w, 's, (
+        SpriteVisibilityQuery<'w, 's>,
+        PlaneVisibilityQuery<'w, 's>,
+        PlaneBackVisibilityQuery<'w, 's>,
+    )>,
+    plane_transforms: ParamSet<'w, 's, (
+        PlaneTransformQuery<'w, 's>,
+        PlaneBackTransformQuery<'w, 's>,
+        PlaneCameraQuery<'w, 's>,
+    )>,
 }
 
 pub fn setup_scene(
@@ -222,9 +255,7 @@ pub fn setup_scene(
             shadows_enabled: false,
             ..default()
         },
-        Transform::from_rotation(
-            Quat::from_euler(EulerRot::ZYX, 0.0, -0.9, -0.45),
-        ),
+        Transform::from_rotation(Quat::from_euler(EulerRot::ZYX, 0.0, -0.9, -0.45)),
     ));
     commands.spawn((
         PointLight {
@@ -264,17 +295,12 @@ fn create_terminal_image(width: u32, height: u32, fill: [u8; 4]) -> Image {
 pub fn apply_terminal_presentation(
     presentation: Res<TerminalPresentation>,
     plane_view: Res<TerminalPlaneView>,
-    mut visibility_queries: ParamSet<(
-        Query<&mut Visibility, With<TerminalSprite>>,
-        Query<&mut Visibility, With<TerminalPlane>>,
-        Query<&mut Visibility, With<TerminalPlaneBack>>,
-    )>,
-    mut plane_transforms: ParamSet<(
-        Query<&mut Transform, With<TerminalPlane>>,
-        Query<&mut Transform, With<TerminalPlaneBack>>,
-        Query<(&mut Projection, &mut Transform), With<TerminalPlaneCamera>>,
-    )>,
+    mut params: PresentationParams,
 ) {
+    let PresentationParams {
+        visibility_queries,
+        plane_transforms,
+    } = &mut params;
     let sprite_visibility = match presentation.mode {
         TerminalPresentationMode::Flat2d => Visibility::Visible,
         TerminalPresentationMode::Plane3d => Visibility::Hidden,

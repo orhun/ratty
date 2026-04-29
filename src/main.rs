@@ -38,7 +38,10 @@ fn main() -> anyhow::Result<()> {
             DefaultPlugins.set(WindowPlugin {
                 primary_window: Some(Window {
                     title: env!("CARGO_PKG_NAME").into(),
-                    resolution: WindowResolution::new(app_config.window.width, app_config.window.height)
+                    resolution: WindowResolution::new(
+                        app_config.window.width,
+                        app_config.window.height,
+                    )
                     .with_scale_factor_override(app_config.window.scale_factor),
                     ..default()
                 }),
