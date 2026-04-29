@@ -44,6 +44,16 @@ If the project later moves to a fully GPU-resident path, that will require a
 dedicated Bevy render integration that renders into a Bevy-owned texture on
 Bevy's render-world device instead of using the current readback bridge.
 
+## Platform-specific dependencies
+
+### [Bazzite](https://bazzite.gg/) / [Bluefin](https://projectbluefin.io/)
+
+```
+rpm-ostree install systemd-devel wayland-devel
+```
+
+and then reboot to complete the installation
+
 ## License
 
 Licensed under the MIT License. See [LICENSE](LICENSE) for more information.
