@@ -1,6 +1,10 @@
 # ratty 🐁
 
+![Built with Ratatui badge](https://img.shields.io/badge/Built_With-Ratatui-000?logo=ratatui&logoColor=fff&labelColor=000&color=fff)
+
 Under construction ⚠️ Cheese ahead! 🧀
+
+Experimental terminal that mixes Ratatui, Bevy, Kitty graphics, and inline 3D objects.
 
 <div>
   <video src="https://github.com/user-attachments/assets/ebe4dc54-ec60-4399-a63e-0d04b3013433" alt="Ratty Demo"/>
@@ -19,56 +23,8 @@ Under construction ⚠️ Cheese ahead! 🧀
 Ever wondered what's _behind_ the terminal? Press <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Enter</kbd>!
 
 <div>
-  <video src="https://github.com/user-attachments/assets/173971cc-b6bb-4897-857a-5db8e3c9e161"/>
+  <video width="80%" src="https://github.com/user-attachments/assets/173971cc-b6bb-4897-857a-5db8e3c9e161"/>
 </div>
-
-### Inline 3D objects
-
-Ratty uses its own protocol, the [Ratty Graphics Protocol](protocols/graphics.md),
-to place inline 3D objects in terminal space.
-
-RGP supports:
-
-- registering `.obj` and `.glb` assets by path
-- placing them at terminal cell anchors
-- animation, scale, color, depth and other attributes
-
-There is a Ratatui widget available in [`widget/`](widget/) if you want to build your own terminal
-applications that involve inline 3D objects!
-
-#### [Big rat](widget/examples/big_rat.rs)
-
-<div>
-  <video src="https://github.com/user-attachments/assets/e955d09a-d0eb-4bad-b3b2-fc1331f49646"/>
-</div>
-
-#### [Document](widget/examples/document.rs)
-
-<div>
-  <video src="https://github.com/user-attachments/assets/f3a085b0-9e34-4b6f-92fb-90eff9f11776"/>
-</div>
-
-#### [Draw](widget/examples/draw.rs)
-
-<div>
-  <video src="https://github.com/user-attachments/assets/8b53515b-b887-4d03-a54c-7e7aa7ea128c"/>
-</div>
-
-#### Go crazy at it
-
-#### User endorsements
-
-- _"This is like a legitimately cool project but also I just spent like 20 minutes adjusting the config for the rat spinning to see him spin faster and more erratically and it cracked me up"_ - [@vimlena.com](https://bsky.app/profile/vimlena.com/post/3mkoshbzpvs2y)
-
-<div>
-
-<video src="https://github.com/user-attachments/assets/76446086-0432-4b67-b768-1fe31134a2c1">
-
-</div>
-
-- _"These kinds of experiments are where creativity is born."_ - [@Coko7](https://github.com/Coko7)
-
-- _"No comments. Just support."_ - [@Raphamorim](https://github.com/raphamorim/) (creator of Rio terminal)
 
 ## Installation
 
@@ -128,6 +84,46 @@ Other useful cursor fields are:
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Up</kbd>    | Increase warp       |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Down</kbd>  | Decrease warp       |
 
+## Inline 3D objects
+
+Ratty uses its own protocol, the [Ratty Graphics Protocol](protocols/graphics.md),
+to place inline 3D objects in terminal space.
+
+RGP supports:
+
+- registering `.obj` and `.glb` assets by path
+- placing them at terminal cell anchors
+- animation, scale, color, depth and other attributes
+
+There is a Ratatui widget called `ratatui-rgp` available in
+[`widget/`](widget/) if you want to build your own terminal applications that involve inline 3D objects.
+
+### Examples
+
+#### [Big rat](widget/examples/big_rat.rs)
+
+Places a single oversized rat directly in your terminal:
+
+<div>
+  <video width="80%" src="https://github.com/user-attachments/assets/e955d09a-d0eb-4bad-b3b2-fc1331f49646"/>
+</div>
+
+#### [Document](widget/examples/document.rs)
+
+TempleOS-inspired document demo with editable text and embedded inline 3D objects:
+
+<div>
+  <video width="80%" src="https://github.com/user-attachments/assets/f3a085b0-9e34-4b6f-92fb-90eff9f11776"/>
+</div>
+
+#### [Draw](widget/examples/draw.rs)
+
+Split-pane drawing demo with a 2D canvas on the left and a live 3D preview on the right:
+
+<div>
+  <video width="80%" src="https://github.com/user-attachments/assets/8b53515b-b887-4d03-a54c-7e7aa7ea128c"/>
+</div>
+
 ## Architecture
 
 ### Rendering pipeline
@@ -152,14 +148,26 @@ If the project later moves to a fully GPU-resident path, that will require a
 dedicated Bevy render integration that renders into a Bevy-owned texture on
 Bevy's render-world device instead of using the current readback bridge.
 
+## Endorsements
+
+- _"This is like a legitimately cool project but also I just spent like 20 minutes adjusting the config for the rat spinning to see him spin faster and more erratically and it cracked me up"_ - [@vimlena.com](https://bsky.app/profile/vimlena.com/post/3mkoshbzpvs2y)
+
+<div>
+
+<video width="80%" src="https://github.com/user-attachments/assets/76446086-0432-4b67-b768-1fe31134a2c1">
+
+</div>
+
+- _"These kinds of experiments are where creativity is born."_ - [@Coko7](https://github.com/Coko7)
+
+- _"No comments. Just support."_ - [@Raphamorim](https://github.com/raphamorim/) (creator of Rio terminal)
+
 ## License
 
-<sup>
 All code is licensed under <a href="LICENSE">The MIT License</a>.
-</sup>
 
 <br>
 
 <small>
-🐁
+The author does not have a rat under the hat 🐁
 </small>
