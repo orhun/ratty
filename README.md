@@ -4,8 +4,6 @@
 
 Under construction ⚠️ Cheese ahead! 🧀
 
-Experimental terminal that mixes Ratatui, Bevy, Kitty graphics, and inline 3D objects.
-
 <div>
   <video src="https://github.com/user-attachments/assets/ebe4dc54-ec60-4399-a63e-0d04b3013433" alt="Ratty Demo"/>
 </div>
