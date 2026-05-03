@@ -173,9 +173,9 @@ impl TerminalRuntime {
             .take_writer()
             .context("failed to create PTY writer")?;
 
-        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(16);
         thread::spawn(move || {
-            let mut buf = [0_u8; 4096];
+            let mut buf = [0_u8; 16 * 1024];
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => break,

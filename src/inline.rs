@@ -1,5 +1,6 @@
 //! Inline object state and APC handling.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -126,6 +127,15 @@ impl TerminalInlineObjects {
             true
         });
         self.dirty = true;
+    }
+
+    /// Returns whether any anchors need scroll tracking.
+    pub fn has_scroll_tracked_anchors(&self) -> bool {
+        self.anchors.keys().any(|object_id| {
+            self.objects
+                .get(object_id)
+                .is_some_and(InlineObject::scrolls_with_text)
+        })
     }
 
     /// Refreshes placeholder-derived Kitty anchors.
@@ -327,9 +337,9 @@ impl TerminalInlineObjects {
     }
 }
 
-fn normalize_hvp_sequences(bytes: &[u8]) -> Vec<u8> {
+fn normalize_hvp_sequences(bytes: &[u8]) -> Cow<'_, [u8]> {
     // vt100 handles CUP (`H`) but not HVP (`f`), so normalize cursor-positioning sequences.
-    let mut normalized = Vec::with_capacity(bytes.len());
+    let mut normalized = None;
     let mut i = 0;
 
     while i < bytes.len() {
@@ -340,18 +350,28 @@ fn normalize_hvp_sequences(bytes: &[u8]) -> Vec<u8> {
             }
 
             if j < bytes.len() && bytes[j] == b'f' && j > i + 2 {
-                normalized.extend_from_slice(&bytes[i..j]);
-                normalized.push(b'H');
+                let out = normalized.get_or_insert_with(|| {
+                    let mut out = Vec::with_capacity(bytes.len());
+                    out.extend_from_slice(&bytes[..i]);
+                    out
+                });
+                out.extend_from_slice(&bytes[i..j]);
+                out.push(b'H');
                 i = j + 1;
                 continue;
             }
         }
 
-        normalized.push(bytes[i]);
+        if let Some(out) = normalized.as_mut() {
+            out.push(bytes[i]);
+        }
         i += 1;
     }
 
-    normalized
+    match normalized {
+        Some(bytes) => Cow::Owned(bytes),
+        None => Cow::Borrowed(bytes),
+    }
 }
 
 fn apc_end(bytes: &[u8], payload_start: usize) -> Option<usize> {

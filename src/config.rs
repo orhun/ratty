@@ -121,7 +121,7 @@ impl Default for TerminalConfig {
         Self {
             default_cols: 104,
             default_rows: 32,
-            scrollback: 10_000,
+            scrollback: 2_000,
         }
     }
 }

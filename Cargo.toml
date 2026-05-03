@@ -8,7 +8,28 @@ edition = "2024"
 anyhow = "1.0"
 arboard = "3.6"
 base64 = "0.22"
-bevy = { version = "0.18.1", default-features = true }
+bevy = { version = "0.18.1", default-features = false, features = [
+    "std",
+    "async_executor",
+    "bevy_asset",
+    "bevy_core_pipeline",
+    "bevy_gltf",
+    "bevy_log",
+    "bevy_pbr",
+    "bevy_sprite",
+    "bevy_sprite_render",
+    "bevy_winit",
+    "gltf_animation",
+    "keyboard",
+    "mouse",
+    "multi_threaded",
+    "png",
+    "reflect_auto_register",
+    "tonemapping_luts",
+    "wayland",
+    "x11",
+    "zstd_rust",
+] }
 etcetera = "0.11"
 image = { version = "0.25", default-features = false, features = ["png"] }
 parley_ratatui = "0.2.0"

@@ -1,10 +1,16 @@
+use std::time::Duration;
+
 use bevy::prelude::*;
 use bevy::window::WindowResolution;
+use bevy::winit::{UpdateMode, WinitSettings};
 
 use ratty::config::AppConfig;
 use ratty::plugin::TerminalPlugin;
 use ratty::runtime::TerminalRuntime;
 use ratty::terminal::TerminalSurface;
+
+const FOCUSED_UPDATE_INTERVAL: Duration = Duration::from_millis(33);
+const UNFOCUSED_UPDATE_INTERVAL: Duration = Duration::from_millis(250);
 
 fn main() -> anyhow::Result<()> {
     let app_config = AppConfig::load()?;
@@ -20,6 +26,10 @@ fn main() -> anyhow::Result<()> {
         .insert_resource(app_config.clone())
         .insert_non_send_resource(runtime)
         .insert_non_send_resource(terminal)
+        .insert_resource(WinitSettings {
+            focused_mode: UpdateMode::reactive_low_power(FOCUSED_UPDATE_INTERVAL),
+            unfocused_mode: UpdateMode::reactive_low_power(UNFOCUSED_UPDATE_INTERVAL),
+        })
         .add_plugins(
             DefaultPlugins.set(WindowPlugin {
                 primary_window: Some(Window {

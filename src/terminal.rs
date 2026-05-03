@@ -1,5 +1,7 @@
 //! Terminal surface rendering and Ratatui integration.
 
+use std::time::{Duration, Instant};
+
 use bevy::prelude::*;
 use parley_ratatui::ratatui::Terminal;
 use parley_ratatui::ratatui::buffer::Buffer;
@@ -14,15 +16,21 @@ use parley_ratatui::{
 use crate::config::{AppConfig, FontConfig, FontStyleConfig, TERMINAL_TEXTURE_LABEL, ThemeConfig};
 use crate::mouse::TerminalSelection;
 
+const REDRAW_THROTTLE: Duration = Duration::from_millis(16);
+
 /// Terminal redraw flag.
 #[derive(Resource)]
 pub struct TerminalRedrawState {
     needs_redraw: bool,
+    last_redraw: Instant,
 }
 
 impl Default for TerminalRedrawState {
     fn default() -> Self {
-        Self { needs_redraw: true }
+        Self {
+            needs_redraw: true,
+            last_redraw: Instant::now() - REDRAW_THROTTLE,
+        }
     }
 }
 
@@ -34,7 +42,12 @@ impl TerminalRedrawState {
 
     /// Returns whether a redraw was pending.
     pub fn take(&mut self) -> bool {
-        std::mem::take(&mut self.needs_redraw)
+        if !self.needs_redraw || self.last_redraw.elapsed() < REDRAW_THROTTLE {
+            return false;
+        }
+        self.needs_redraw = false;
+        self.last_redraw = Instant::now();
+        true
     }
 }
 

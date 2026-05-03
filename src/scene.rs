@@ -181,6 +181,7 @@ pub fn setup_scene(
             order: 0,
             ..default()
         },
+        Msaa::Off,
     ));
     commands.spawn((
         TerminalPlaneCamera,
@@ -196,6 +197,7 @@ pub fn setup_scene(
             ..OrthographicProjection::default_3d()
         }),
         Transform::from_xyz(0.0, 0.0, 800.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Msaa::Off,
     ));
 
     let pixmap = terminal.pixmap_dimensions();
@@ -282,7 +284,7 @@ pub fn setup_scene(
         PointLight {
             intensity: 190_000.0,
             range: 2200.0,
-            shadows_enabled: true,
+            shadows_enabled: false,
             ..default()
         },
         Transform::from_xyz(220.0, 320.0, 1000.0),

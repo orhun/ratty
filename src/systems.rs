@@ -21,16 +21,6 @@
 use std::collections::HashMap;
 use std::sync::mpsc::TryRecvError;
 
-use bevy::app::AppExit;
-use bevy::ecs::message::{MessageReader, MessageWriter};
-use bevy::ecs::system::SystemParam;
-use bevy::gltf::GltfAssetLabel;
-use bevy::image::ImageSampler;
-use bevy::mesh::{Indices, VertexAttributeValues};
-use bevy::prelude::*;
-use bevy::render::render_resource::PrimitiveTopology;
-use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-use bevy::window::{PrimaryWindow, WindowResized};
 use crate::config::{AppConfig, CURSOR_DEPTH};
 use crate::inline::{
     InlineObject, TerminalInlineObjectPlane, TerminalInlineObjectSprite, TerminalInlineObjects,
@@ -46,6 +36,16 @@ use crate::scene::{
     TerminalPresentation, TerminalPresentationMode, TerminalSprite, TerminalViewport,
 };
 use crate::terminal::{TerminalRedrawState, TerminalSurface, TerminalWidget};
+use bevy::app::AppExit;
+use bevy::ecs::message::{MessageReader, MessageWriter};
+use bevy::ecs::system::SystemParam;
+use bevy::gltf::GltfAssetLabel;
+use bevy::image::ImageSampler;
+use bevy::mesh::{Indices, VertexAttributeValues};
+use bevy::prelude::*;
+use bevy::render::render_resource::PrimitiveTopology;
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use bevy::window::{PrimaryWindow, WindowResized};
 
 struct InlineLayout {
     columns: u32,
@@ -126,8 +126,13 @@ pub fn pump_pty_output(
     loop {
         match runtime.rx.try_recv() {
             Ok(chunk) => {
-                let prev_rows = (!inline_objects.anchors.is_empty())
-                    .then(|| screen_rows(runtime.parser.screen()));
+                let track_scroll = inline_objects.has_scroll_tracked_anchors();
+                let prev_rows: Option<Vec<String>> = if track_scroll {
+                    let (_, cols) = runtime.parser.screen().size();
+                    Some(runtime.parser.screen().rows(0, cols).collect::<Vec<_>>())
+                } else {
+                    None
+                };
                 let mut replies = inline_objects.consume_pty_output(&chunk, &mut runtime.parser);
                 replies.extend(runtime.parser.callbacks_mut().take_replies());
                 for reply in replies {
@@ -331,7 +336,8 @@ pub(crate) fn redraw_soft_terminal(mut params: RedrawParams) {
         asset_server,
     } = &mut params;
     let needs_redraw = redraw.take();
-    let force_live_redraw = presentation.mode == TerminalPresentationMode::Plane3d;
+    let force_live_redraw =
+        presentation.mode == TerminalPresentationMode::Plane3d && !app_config.cursor.model.visible;
     if !needs_redraw && !force_live_redraw && model_load_state.loaded {
         return;
     }
@@ -355,14 +361,18 @@ pub(crate) fn redraw_soft_terminal(mut params: RedrawParams) {
     });
 
     let _ = terminal.sync_image(images, time.elapsed_secs());
-    sync_terminal_debug_image(terminal, images, screen);
+    if presentation.mode == TerminalPresentationMode::Plane3d {
+        sync_terminal_debug_image(terminal, images, screen);
+    }
 
     sync_plane_texture(terminal.image_handle.as_ref(), plane_materials, materials);
-    sync_plane_texture(
-        terminal.back_image_handle.as_ref(),
-        plane_back_materials,
-        materials,
-    );
+    if presentation.mode == TerminalPresentationMode::Plane3d {
+        sync_plane_texture(
+            terminal.back_image_handle.as_ref(),
+            plane_back_materials,
+            materials,
+        );
+    }
 
     if !model_load_state.first_frame_uploaded {
         model_load_state.first_frame_uploaded = true;
@@ -371,7 +381,9 @@ pub(crate) fn redraw_soft_terminal(mut params: RedrawParams) {
     }
 
     if !model_load_state.loaded {
-        spawn_cursor_model(commands, meshes, materials, asset_server, app_config);
+        if app_config.cursor.model.visible {
+            spawn_cursor_model(commands, meshes, materials, asset_server, app_config);
+        }
         model_load_state.loaded = true;
     }
 }
@@ -878,6 +890,10 @@ pub(crate) fn apply_instance_brightness(mut params: BrightnessParams) {
         materials,
         commands,
     } = &mut params;
+    if material_query.is_empty() {
+        return;
+    }
+
     let rgp_brightness = rgp_roots
         .iter()
         .filter_map(|(entity, object)| {
@@ -1039,10 +1055,15 @@ fn extrude_mesh(mesh: Mesh, depth: f32) -> Mesh {
 /// even when the terminal contents are otherwise static.
 pub fn animate_terminal_plane_warp(
     time: Res<Time>,
+    presentation: Res<TerminalPresentation>,
     warp: Res<TerminalPlaneWarp>,
     plane_meshes: Res<TerminalPlaneMeshes>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
+    if presentation.mode == TerminalPresentationMode::Flat2d {
+        return;
+    }
+
     if !warp.is_changed() && warp.amount == 0.0 {
         return;
     }
@@ -1111,6 +1132,10 @@ pub(crate) fn sync_asset_to_terminal_cursor(mut params: CursorSyncParams) {
         plane_query,
         query,
     } = &mut params;
+    if query.is_empty() {
+        return;
+    }
+
     let pose_ctx = CursorPoseContext {
         runtime,
         terminal,
