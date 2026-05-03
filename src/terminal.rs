@@ -16,6 +16,7 @@ use parley_ratatui::{
 use crate::config::{AppConfig, FontConfig, FontStyleConfig, TERMINAL_TEXTURE_LABEL, ThemeConfig};
 use crate::mouse::TerminalSelection;
 
+/// Minimum interval between terminal redraws.
 const REDRAW_THROTTLE: Duration = Duration::from_millis(16);
 
 /// Terminal redraw flag.

@@ -9,7 +9,9 @@ use ratty::plugin::TerminalPlugin;
 use ratty::runtime::TerminalRuntime;
 use ratty::terminal::TerminalSurface;
 
+/// Focused-window update interval for low-power winit mode.
 const FOCUSED_UPDATE_INTERVAL: Duration = Duration::from_millis(33);
+/// Unfocused-window update interval for low-power winit mode.
 const UNFOCUSED_UPDATE_INTERVAL: Duration = Duration::from_millis(250);
 
 fn main() -> anyhow::Result<()> {
