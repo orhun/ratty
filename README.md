@@ -38,7 +38,6 @@ Ever wondered what's _behind_ the terminal? Press <kbd>Ctrl</kbd>+<kbd>Alt</kbd>
 
 Requirements:
 
-- Rust toolchain with Cargo
 - A GPU / graphics stack supported by Bevy and wgpu
 - Melted cheese (optional but recommended)
 
@@ -59,6 +58,13 @@ pacman -S ratty
 Prebuilt binaries are available on the [GitHub releases page](https://github.com/orhun/ratty/releases) for direct download.
 
 ### From Git
+
+Requirements:
+
+- Rust toolchain with Cargo
+- on Bazzite / Bluefin: `rpm-ostree install gcc fontconfig-devel wayland-devel` (then reboot)
+- on Debian / Ubuntu: `apt-get update ; apt-get install gcc pkgconf libfontconfig-dev libwayland-dev`
+- on Fedora: `dnf install gcc fontconfig-devel wayland-devel`
 
 ```bash
 cargo install --git https://github.com/orhun/ratty
