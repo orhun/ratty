@@ -329,7 +329,7 @@ impl TempleEditor {
 
         for (name, row, col, width, height, scale) in presets {
             if self.asset_pool.iter().any(|asset| asset == name) {
-                let path = workspace_asset_string(PathBuf::from("widget/assets").join(name));
+                let path = format!("widget/{name}");
                 let id = self.next_object_id;
                 self.next_object_id += 1;
                 self.insert_object(ObjectPlacement {
@@ -356,7 +356,7 @@ impl TempleEditor {
             .map(|duration| duration.as_nanos() as usize)
             .unwrap_or(0);
         let asset = self.asset_pool[nanos % self.asset_pool.len()].clone();
-        let path = workspace_asset_string(PathBuf::from("widget/assets").join(&asset));
+        let path = format!("widget/{asset}");
         let row = self.cursor_row;
         let col = self.cursor_col;
         let id = self.next_object_id;
@@ -616,7 +616,7 @@ fn place_at_anchor(
 }
 
 fn discover_obj_assets() -> io::Result<Vec<String>> {
-    let assets_dir = workspace_asset("widget/assets");
+    let assets_dir = workspace_asset("assets/widget");
     let mut assets = fs::read_dir(assets_dir)?
         .filter_map(|entry| {
             let entry = entry.ok()?;
@@ -639,10 +639,6 @@ fn workspace_root() -> PathBuf {
 
 fn workspace_asset(path: impl AsRef<Path>) -> PathBuf {
     workspace_root().join(path)
-}
-
-fn workspace_asset_string(path: impl AsRef<Path>) -> String {
-    workspace_asset(path).to_string_lossy().into_owned()
 }
 
 fn random_color(seed: u32) -> [u8; 3] {

@@ -55,13 +55,16 @@ struct DrawingApp<'a> {
 
 impl<'a> DrawingApp<'a> {
     fn new() -> io::Result<Self> {
-        let preview_obj_path = workspace_asset("target/live_draw.obj");
+        // Write the live-drawn preview into the asset root so ratty (which
+        // resolves every RGP path against `assets/`) can read it back.
+        let preview_obj_path = workspace_asset("assets/widget/.live_draw.obj");
         if let Some(parent) = preview_obj_path.parent() {
             fs::create_dir_all(parent)?;
         }
 
         let preview = RattyGraphic::new(
-            RattyGraphicSettings::new(preview_obj_path.to_string_lossy().into_owned())
+            // Send a relative path; ratty joins it with `assets/`.
+            RattyGraphicSettings::new("widget/.live_draw.obj")
                 .id(700)
                 .format(ObjectFormat::Obj)
                 .animate(true)
