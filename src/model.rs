@@ -136,7 +136,6 @@ pub fn load_object_source(path: &Path) -> anyhow::Result<(String, ObjectSource)>
 
     match extension.as_str() {
         "obj" => load_obj_meshes_from_path(Path::new("assets").join(&candidate).as_path())
-            .or_else(|_| load_obj_meshes_from_path(path))
             .map(|meshes| (candidate.clone(), ObjectSource::Obj(meshes))),
         "glb" | "gltf" => {
             let asset_path = ensure_scene_asset_path(&candidate, None)?;
@@ -174,7 +173,17 @@ fn object_asset_path(path: &Path) -> anyhow::Result<String> {
         .iter()
         .position(|component| matches!(component, Component::Normal(part) if *part == "assets"))
     {
-        let relative = components[index + 1..]
+        let after = &components[index + 1..];
+        if after
+            .iter()
+            .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            bail!(
+                "asset path contains traversal components: {}",
+                path.display()
+            );
+        }
+        let relative = after
             .iter()
             .filter_map(|component| match component {
                 Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
@@ -189,6 +198,15 @@ fn object_asset_path(path: &Path) -> anyhow::Result<String> {
     if path.is_absolute() {
         bail!(
             "absolute path is outside the asset root: {}",
+            path.display()
+        );
+    }
+    if components
+        .iter()
+        .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        bail!(
+            "asset path contains traversal components: {}",
             path.display()
         );
     }
@@ -282,4 +300,39 @@ fn build_meshes(models: Vec<tobj::Model>, source: String) -> anyhow::Result<Vec<
 
     ensure!(!output.is_empty(), "no mesh content inside {source}");
     Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_relative_traversal_without_assets_anchor() {
+        let err = object_asset_path(Path::new("../../etc/passwd.obj")).unwrap_err();
+        assert!(err.to_string().contains("traversal"), "{err}");
+    }
+
+    #[test]
+    fn rejects_traversal_after_assets_anchor() {
+        let err = object_asset_path(Path::new("assets/../etc/passwd.obj")).unwrap_err();
+        assert!(err.to_string().contains("traversal"), "{err}");
+    }
+
+    #[test]
+    fn rejects_absolute_path_outside_assets() {
+        let err = object_asset_path(Path::new("/etc/passwd.obj")).unwrap_err();
+        assert!(err.to_string().contains("absolute"), "{err}");
+    }
+
+    #[test]
+    fn accepts_bare_filename_under_objects() {
+        let out = object_asset_path(Path::new("CairoSpinyMouse.obj")).unwrap();
+        assert_eq!(out, "objects/CairoSpinyMouse.obj");
+    }
+
+    #[test]
+    fn accepts_assets_relative_path() {
+        let out = object_asset_path(Path::new("assets/objects/CairoSpinyMouse.obj")).unwrap();
+        assert_eq!(out, "objects/CairoSpinyMouse.obj");
+    }
 }
