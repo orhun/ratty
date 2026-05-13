@@ -52,7 +52,7 @@ cargo install ratty
 ### [Arch Linux](https://archlinux.org/packages/extra/x86_64/ratty/)
 
 ```bash
-pacman -S ratty
+sudo pacman -S ratty
 ```
 
 ### Binary releases
