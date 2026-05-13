@@ -64,9 +64,9 @@ Prebuilt binaries are available on the [GitHub releases page](https://github.com
 Requirements:
 
 - Rust toolchain with Cargo
-- on Bazzite / Bluefin: `rpm-ostree install gcc fontconfig-devel wayland-devel` (then reboot)
-- on Debian / Ubuntu: `apt-get update ; apt-get install gcc pkgconf libfontconfig-dev libwayland-dev`
-- on Fedora: `dnf install gcc fontconfig-devel wayland-devel`
+- on Bazzite / Bluefin: `sudo rpm-ostree install gcc fontconfig-devel wayland-devel` (then reboot)
+- on Debian / Ubuntu: `sudo apt-get update ; sudo apt-get install gcc pkgconf libfontconfig-dev libwayland-dev`
+- on Fedora: `sudo dnf install gcc fontconfig-devel wayland-devel`
 
 ```bash
 cargo install --git https://github.com/orhun/ratty
