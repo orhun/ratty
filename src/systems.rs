@@ -110,19 +110,10 @@ const RESIZE_SETTLE_DELAY: Duration = Duration::from_millis(100);
 
 /// Tracks the most recent window resize event so PTY/grid resizing can be deferred until the
 /// resize stream settles.
-#[derive(Resource)]
+#[derive(Resource, Default)]
 pub struct PendingTerminalResize {
     latest_size: Option<Vec2>,
     last_event: Option<Instant>,
-}
-
-impl Default for PendingTerminalResize {
-    fn default() -> Self {
-        Self {
-            latest_size: None,
-            last_event: None,
-        }
-    }
 }
 
 /// Pumps PTY output into the terminal parser.
@@ -336,6 +327,7 @@ pub(crate) struct RedrawParams<'w, 's> {
     terminal: NonSendMut<'w, TerminalSurface>,
     selection: Res<'w, TerminalSelection>,
     presentation: Res<'w, TerminalPresentation>,
+    pending_resize: Res<'w, PendingTerminalResize>,
     time: Res<'w, Time>,
     redraw: ResMut<'w, TerminalRedrawState>,
     images: ResMut<'w, Assets<Image>>,
@@ -364,6 +356,7 @@ pub(crate) fn redraw_soft_terminal(mut params: RedrawParams) {
         terminal,
         selection,
         presentation,
+        pending_resize,
         time,
         redraw,
         images,
@@ -379,7 +372,8 @@ pub(crate) fn redraw_soft_terminal(mut params: RedrawParams) {
     let force_live_redraw = matches!(
         presentation.mode,
         TerminalPresentationMode::Plane3d | TerminalPresentationMode::Mobius3d
-    ) && !app_config.cursor.model.visible;
+    ) && !app_config.cursor.model.visible
+        && pending_resize.last_event.is_none();
     if !needs_redraw && !force_live_redraw && model_load_state.loaded {
         return;
     }
