@@ -698,7 +698,7 @@ fn spawn_rgp_object(
                 *handles = Some((depth_key, mesh_handles.clone()));
                 mesh_handles
             };
-            let use_lighting = style.depth > 0.0;
+            let use_lighting = true;
             let [r, g, b] = match style.color {
                 Some([r, g, b]) => [r, g, b],
                 None => [255, 255, 255],
