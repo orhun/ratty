@@ -186,17 +186,70 @@ pub struct TerminalRuntime {
 
 /// Returns the default shell for the current platform.
 ///
-/// On Windows this prefers `%COMSPEC%` (the resolved command processor) and
-/// falls back to `cmd.exe`. On other platforms it falls back to `/bin/sh`.
+/// On Windows this prefers Git for Windows' `bash.exe` when it can be found
+/// (most users running terminal apps on Windows want a POSIX shell so the
+/// Ratatui demos behave the same as on Linux/macOS), then `%COMSPEC%` (the
+/// resolved command processor), and finally `cmd.exe`. On other platforms
+/// it falls back to `/bin/sh`.
 fn default_shell() -> String {
     #[cfg(windows)]
     {
+        if let Some(bash) = find_git_bash() {
+            return bash;
+        }
         env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
     }
     #[cfg(not(windows))]
     {
         "/bin/sh".to_string()
     }
+}
+
+/// Looks for a Git for Windows `bash.exe` in the well-known install
+/// locations, then on `PATH`. Returns the first match.
+///
+/// `usr/bin/bash.exe` is the MSYS shell bundled with Git for Windows;
+/// `bin/bash.exe` is the shim used by the Git Bash launcher. Either works
+/// as a PTY shell.
+#[cfg(windows)]
+fn find_git_bash() -> Option<String> {
+    use std::path::PathBuf;
+
+    // Flat candidate table keeps every probe path on one footing: each entry
+    // is `(env_var, subpath_under_that_directory)`. New install layouts (Git
+    // via Scoop, Chocolatey, custom installers) only need another row here.
+    const CANDIDATES: &[(&str, &str)] = &[
+        ("ProgramW6432", "Git/bin/bash.exe"),
+        ("ProgramW6432", "Git/usr/bin/bash.exe"),
+        ("ProgramFiles", "Git/bin/bash.exe"),
+        ("ProgramFiles", "Git/usr/bin/bash.exe"),
+        ("ProgramFiles(x86)", "Git/bin/bash.exe"),
+        ("ProgramFiles(x86)", "Git/usr/bin/bash.exe"),
+        ("LOCALAPPDATA", "Programs/Git/bin/bash.exe"),
+        ("LOCALAPPDATA", "Programs/Git/usr/bin/bash.exe"),
+    ];
+
+    for (env_var, sub) in CANDIDATES {
+        let Ok(base) = env::var(env_var) else {
+            continue;
+        };
+        let candidate = PathBuf::from(base).join(sub);
+        if candidate.is_file() {
+            return candidate.into_os_string().into_string().ok();
+        }
+    }
+
+    // Final fallback: walk PATH so custom installs (Scoop shims, etc.) work.
+    if let Ok(path) = env::var("PATH") {
+        for entry in env::split_paths(&path) {
+            let candidate = entry.join("bash.exe");
+            if candidate.is_file() {
+                return candidate.into_os_string().into_string().ok();
+            }
+        }
+    }
+
+    None
 }
 
 impl TerminalRuntime {
