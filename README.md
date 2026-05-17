@@ -166,6 +166,26 @@ Split-pane drawing demo with a 2D canvas on the left and a live 3D preview on th
   <video width="80%" src="https://github.com/user-attachments/assets/8b53515b-b887-4d03-a54c-7e7aa7ea128c"/>
 </div>
 
+### Apps
+
+Here are some applications explicitly built around Ratty's Graphics Protocol:
+
+#### [Ratscad](https://github.com/qewer33/ratscad)
+
+Terminal CAD:
+
+<div>
+  <video width="80%" src="https://github.com/user-attachments/assets/7fe31947-b734-4d19-9fba-ef606cc7b975"/>
+</div>
+
+#### [Ratty-runner](https://github.com/ozzyocak/ratty-runner)
+
+Endless runner built for Ratty:
+
+<div>
+  <video width="80%" src="https://github.com/user-attachments/assets/bf3b84a9-7f45-4fac-ae91-240c7ce7c70e"/>
+</div>
+
 ## Architecture
 
 ### Rendering pipeline
