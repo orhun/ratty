@@ -184,6 +184,21 @@ pub struct TerminalRuntime {
     pub pty_disconnected: bool,
 }
 
+/// Returns the default shell for the current platform.
+///
+/// On Windows this prefers `%COMSPEC%` (the resolved command processor) and
+/// falls back to `cmd.exe`. On other platforms it falls back to `/bin/sh`.
+fn default_shell() -> String {
+    #[cfg(windows)]
+    {
+        env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
+    }
+    #[cfg(not(windows))]
+    {
+        "/bin/sh".to_string()
+    }
+}
+
 impl TerminalRuntime {
     /// Spawns the shell PTY runtime.
     ///
@@ -218,7 +233,7 @@ impl TerminalRuntime {
                 .as_ref()
                 .map(|path| path.to_string_lossy().into_owned())
                 .or_else(|| env::var("SHELL").ok())
-                .unwrap_or_else(|| "/bin/sh".to_string());
+                .unwrap_or_else(default_shell);
             let mut cmd = CommandBuilder::new(shell);
             cmd.args(&config.shell.args);
             cmd
