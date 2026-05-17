@@ -38,8 +38,8 @@ use crate::scene::{
 };
 use crate::terminal::{TerminalRedrawState, TerminalSurface, TerminalWidget};
 use bevy::app::AppExit;
-use bevy::camera::Viewport;
 use bevy::camera::visibility::RenderLayers;
+use bevy::camera::{SubCameraView, Viewport};
 use bevy::ecs::message::{MessageReader, MessageWriter};
 use bevy::ecs::system::SystemParam;
 use bevy::gltf::GltfAssetLabel;
@@ -1005,11 +1005,11 @@ pub(crate) fn sync_rgp_clipping(mut params: RgpClipParams) {
         };
         active_viewports.insert(
             object.object_id,
-            clip_viewport(window, &params.viewport, &layout),
+            clip_view(window, &params.viewport, &layout),
         );
     }
 
-    for (&object_id, viewport_rect) in &active_viewports {
+    for (&object_id, (viewport_rect, sub_view)) in &active_viewports {
         let layer = params.clip_layers.layer_for(object_id);
         if let Some(&root) = root_entities.get(&object_id) {
             set_render_layer(&mut params.commands, &params.children, root, layer);
@@ -1021,6 +1021,7 @@ pub(crate) fn sync_rgp_clipping(mut params: RgpClipParams) {
                 continue;
             }
             camera.viewport = Some(viewport_rect.clone());
+            camera.sub_camera_view = Some(*sub_view);
             *visibility = Visibility::Visible;
             camera_found = true;
             break;
@@ -1034,6 +1035,7 @@ pub(crate) fn sync_rgp_clipping(mut params: RgpClipParams) {
                     order: 2,
                     clear_color: bevy::camera::ClearColorConfig::None,
                     viewport: Some(viewport_rect.clone()),
+                    sub_camera_view: Some(*sub_view),
                     ..default()
                 },
                 Projection::Orthographic(OrthographicProjection {
@@ -1068,8 +1070,12 @@ pub(crate) fn sync_rgp_clipping(mut params: RgpClipParams) {
     }
 }
 
-// Clips a Flat2d object by rendering it through a camera viewport that matches its active clip rect.
-fn clip_viewport(window: &Window, viewport: &TerminalViewport, layout: &InlineLayout) -> Viewport {
+// Clips a Flat2d object by rendering it through a camera viewport and matching sub-view.
+fn clip_view(
+    window: &Window,
+    viewport: &TerminalViewport,
+    layout: &InlineLayout,
+) -> (Viewport, SubCameraView) {
     let left = viewport.center.x - viewport.size.x * 0.5;
     let top = viewport.center.y + viewport.size.y * 0.5;
     let logical_x = layout.center_x - layout.pixel_width * 0.5 - left;
@@ -1090,7 +1096,14 @@ fn clip_viewport(window: &Window, viewport: &TerminalViewport, layout: &InlineLa
         window.physical_width(),
         window.physical_height(),
     ));
-    clip
+    (
+        clip.clone(),
+        SubCameraView {
+            full_size: UVec2::new(window.physical_width(), window.physical_height()),
+            offset: clip.physical_position.as_vec2(),
+            size: clip.physical_size,
+        },
+    )
 }
 
 // Applies a single render layer to an object root and every descendant so only its clip camera sees it.
