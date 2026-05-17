@@ -8,6 +8,51 @@ use std::path::Path;
 
 const PAYLOAD_CHUNK_SIZE: usize = 3072;
 
+/// Placement clipping settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RattyGraphicClip {
+    /// Whether clipping is enabled.
+    pub enabled: bool,
+    /// Optional explicit clip rectangle in terminal cells.
+    pub region: Option<Rect>,
+}
+
+impl RattyGraphicClip {
+    /// Disables clipping.
+    pub const fn disabled() -> Self {
+        Self {
+            enabled: false,
+            region: None,
+        }
+    }
+
+    /// Enables clipping to the placement rectangle.
+    pub const fn enabled() -> Self {
+        Self {
+            enabled: true,
+            region: None,
+        }
+    }
+
+    /// Enables clipping to an explicit terminal-cell rectangle.
+    pub const fn region(region: Rect) -> Self {
+        Self {
+            enabled: true,
+            region: Some(region),
+        }
+    }
+}
+
+impl From<bool> for RattyGraphicClip {
+    fn from(enabled: bool) -> Self {
+        if enabled {
+            Self::enabled()
+        } else {
+            Self::disabled()
+        }
+    }
+}
+
 /// Object asset format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObjectFormat {
@@ -64,6 +109,8 @@ pub struct RattyGraphicSettings<'a> {
     pub color: Option<[u8; 3]>,
     /// Object brightness multiplier.
     pub brightness: f32,
+    /// Placement clipping settings.
+    pub clip: RattyGraphicClip,
     /// Translation offset relative to the anchor.
     pub offset: [f32; 3],
     /// Rotation in degrees.
@@ -85,6 +132,7 @@ impl<'a> RattyGraphicSettings<'a> {
             depth: 0.0,
             color: None,
             brightness: 1.0,
+            clip: RattyGraphicClip::disabled(),
             offset: [0.0, 0.0, 0.0],
             rotation: [0.0, 0.0, 0.0],
             scale3: [1.0, 1.0, 1.0],
@@ -130,6 +178,12 @@ impl<'a> RattyGraphicSettings<'a> {
     /// Sets the brightness multiplier.
     pub fn brightness(mut self, brightness: f32) -> Self {
         self.brightness = brightness;
+        self
+    }
+
+    /// Sets clipping against the placement rectangle or an explicit clip region.
+    pub fn clip(mut self, clip: impl Into<RattyGraphicClip>) -> Self {
+        self.clip = clip.into();
         self
     }
 
@@ -275,8 +329,18 @@ impl<'a> RattyGraphic<'a> {
     pub fn place_sequence(&self, area: Rect) -> String {
         let center_row = area.y.saturating_add(area.height.saturating_sub(1) / 2);
         let center_col = area.x.saturating_add(area.width.saturating_sub(1) / 2);
+        let clip_fields = match self.settings.clip.region {
+            Some(region) => format!(
+                ";clip_row={};clip_col={};clip_w={};clip_h={}",
+                region.y,
+                region.x,
+                region.width.max(1),
+                region.height.max(1),
+            ),
+            None => String::new(),
+        };
         format!(
-            "\x1b_ratty;g;p;id={};row={};col={};w={};h={};animate={};scale={};depth={};color={};brightness={};px={};py={};pz={};rx={};ry={};rz={};sx={};sy={};sz={}\x1b\\",
+            "\x1b_ratty;g;p;id={};row={};col={};w={};h={};animate={};scale={};depth={};color={};brightness={};clip={}{};px={};py={};pz={};rx={};ry={};rz={};sx={};sy={};sz={}\x1b\\",
             self.settings.id,
             center_row,
             center_col,
@@ -290,6 +354,8 @@ impl<'a> RattyGraphic<'a> {
                 .map(|[r, g, b]| format!("{r:02x}{g:02x}{b:02x}"))
                 .unwrap_or_else(|| "ffffff".to_string()),
             self.settings.brightness,
+            u8::from(self.settings.clip.enabled),
+            clip_fields,
             self.settings.offset[0],
             self.settings.offset[1],
             self.settings.offset[2],
@@ -304,8 +370,18 @@ impl<'a> RattyGraphic<'a> {
 
     /// Returns the RGP update sequence.
     pub fn update_sequence(&self) -> String {
+        let clip_fields = match self.settings.clip.region {
+            Some(region) => format!(
+                ";clip_row={};clip_col={};clip_w={};clip_h={}",
+                region.y,
+                region.x,
+                region.width.max(1),
+                region.height.max(1),
+            ),
+            None => String::new(),
+        };
         format!(
-            "\x1b_ratty;g;u;id={};animate={};scale={};depth={};color={};brightness={};px={};py={};pz={};rx={};ry={};rz={};sx={};sy={};sz={}\x1b\\",
+            "\x1b_ratty;g;u;id={};animate={};scale={};depth={};color={};brightness={};clip={}{};px={};py={};pz={};rx={};ry={};rz={};sx={};sy={};sz={}\x1b\\",
             self.settings.id,
             u8::from(self.settings.animate),
             self.settings.scale,
@@ -315,6 +391,8 @@ impl<'a> RattyGraphic<'a> {
                 .map(|[r, g, b]| format!("{r:02x}{g:02x}{b:02x}"))
                 .unwrap_or_else(|| "ffffff".to_string()),
             self.settings.brightness,
+            u8::from(self.settings.clip.enabled),
+            clip_fields,
             self.settings.offset[0],
             self.settings.offset[1],
             self.settings.offset[2],

@@ -20,6 +20,10 @@ pub struct RgpPlacementStyle {
     pub color: Option<[u8; 3]>,
     /// Brightness multiplier.
     pub brightness: f32,
+    /// Enables clipping.
+    pub clip: bool,
+    /// Optional explicit clip rectangle in terminal cells.
+    pub clip_rect: Option<RgpClipRect>,
     /// Translation offset relative to the anchor.
     pub offset: [f32; 3],
     /// Rotation in degrees.
@@ -41,6 +45,10 @@ pub struct RgpPlacementUpdate {
     pub color: Option<[u8; 3]>,
     /// Updates the brightness multiplier.
     pub brightness: Option<f32>,
+    /// Updates clipping.
+    pub clip: Option<bool>,
+    /// Updates the explicit clip rectangle in terminal cells.
+    pub clip_rect: Option<RgpClipRect>,
     /// Updates the translation offset relative to the anchor.
     pub offset: [Option<f32>; 3],
     /// Updates the rotation in degrees.
@@ -65,6 +73,19 @@ pub enum RgpRegisterSource {
         /// Decoded payload bytes.
         data: Vec<u8>,
     },
+}
+
+/// Explicit clip rectangle in terminal cells.
+#[derive(Clone, Copy)]
+pub struct RgpClipRect {
+    /// Top row of the clip rectangle.
+    pub row: u16,
+    /// Left column of the clip rectangle.
+    pub col: u16,
+    /// Clip width in terminal cells.
+    pub columns: u32,
+    /// Clip height in terminal cells.
+    pub rows: u32,
 }
 
 /// Consumes an RGP APC sequence.
@@ -98,6 +119,11 @@ pub fn consume_sequence(sequence: &[u8]) -> Option<RgpOperation> {
     let mut depth = None;
     let mut color = None;
     let mut brightness = None;
+    let mut clip = None;
+    let mut clip_row = None;
+    let mut clip_col = None;
+    let mut clip_width = None;
+    let mut clip_height = None;
     let mut px = None;
     let mut py = None;
     let mut pz = None;
@@ -132,6 +158,11 @@ pub fn consume_sequence(sequence: &[u8]) -> Option<RgpOperation> {
             "depth" => depth = value.parse().ok(),
             "color" | "tint" => color = parse_color(value),
             "brightness" => brightness = value.parse().ok(),
+            "clip" => clip = parse_bool(value),
+            "clip_row" => clip_row = value.parse().ok(),
+            "clip_col" => clip_col = value.parse().ok(),
+            "clip_w" => clip_width = value.parse().ok(),
+            "clip_h" => clip_height = value.parse().ok(),
             "px" => px = value.parse().ok(),
             "py" => py = value.parse().ok(),
             "pz" => pz = value.parse().ok(),
@@ -183,6 +214,8 @@ pub fn consume_sequence(sequence: &[u8]) -> Option<RgpOperation> {
                     depth: depth.unwrap_or(0.0),
                     color,
                     brightness: brightness.unwrap_or(1.0),
+                    clip: clip.unwrap_or(false),
+                    clip_rect: clip_rect(clip_row, clip_col, clip_width, clip_height),
                     offset: [px.unwrap_or(0.0), py.unwrap_or(0.0), pz.unwrap_or(0.0)],
                     rotation: [rx.unwrap_or(0.0), ry.unwrap_or(0.0), rz.unwrap_or(0.0)],
                     scale3: [sx.unwrap_or(1.0), sy.unwrap_or(1.0), sz.unwrap_or(1.0)],
@@ -197,6 +230,8 @@ pub fn consume_sequence(sequence: &[u8]) -> Option<RgpOperation> {
                 depth,
                 color,
                 brightness,
+                clip,
+                clip_rect: clip_rect(clip_row, clip_col, clip_width, clip_height),
                 offset: [px, py, pz],
                 rotation: [rx, ry, rz],
                 scale3: [sx, sy, sz],
@@ -260,7 +295,21 @@ pub enum RgpOperation {
 
 /// Returns the RGP support reply sequence.
 pub fn support_reply() -> Vec<u8> {
-    b"\x1b_ratty;g;s;v=1;fmt=obj|glb;path=1;payload=1;chunk=1;anim=1;depth=1;color=1;brightness=1;transform=1;update=1\x1b\\".to_vec()
+    b"\x1b_ratty;g;s;v=1;fmt=obj|glb;path=1;payload=1;chunk=1;anim=1;depth=1;color=1;brightness=1;clip=1;transform=1;update=1\x1b\\".to_vec()
+}
+
+fn clip_rect(
+    row: Option<u16>,
+    col: Option<u16>,
+    columns: Option<u32>,
+    rows: Option<u32>,
+) -> Option<RgpClipRect> {
+    Some(RgpClipRect {
+        row: row?,
+        col: col?,
+        columns: columns?,
+        rows: rows?,
+    })
 }
 
 fn parse_color(value: &str) -> Option<[u8; 3]> {

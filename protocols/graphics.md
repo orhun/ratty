@@ -65,7 +65,7 @@ ESC _ ratty;g;s ESC \
 Ratty replies:
 
 ```text
-ESC _ ratty;g;s;v=1;fmt=obj|glb;path=1;payload=1;chunk=1;anim=1;depth=1;color=1;brightness=1;transform=1;update=1 ESC \
+ESC _ ratty;g;s;v=1;fmt=obj|glb;path=1;payload=1;chunk=1;anim=1;depth=1;color=1;brightness=1;clip=1;transform=1;update=1 ESC \
 ```
 
 Fields:
@@ -79,6 +79,7 @@ Fields:
 - `depth=1`: `depth=<f32>` placement is supported
 - `color=1`: `color=<RRGGBB>` placement is supported
 - `brightness=1`: `brightness=<f32>` placement is supported
+- `clip=1`: `clip=1` placement clipping is supported
 - `transform=1`: transform fields such as rotation and offsets are supported
 - `update=1`: `u` object updates are supported
 
@@ -151,7 +152,7 @@ Places a previously registered object into terminal cell space.
 Client sends:
 
 ```text
-ESC _ ratty;g;p;id=42;row=12;col=8;w=4;h=2;animate=1;scale=1.0;depth=2.5;color=ff8844;brightness=1.0;px=0;py=0;pz=0;rx=0;ry=45;rz=0;sx=1;sy=1;sz=1 ESC \
+ESC _ ratty;g;p;id=42;row=12;col=8;w=4;h=2;animate=1;scale=1.0;depth=2.5;color=ff8844;brightness=1.0;clip=1;clip_row=10;clip_col=4;clip_w=12;clip_h=6;px=0;py=0;pz=0;rx=0;ry=45;rz=0;sx=1;sy=1;sz=1 ESC \
 ```
 
 Fields:
@@ -166,6 +167,9 @@ Fields:
 - `depth`: optional z-offset, defaults to `0.0`
 - `color`: optional RGB color as `RRGGBB`
 - `brightness`: optional brightness multiplier, defaults to `1.0`
+- `clip`: optional, `1` enables clipping
+- `clip_row`, `clip_col`, `clip_w`, `clip_h`: optional explicit clip rectangle in terminal cells
+  - if omitted, clipping uses the placement rectangle
 - `px`, `py`, `pz`: optional translation offset relative to the anchor, defaults to `0`
 - `rx`, `ry`, `rz`: optional rotation in degrees, defaults to `0`
 - `sx`, `sy`, `sz`: optional non-uniform scale, defaults to `1`
@@ -190,6 +194,8 @@ Fields are optional and mirror the mutable fields from `p`:
 - `depth`
 - `color`
 - `brightness`
+- `clip`
+- `clip_row`, `clip_col`, `clip_w`, `clip_h`
 - `px`, `py`, `pz`
 - `rx`, `ry`, `rz`
 - `sx`, `sy`, `sz`

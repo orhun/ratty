@@ -10,7 +10,7 @@ inline 3D objects in [Ratty](https://github.com/orhun/ratty) through the
 use std::io;
 
 use ratatui_core::{buffer::Buffer, layout::Rect, widgets::Widget};
-use ratatui_ratty::{ObjectFormat, RattyGraphic, RattyGraphicSettings};
+use ratatui_ratty::{ObjectFormat, RattyGraphic, RattyGraphicClip, RattyGraphicSettings};
 
 fn main() -> io::Result<()> {
     let mut graphic = RattyGraphic::new(
@@ -20,6 +20,7 @@ fn main() -> io::Result<()> {
             .animate(true)
             .scale(1.0)
             .depth(1.5)
+            .clip(RattyGraphicClip::region(Rect::new(8, 4, 24, 10)))
             .rotation([0.0, 30.0, 0.0]),
     );
 

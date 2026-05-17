@@ -7,9 +7,9 @@ use crate::keyboard::{TerminalClipboard, TerminalKeyBindings, handle_keyboard_in
 use crate::mouse::{TerminalSelection, handle_mouse_input};
 use crate::scene::{apply_terminal_presentation, setup_scene};
 use crate::systems::{
-    animate_mobius_transition, animate_terminal_plane_warp, apply_inline_objects,
+    RgpClipLayers, animate_mobius_transition, animate_terminal_plane_warp, apply_inline_objects,
     apply_instance_brightness, handle_window_resize, pump_pty_output, redraw_soft_terminal,
-    sync_asset_to_terminal_cursor, sync_inline_objects, sync_rgp_objects,
+    sync_asset_to_terminal_cursor, sync_inline_objects, sync_rgp_clipping, sync_rgp_objects,
 };
 use crate::terminal::TerminalRedrawState;
 
@@ -22,6 +22,7 @@ impl Plugin for TerminalPlugin {
             .init_resource::<TerminalInlineObjects>()
             .init_resource::<TerminalRedrawState>()
             .init_resource::<TerminalKeyBindings>()
+            .init_resource::<RgpClipLayers>()
             .init_non_send_resource::<TerminalClipboard>()
             .add_systems(Startup, setup_scene)
             .add_systems(Update, pump_pty_output)
@@ -46,6 +47,7 @@ impl Plugin for TerminalPlugin {
             )
             .add_systems(Update, sync_inline_objects.after(redraw_soft_terminal))
             .add_systems(Update, sync_rgp_objects.after(sync_inline_objects))
+            .add_systems(Update, sync_rgp_clipping.after(sync_rgp_objects))
             .add_systems(Update, apply_instance_brightness.after(sync_rgp_objects))
             .add_systems(Update, animate_mobius_transition)
             .add_systems(Update, animate_terminal_plane_warp)

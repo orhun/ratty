@@ -10,7 +10,7 @@ use vt100::Callbacks;
 use crate::kitty::{KittyOperation, KittyParserState, refresh_kitty_placeholder_anchors};
 use crate::model::{ObjectSource, load_object_source, load_object_source_from_bytes};
 use crate::rgp::{
-    RgpOperation, RgpPlacementStyle, RgpPlacementUpdate, RgpRegisterSource,
+    RgpClipRect, RgpOperation, RgpPlacementStyle, RgpPlacementUpdate, RgpRegisterSource,
     consume_sequence as consume_rgp_sequence, support_reply,
 };
 const APC_START: &[u8] = b"\x1b_";
@@ -572,6 +572,10 @@ pub struct InlineStyle {
     pub color: Option<[u8; 3]>,
     /// Brightness multiplier.
     pub brightness: f32,
+    /// Enables clipping.
+    pub clip: bool,
+    /// Optional explicit clip rectangle in terminal cells.
+    pub clip_rect: Option<RgpClipRect>,
     /// Translation offset relative to the anchor.
     pub offset: Vec3,
     /// Rotation in degrees.
@@ -588,6 +592,8 @@ impl From<RgpPlacementStyle> for InlineStyle {
             depth: value.depth,
             color: value.color,
             brightness: value.brightness,
+            clip: value.clip,
+            clip_rect: value.clip_rect,
             offset: Vec3::from_array(value.offset),
             rotation: Vec3::from_array(value.rotation),
             scale3: Vec3::from_array(value.scale3),
@@ -610,6 +616,12 @@ fn apply_rgp_update(style: &mut InlineStyle, update: RgpPlacementUpdate) {
     }
     if let Some(brightness) = update.brightness {
         style.brightness = brightness;
+    }
+    if let Some(clip) = update.clip {
+        style.clip = clip;
+    }
+    if let Some(clip_rect) = update.clip_rect {
+        style.clip_rect = Some(clip_rect);
     }
     apply_vec3_update(&mut style.offset, update.offset);
     apply_vec3_update(&mut style.rotation, update.rotation);

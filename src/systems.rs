@@ -38,6 +38,8 @@ use crate::scene::{
 };
 use crate::terminal::{TerminalRedrawState, TerminalSurface, TerminalWidget};
 use bevy::app::AppExit;
+use bevy::camera::Viewport;
+use bevy::camera::visibility::RenderLayers;
 use bevy::ecs::message::{MessageReader, MessageWriter};
 use bevy::ecs::system::SystemParam;
 use bevy::gltf::GltfAssetLabel;
@@ -46,7 +48,7 @@ use bevy::mesh::{Indices, VertexAttributeValues};
 use bevy::prelude::*;
 use bevy::render::render_resource::PrimitiveTopology;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-use bevy::window::{PrimaryWindow, WindowResized};
+use bevy::window::{PrimaryWindow, Window, WindowResized};
 
 struct InlineLayout {
     columns: u32,
@@ -85,6 +87,45 @@ struct CursorPoseContext<'a, 'w, 's> {
 /// Marker for objects that already had instance brightness applied.
 #[derive(Component)]
 pub struct BrightnessAdjusted;
+
+/// Marker for an RGP clip camera tied to a specific object.
+#[derive(Component)]
+pub struct RgpClipCamera {
+    /// Registered object identifier.
+    pub object_id: u32,
+}
+
+/// Tracks render-layer assignments for clipped RGP objects.
+#[derive(Resource, Default)]
+pub struct RgpClipLayers {
+    next_layer: usize,
+    free_layers: Vec<usize>,
+    assigned_layers: HashMap<u32, usize>,
+}
+
+impl RgpClipLayers {
+    // Keeps a stable render-layer assignment per clipped object so its camera can be updated in place.
+    fn layer_for(&mut self, object_id: u32) -> usize {
+        if let Some(layer) = self.assigned_layers.get(&object_id) {
+            return *layer;
+        }
+
+        let layer = self.free_layers.pop().unwrap_or_else(|| {
+            self.next_layer = self.next_layer.max(1);
+            let layer = self.next_layer;
+            self.next_layer += 1;
+            layer
+        });
+        self.assigned_layers.insert(object_id, layer);
+        layer
+    }
+
+    fn release(&mut self, object_id: u32) {
+        if let Some(layer) = self.assigned_layers.remove(&object_id) {
+            self.free_layers.push(layer);
+        }
+    }
+}
 
 type PlaneTransformQuery<'w, 's> =
     Query<'w, 's, &'static Transform, (With<TerminalPlane>, Without<TerminalRgpObject>)>;
@@ -876,6 +917,206 @@ pub(crate) fn sync_rgp_objects(mut params: RgpSyncParams) {
                 *visibility = Visibility::Visible;
             }
         }
+    }
+}
+
+/// RGP clipping synchronization parameters.
+#[derive(SystemParam)]
+pub(crate) struct RgpClipParams<'w, 's> {
+    commands: Commands<'w, 's>,
+    clip_layers: ResMut<'w, RgpClipLayers>,
+    terminal: NonSend<'w, TerminalSurface>,
+    viewport: Res<'w, TerminalViewport>,
+    presentation: Res<'w, TerminalPresentation>,
+    inline_objects: Res<'w, TerminalInlineObjects>,
+    primary_window: Query<'w, 's, &'static Window, With<PrimaryWindow>>,
+    roots: Query<
+        'w,
+        's,
+        (Entity, &'static TerminalRgpObject, &'static Visibility),
+        Without<RgpClipCamera>,
+    >,
+    children: Query<'w, 's, &'static Children>,
+    clip_cameras: Query<
+        'w,
+        's,
+        (
+            Entity,
+            &'static RgpClipCamera,
+            &'static mut Camera,
+            &'static mut Visibility,
+        ),
+        Without<TerminalRgpObject>,
+    >,
+}
+
+/// Synchronizes Flat2d clipping for RGP objects.
+pub(crate) fn sync_rgp_clipping(mut params: RgpClipParams) {
+    let Ok(window) = params.primary_window.single() else {
+        return;
+    };
+
+    let cell_width = params.viewport.size.x / params.terminal.cols.max(1) as f32;
+    let cell_height = params.viewport.size.y / params.terminal.rows.max(1) as f32;
+    let mut active_viewports = HashMap::new();
+    let mut root_entities = HashMap::new();
+
+    for (entity, object, visibility) in params.roots.iter() {
+        root_entities.insert(object.object_id, entity);
+        if *visibility == Visibility::Hidden
+            || params.presentation.mode != TerminalPresentationMode::Flat2d
+        {
+            continue;
+        }
+        let Some(anchor) = params.inline_objects.anchors.get(&object.object_id) else {
+            continue;
+        };
+        if !anchor.style.clip {
+            continue;
+        }
+
+        let layout = if let Some(clip_rect) = anchor.style.clip_rect {
+            let cols = params.terminal.cols.max(1) as f32;
+            let rows = params.terminal.rows.max(1) as f32;
+            let center_x = params.viewport.center.x - params.viewport.size.x * 0.5
+                + (clip_rect.col as f32 + clip_rect.columns as f32 * 0.5) * cell_width;
+            let center_y = params.viewport.center.y + params.viewport.size.y * 0.5
+                - (clip_rect.row as f32 + clip_rect.rows as f32 * 0.5) * cell_height;
+            InlineLayout {
+                columns: clip_rect.columns,
+                rows: clip_rect.rows,
+                center_x,
+                center_y,
+                local_x: (clip_rect.col as f32 + clip_rect.columns as f32 * 0.5) / cols - 0.5,
+                local_y: 0.5 - (clip_rect.row as f32 + clip_rect.rows as f32 * 0.5) / rows,
+                local_width: clip_rect.columns as f32 / cols,
+                local_height: clip_rect.rows as f32 / rows,
+                pixel_width: clip_rect.columns as f32 * cell_width,
+                pixel_height: clip_rect.rows as f32 * cell_height,
+            }
+        } else {
+            inline_layout(
+                anchor,
+                &params.terminal,
+                &params.viewport,
+                cell_width,
+                cell_height,
+            )
+        };
+        active_viewports.insert(
+            object.object_id,
+            clip_viewport(window, &params.viewport, &layout),
+        );
+    }
+
+    for (&object_id, viewport_rect) in &active_viewports {
+        let layer = params.clip_layers.layer_for(object_id);
+        if let Some(&root) = root_entities.get(&object_id) {
+            set_render_layer(&mut params.commands, &params.children, root, layer);
+        }
+
+        let mut camera_found = false;
+        for (_, marker, mut camera, mut visibility) in &mut params.clip_cameras {
+            if marker.object_id != object_id {
+                continue;
+            }
+            camera.viewport = Some(viewport_rect.clone());
+            *visibility = Visibility::Visible;
+            camera_found = true;
+            break;
+        }
+
+        if !camera_found {
+            params.commands.spawn((
+                RgpClipCamera { object_id },
+                Camera3d::default(),
+                Camera {
+                    order: 2,
+                    clear_color: bevy::camera::ClearColorConfig::None,
+                    viewport: Some(viewport_rect.clone()),
+                    ..default()
+                },
+                Projection::Orthographic(OrthographicProjection {
+                    near: -2000.0,
+                    far: 2000.0,
+                    ..OrthographicProjection::default_3d()
+                }),
+                Transform::from_xyz(0.0, 0.0, 800.0).looking_at(Vec3::ZERO, Vec3::Y),
+                Msaa::Off,
+                RenderLayers::layer(layer),
+            ));
+        }
+    }
+
+    let stale_ids = params
+        .clip_layers
+        .assigned_layers
+        .keys()
+        .copied()
+        .filter(|object_id| !active_viewports.contains_key(object_id))
+        .collect::<Vec<_>>();
+    for object_id in stale_ids {
+        if let Some(&root) = root_entities.get(&object_id) {
+            clear_render_layer(&mut params.commands, &params.children, root);
+        }
+        for (entity, marker, _, _) in &mut params.clip_cameras {
+            if marker.object_id == object_id {
+                params.commands.entity(entity).despawn();
+            }
+        }
+        params.clip_layers.release(object_id);
+    }
+}
+
+// Clips a Flat2d object by rendering it through a camera viewport that matches its active clip rect.
+fn clip_viewport(window: &Window, viewport: &TerminalViewport, layout: &InlineLayout) -> Viewport {
+    let left = viewport.center.x - viewport.size.x * 0.5;
+    let top = viewport.center.y + viewport.size.y * 0.5;
+    let logical_x = layout.center_x - layout.pixel_width * 0.5 - left;
+    let logical_y = top - (layout.center_y + layout.pixel_height * 0.5);
+    let scale_factor = window.scale_factor();
+    let mut clip = Viewport {
+        physical_position: UVec2::new(
+            (logical_x.max(0.0) * scale_factor).round() as u32,
+            (logical_y.max(0.0) * scale_factor).round() as u32,
+        ),
+        physical_size: UVec2::new(
+            (layout.pixel_width.max(1.0) * scale_factor).round() as u32,
+            (layout.pixel_height.max(1.0) * scale_factor).round() as u32,
+        ),
+        depth: 0.0..1.0,
+    };
+    clip.clamp_to_size(UVec2::new(
+        window.physical_width(),
+        window.physical_height(),
+    ));
+    clip
+}
+
+// Applies a single render layer to an object root and every descendant so only its clip camera sees it.
+fn set_render_layer(
+    commands: &mut Commands,
+    children_query: &Query<&Children>,
+    entity: Entity,
+    layer: usize,
+) {
+    commands.entity(entity).insert(RenderLayers::layer(layer));
+    let Ok(children) = children_query.get(entity) else {
+        return;
+    };
+    for child in children.iter() {
+        set_render_layer(commands, children_query, child, layer);
+    }
+}
+
+// Restores an object hierarchy to the default render layer when clipping is disabled.
+fn clear_render_layer(commands: &mut Commands, children_query: &Query<&Children>, entity: Entity) {
+    commands.entity(entity).remove::<RenderLayers>();
+    let Ok(children) = children_query.get(entity) else {
+        return;
+    };
+    for child in children.iter() {
+        clear_render_layer(commands, children_query, child);
     }
 }
 
