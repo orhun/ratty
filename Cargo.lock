@@ -3978,7 +3978,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4054,9 +4054,9 @@ dependencies = [
 
 [[package]]
 name = "parley_ratatui"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e14550b93e5648c33d1f54208a47f852ce95babbf96349d6fcd4f35779934455"
+checksum = "3c7068b94ff255cdfa17af62555934b5b13bf5903cd49a224cc1f403ec44f68b"
 dependencies = [
  "naga 28.0.0",
  "parley",

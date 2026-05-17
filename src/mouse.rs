@@ -494,6 +494,14 @@ fn encode_mouse_event(
     }
 }
 
+pub(crate) fn encode_mouse_wheel(
+    cell: UVec2,
+    up: bool,
+    encoding: MouseProtocolEncoding,
+) -> Vec<u8> {
+    encode_mouse_event(cell, if up { 64 } else { 65 }, false, encoding)
+}
+
 fn position_to_cell(
     position: Vec2,
     viewport: &TerminalViewport,

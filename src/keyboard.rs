@@ -9,7 +9,7 @@ use bevy::prelude::*;
 use arboard::Clipboard;
 
 use crate::config::{AppConfig, BindingAction, FontConfig, KeyBindingConfig};
-use crate::mouse::TerminalSelection;
+use crate::mouse::{TerminalSelection, encode_mouse_wheel};
 use crate::runtime::TerminalRuntime;
 use crate::scene::{
     MobiusTransition, TerminalPlaneView, TerminalPlaneWarp, TerminalPresentation,
@@ -379,10 +379,6 @@ pub fn handle_keyboard_input(
                 | BindingAction::ScrollPageDown
                 | BindingAction::ScrollUp
                 | BindingAction::ScrollDown => {
-                    if params.runtime.parser.screen().alternate_screen() {
-                        continue;
-                    }
-
                     let amount = match action {
                         BindingAction::ScrollPageUp | BindingAction::ScrollPageDown => {
                             usize::from(params.terminal.rows.saturating_sub(1).max(1))
@@ -396,16 +392,32 @@ pub fn handle_keyboard_input(
                         _ => unreachable!(),
                     };
 
-                    let screen = params.runtime.parser.screen_mut();
-                    let current = screen.scrollback();
-                    let next = if direction.is_positive() {
-                        current.saturating_add(amount)
+                    let mouse_mode = params.runtime.parser.screen().mouse_protocol_mode();
+                    if params.presentation.mode == TerminalPresentationMode::Flat2d
+                        && mouse_mode != vt100::MouseProtocolMode::None
+                    {
+                        let encoding = params.runtime.parser.screen().mouse_protocol_encoding();
+                        let (row, col) = params.runtime.parser.screen().cursor_position();
+                        let cell = UVec2::new(col as u32, row as u32);
+                        for _ in 0..amount {
+                            params.runtime.write_input(&encode_mouse_wheel(
+                                cell,
+                                direction.is_positive(),
+                                encoding,
+                            ));
+                        }
                     } else {
-                        current.saturating_sub(amount)
-                    };
-                    screen.set_scrollback(next);
-                    params.selection.clear();
-                    params.redraw.request();
+                        let screen = params.runtime.parser.screen_mut();
+                        let current = screen.scrollback();
+                        let next = if direction.is_positive() {
+                            current.saturating_add(amount)
+                        } else {
+                            current.saturating_sub(amount)
+                        };
+                        screen.set_scrollback(next);
+                        params.selection.clear();
+                        params.redraw.request();
+                    }
                     continue;
                 }
                 BindingAction::IncreaseWarp | BindingAction::DecreaseWarp => {
