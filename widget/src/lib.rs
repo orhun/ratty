@@ -176,7 +176,7 @@ impl<'a> RattyGraphic<'a> {
     /// Returns the RGP register sequence.
     pub fn register_sequence(&self) -> String {
         format!(
-            "\x1b_ratty;g;r;id={};fmt={};path={}\x1b\\",
+            "\x1b]8901;ratty;g;r;id={};fmt={};path={}\x1b\\",
             self.settings.id,
             self.settings.format.as_str(),
             self.settings.path
@@ -209,7 +209,7 @@ impl<'a> RattyGraphic<'a> {
             let chunk = &encoded[chunk_start..chunk_end];
             sequences.push(if index == 0 {
                 format!(
-                    "\x1b_ratty;g;r;id={};fmt={};source=payload;more={};name={};{}\x1b\\",
+                    "\x1b]8901;ratty;g;r;id={};fmt={};source=payload;more={};name={};{}\x1b\\",
                     self.settings.id,
                     self.settings.format.as_str(),
                     more,
@@ -218,7 +218,7 @@ impl<'a> RattyGraphic<'a> {
                 )
             } else {
                 format!(
-                    "\x1b_ratty;g;r;id={};fmt={};source=payload;more={};{}\x1b\\",
+                    "\x1b]8901;ratty;g;r;id={};fmt={};source=payload;more={};{}\x1b\\",
                     self.settings.id,
                     self.settings.format.as_str(),
                     more,
@@ -229,7 +229,7 @@ impl<'a> RattyGraphic<'a> {
 
         if sequences.is_empty() {
             sequences.push(format!(
-                "\x1b_ratty;g;r;id={};fmt={};source=payload;more=0;name={};\x1b\\",
+                "\x1b]8901;ratty;g;r;id={};fmt={};source=payload;more=0;name={};\x1b\\",
                 self.settings.id,
                 self.settings.format.as_str(),
                 name,
@@ -276,7 +276,7 @@ impl<'a> RattyGraphic<'a> {
         let center_row = area.y.saturating_add(area.height.saturating_sub(1) / 2);
         let center_col = area.x.saturating_add(area.width.saturating_sub(1) / 2);
         format!(
-            "\x1b_ratty;g;p;id={};row={};col={};w={};h={};animate={};scale={};depth={};color={};brightness={};px={};py={};pz={};rx={};ry={};rz={};sx={};sy={};sz={}\x1b\\",
+            "\x1b]8901;ratty;g;p;id={};row={};col={};w={};h={};animate={};scale={};depth={};color={};brightness={};px={};py={};pz={};rx={};ry={};rz={};sx={};sy={};sz={}\x1b\\",
             self.settings.id,
             center_row,
             center_col,
@@ -305,7 +305,7 @@ impl<'a> RattyGraphic<'a> {
     /// Returns the RGP update sequence.
     pub fn update_sequence(&self) -> String {
         format!(
-            "\x1b_ratty;g;u;id={};animate={};scale={};depth={};color={};brightness={};px={};py={};pz={};rx={};ry={};rz={};sx={};sy={};sz={}\x1b\\",
+            "\x1b]8901;ratty;g;u;id={};animate={};scale={};depth={};color={};brightness={};px={};py={};pz={};rx={};ry={};rz={};sx={};sy={};sz={}\x1b\\",
             self.settings.id,
             u8::from(self.settings.animate),
             self.settings.scale,
@@ -329,7 +329,7 @@ impl<'a> RattyGraphic<'a> {
 
     /// Returns the RGP delete sequence.
     pub fn delete_sequence(&self) -> String {
-        format!("\x1b_ratty;g;d;id={}\x1b\\", self.settings.id)
+        format!("\x1b]8901;ratty;g;d;id={}\x1b\\", self.settings.id)
     }
 
     /// Writes the RGP delete sequence to stdout.
