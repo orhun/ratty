@@ -75,8 +75,7 @@ impl TerminalInlineObjects {
 
         let mut cursor = 0;
         loop {
-            let Some((start_offset, kind)) =
-                find_next_envelope(&self.pending_bytes[cursor..])
+            let Some((start_offset, kind)) = find_next_envelope(&self.pending_bytes[cursor..])
             else {
                 if cursor < self.pending_bytes.len() {
                     parser.process(&normalize_hvp_sequences(&self.pending_bytes[cursor..]));
