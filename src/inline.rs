@@ -10,12 +10,24 @@ use vt100::Callbacks;
 use crate::kitty::{KittyOperation, KittyParserState, refresh_kitty_placeholder_anchors};
 use crate::model::{ObjectSource, load_object_source, load_object_source_from_bytes};
 use crate::rgp::{
-    RgpOperation, RgpPlacementStyle, RgpPlacementUpdate, RgpRegisterSource,
+    RGP_OSC_START, RgpOperation, RgpPlacementStyle, RgpPlacementUpdate, RgpRegisterSource,
     consume_sequence as consume_rgp_sequence, support_reply,
 };
 const APC_START: &[u8] = b"\x1b_";
 const ST: &[u8] = b"\x1b\\";
 const C1_ST: u8 = 0x9c;
+const BEL: u8 = 0x07;
+
+/// Envelope variants we slice out of the PTY byte stream for RGP/Kitty
+/// dispatch. APC catches any APC sequence (Kitty graphics, RGP); the OSC
+/// variant is specifically pre-filtered to our RGP prefix so unrelated OSC
+/// traffic (window titles, hyperlinks, prompt marks) passes straight to
+/// vt100.
+#[derive(Clone, Copy)]
+enum EnvelopeKind {
+    Apc,
+    RgpOsc,
+}
 
 /// Marker for 2D inline object sprites.
 #[derive(Component)]
@@ -44,6 +56,11 @@ pub struct TerminalInlineObjects {
     last_rows: u16,
     pub(crate) objects: HashMap<u32, InlineObject>,
     pub(crate) anchors: HashMap<u32, InlineAnchor>,
+    /// Object ids whose `Place` arrived inside the current PTY chunk.
+    /// Drained by [`Self::take_placed_this_chunk`] after each chunk so
+    /// the per-chunk scroll-tracking pass can exempt them — their `row`
+    /// is already in the post-chunk screen frame, not the pre-chunk one.
+    placed_this_chunk: std::collections::HashSet<u32>,
 }
 
 impl TerminalInlineObjects {
@@ -58,9 +75,8 @@ impl TerminalInlineObjects {
 
         let mut cursor = 0;
         loop {
-            let Some(start_offset) = self.pending_bytes[cursor..]
-                .windows(APC_START.len())
-                .position(|window| window == APC_START)
+            let Some((start_offset, kind)) =
+                find_next_envelope(&self.pending_bytes[cursor..])
             else {
                 if cursor < self.pending_bytes.len() {
                     parser.process(&normalize_hvp_sequences(&self.pending_bytes[cursor..]));
@@ -73,14 +89,31 @@ impl TerminalInlineObjects {
                 parser.process(&normalize_hvp_sequences(&self.pending_bytes[cursor..start]));
             }
 
-            let payload_start = start + APC_START.len();
-            let Some(end) = apc_end(&self.pending_bytes, payload_start) else {
+            let header_len = match kind {
+                EnvelopeKind::Apc => APC_START.len(),
+                EnvelopeKind::RgpOsc => RGP_OSC_START.len(),
+            };
+            let payload_start = start + header_len;
+            let end_opt = match kind {
+                EnvelopeKind::Apc => apc_end(&self.pending_bytes, payload_start),
+                EnvelopeKind::RgpOsc => osc_end(&self.pending_bytes, payload_start),
+            };
+            let Some(end) = end_opt else {
+                // Envelope spans the chunk boundary — keep these bytes
+                // pending and wait for the next read.
                 self.pending_bytes.drain(..start);
                 return replies;
             };
             let sequence = self.pending_bytes[start..end].to_vec();
-            let (handled, reply) =
-                self.handle_apc_sequence(&sequence, parser.screen().cursor_position());
+            let (handled, reply) = match kind {
+                EnvelopeKind::Apc => {
+                    self.handle_apc_sequence(&sequence, parser.screen().cursor_position())
+                }
+                EnvelopeKind::RgpOsc => match self.handle_rgp_sequence(&sequence) {
+                    Some(reply) => (true, reply),
+                    None => (false, None),
+                },
+            };
             if let Some(reply) = reply {
                 replies.push(reply);
             }
@@ -108,12 +141,38 @@ impl TerminalInlineObjects {
     }
 
     /// Applies upward scroll to anchored objects.
+    ///
+    /// This unconditionally scrolls every anchor. Prefer
+    /// [`apply_scroll_to_existing`] when the caller can identify which
+    /// anchors existed *before* the chunk that triggered the scroll —
+    /// otherwise a `Place` arriving in the same PTY chunk as a clear +
+    /// repaint will be evicted by the very scroll that chunk produced.
     pub fn apply_scroll(&mut self, rows_scrolled: u16) {
+        self.apply_scroll_to_existing(rows_scrolled, None);
+    }
+
+    /// Like [`apply_scroll`], but only mutates anchors whose object id is
+    /// in `existing_ids`. Anchors added during the chunk that caused the
+    /// scroll (typically by an in-chunk `Place`) are left untouched —
+    /// their row was emitted relative to the post-scroll screen state.
+    pub fn apply_scroll_to_existing(
+        &mut self,
+        rows_scrolled: u16,
+        existing_ids: Option<&std::collections::HashSet<u32>>,
+    ) {
         if rows_scrolled == 0 || self.anchors.is_empty() {
             return;
         }
 
         self.anchors.retain(|object_id, anchor| {
+            if let Some(existing) = existing_ids
+                && !existing.contains(object_id)
+            {
+                // Anchor was added during the chunk that just produced
+                // this scroll diff — its row is already in the new
+                // coordinate space, do not double-apply.
+                return true;
+            }
             if self
                 .objects
                 .get(object_id)
@@ -149,7 +208,18 @@ impl TerminalInlineObjects {
 
     fn set_anchor(&mut self, object_id: u32, anchor: InlineAnchor) {
         self.anchors.insert(object_id, anchor);
+        self.placed_this_chunk.insert(object_id);
         self.dirty = true;
+    }
+
+    /// Drains the set of object ids whose `Place` arrived inside the
+    /// chunk currently being consumed. The caller (`pump_pty_output`)
+    /// uses this to exempt freshly-placed anchors from the chunk's
+    /// scroll diff — their `row` is emitted in post-chunk screen
+    /// coordinates, so applying the same chunk's scroll to them would
+    /// be a double-count.
+    pub fn take_placed_this_chunk(&mut self) -> std::collections::HashSet<u32> {
+        std::mem::take(&mut self.placed_this_chunk)
     }
 
     fn remove_object(&mut self, object_id: u32) {
@@ -487,6 +557,41 @@ fn apc_end(bytes: &[u8], payload_start: usize) -> Option<usize> {
             return Some(index + 2);
         }
         index += 1;
+    }
+}
+
+/// Scans for the OSC string terminator. xterm spec allows BEL, ST (`ESC \`),
+/// or C1 ST (`0x9c`). All three survive ConPTY in our tests.
+fn osc_end(bytes: &[u8], payload_start: usize) -> Option<usize> {
+    let mut index = payload_start;
+    loop {
+        if index >= bytes.len() {
+            return None;
+        }
+        if bytes[index] == BEL || bytes[index] == C1_ST {
+            return Some(index + 1);
+        }
+        if index + 1 < bytes.len() && bytes[index] == ST[0] && bytes[index + 1] == ST[1] {
+            return Some(index + 2);
+        }
+        index += 1;
+    }
+}
+
+/// Returns the byte offset of the next RGP envelope (APC or OSC RGP), and
+/// which envelope kind it is. Picks whichever appears first in the chunk;
+/// arbitrary OSC traffic that isn't RGP-prefixed is left for vt100.
+fn find_next_envelope(bytes: &[u8]) -> Option<(usize, EnvelopeKind)> {
+    let apc = bytes.windows(APC_START.len()).position(|w| w == APC_START);
+    let osc = bytes
+        .windows(RGP_OSC_START.len())
+        .position(|w| w == RGP_OSC_START);
+    match (apc, osc) {
+        (None, None) => None,
+        (Some(a), None) => Some((a, EnvelopeKind::Apc)),
+        (None, Some(o)) => Some((o, EnvelopeKind::RgpOsc)),
+        (Some(a), Some(o)) if a <= o => Some((a, EnvelopeKind::Apc)),
+        (Some(_), Some(o)) => Some((o, EnvelopeKind::RgpOsc)),
     }
 }
 
