@@ -3,6 +3,65 @@
 > **Ratty**: A GPU-rendered terminal emulator with inline 3D graphics 🧀  
 > [ratty-term.org](https://ratty-term.org)
 
+## 0.4.0 - 2026-05-18
+
+Read the **It's FOSS** article about Ratty: ["This New Terminal is Absurd (But Totally Fun)"](https://itsfoss.com/ratty-terminal/)
+
+The highlight of this release is [**ratSCAD**](https://github.com/qewer33/ratscad), a terminal CAD application built with Ratty by @qewer33!  
+Here is the demo:
+
+<div>
+  <video src="https://github.com/user-attachments/assets/7fe31947-b734-4d19-9fba-ef606cc7b975" alt="Ratscad Demo"/>
+</div>
+
+### Download Ratty
+
+From [crates.io](https://crates.io/crates/ratty):
+
+```bash
+cargo install ratty
+```
+
+From [Arch Linux repositories](https://archlinux.org/packages/extra/x86_64/ratty/):
+
+```bash
+pacman -S ratty
+```
+
+Or download binary releases:
+
+| File                                                                                                                                     | Platform            | Checksum                                                                                                          |
+| ---------------------------------------------------------------------------------------------------------------------------------------- | ------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| [ratty-aarch64-apple-darwin.tar.xz](https://github.com/orhun/ratty/releases/download/v0.4.0/ratty-aarch64-apple-darwin.tar.xz)           | Apple Silicon macOS | [checksum](https://github.com/orhun/ratty/releases/download/v0.4.0/ratty-aarch64-apple-darwin.tar.xz.sha256)      |
+| [ratty-x86_64-apple-darwin.tar.xz](https://github.com/orhun/ratty/releases/download/v0.4.0/ratty-x86_64-apple-darwin.tar.xz)             | Intel macOS         | [checksum](https://github.com/orhun/ratty/releases/download/v0.4.0/ratty-x86_64-apple-darwin.tar.xz.sha256)       |
+| [ratty-aarch64-unknown-linux-gnu.tar.xz](https://github.com/orhun/ratty/releases/download/v0.4.0/ratty-aarch64-unknown-linux-gnu.tar.xz) | ARM64 Linux         | [checksum](https://github.com/orhun/ratty/releases/download/v0.4.0/ratty-aarch64-unknown-linux-gnu.tar.xz.sha256) |
+| [ratty-x86_64-unknown-linux-gnu.tar.xz](https://github.com/orhun/ratty/releases/download/v0.4.0/ratty-x86_64-unknown-linux-gnu.tar.xz)   | x64 Linux           | [checksum](https://github.com/orhun/ratty/releases/download/v0.4.0/ratty-x86_64-unknown-linux-gnu.tar.xz.sha256)  |
+
+### Features
+
+- Support scrolling with trackpad by @orhun in [#54](https://github.com/orhun/ratty/pull/54)
+- Support clipboard on Wayland by default by @TheCodedKid in [#47](https://github.com/orhun/ratty/pull/47)
+- Select the correct default shell on Windows by @ahostbr in [#66](https://github.com/orhun/ratty/pull/66)
+
+### Bug Fixes
+
+- Allow absolute paths for objects by @orhun in [#56](https://github.com/orhun/ratty/pull/56)
+- Add some options for font fallback by @orhun in [#55](https://github.com/orhun/ratty/pull/55)
+  - Update parley_ratatui version to 0.2.1 by @gold-silver-copper in [#57](https://github.com/orhun/ratty/pull/57)
+- Use transparency while rendering cells by @orhun in [#53](https://github.com/orhun/ratty/pull/53)
+- Use synthetic mouse events for scrolling in apps by @orhun in [#63](https://github.com/orhun/ratty/pull/63)
+- Enable shading for all objects by @qewer33 in [#62](https://github.com/orhun/ratty/pull/62)
+- Keep rendering smooth when the window is unfocused by @orhun
+
+### New Contributors
+
+- @ahostbr made their first contribution in [#66](https://github.com/orhun/ratty/pull/66)
+- @qewer33 made their first contribution in [#62](https://github.com/orhun/ratty/pull/62)
+- @gold-silver-copper made their first contribution in [#57](https://github.com/orhun/ratty/pull/57)
+- @TheCodedKid made their first contribution in [#47](https://github.com/orhun/ratty/pull/47)
+
+**Full Changelog**: https://github.com/orhun/ratty/compare/v0.3.0...0.4.0
+
 ## 0.3.0 - 2026-05-13
 
 Read **The Register** article about Ratty: ["Rodent-obsessed developer creates Ratty to bring 3D graphics to the command line"](https://www.theregister.com/software/2026/05/11/ratty-terminal-emulator-brings-3d-graphics-to-the-command-line/5238299)
