@@ -11,6 +11,7 @@ use bevy::prelude::*;
 use rust_embed::RustEmbed;
 
 use crate::config::{AppConfig, CURSOR_DEPTH};
+use crate::paths::{expand_path, runtime_asset_root};
 
 #[derive(RustEmbed)]
 #[folder = "assets/objects/"]
@@ -107,6 +108,8 @@ pub fn spawn_cursor_model(
 ///
 /// Returns an error if the asset cannot be resolved or parsed.
 pub fn load_object_source(path: &Path) -> anyhow::Result<(String, ObjectSource)> {
+    let expanded_path = expand_path(path);
+    let path = expanded_path.as_path();
     if path.exists() {
         let extension = path
             .extension()
@@ -133,7 +136,7 @@ pub fn load_object_source(path: &Path) -> anyhow::Result<(String, ObjectSource)>
                     })
                     .collect::<String>();
                 let candidate = format!("objects/external/{sanitized}.{extension}");
-                let asset_file = Path::new("assets").join(&candidate);
+                let asset_file = runtime_asset_root().join(&candidate);
                 std::fs::create_dir_all(
                     asset_file
                         .parent()
@@ -175,7 +178,7 @@ pub fn load_object_source(path: &Path) -> anyhow::Result<(String, ObjectSource)>
     }
 
     match extension.as_str() {
-        "obj" => load_obj_meshes_from_path(Path::new("assets").join(&candidate).as_path())
+        "obj" => load_obj_meshes_from_path(runtime_asset_root().join(&candidate).as_path())
             .or_else(|_| load_obj_meshes_from_path(path))
             .map(|meshes| (candidate.clone(), ObjectSource::Obj(meshes))),
         "glb" | "gltf" => {
@@ -236,7 +239,7 @@ fn ensure_scene_asset_path(
     candidate: &str,
     embedded: Option<(&str, &[u8])>,
 ) -> anyhow::Result<String> {
-    let asset_file = Path::new("assets").join(candidate);
+    let asset_file = runtime_asset_root().join(candidate);
     if !asset_file.exists() {
         if let Some((name, bytes)) = embedded {
             std::fs::create_dir_all(

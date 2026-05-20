@@ -13,6 +13,7 @@ pub mod keyboard;
 pub mod kitty;
 pub mod model;
 pub mod mouse;
+pub mod paths;
 pub mod plugin;
 pub mod rendering;
 pub mod rgp;

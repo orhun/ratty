@@ -9,6 +9,8 @@ use bevy::prelude::Resource;
 use etcetera::{BaseStrategy, choose_base_strategy};
 use serde::{Deserialize, Deserializer};
 
+use crate::paths::expand_path;
+
 /// Application name used for config discovery.
 pub const APP_NAME: &str = "ratty";
 /// Local fallback config path.
@@ -59,7 +61,7 @@ impl AppConfig {
     /// Returns an error if the selected config file cannot be read or parsed.
     pub fn load_from_path(path: Option<&Path>) -> anyhow::Result<Self> {
         let selected_path = if let Some(path) = path {
-            Some(path.to_path_buf())
+            Some(expand_path(path))
         } else {
             Self::default_config_path()?
         };
@@ -92,16 +94,28 @@ impl AppConfig {
 
     fn resolve_relative_paths(&mut self, path: &Path) {
         let config_dir = path.parent().unwrap_or_else(|| Path::new("."));
-        if self.cursor.model.path.is_relative()
-            && self
-                .cursor
-                .model
-                .path
-                .parent()
-                .is_some_and(|parent| !parent.as_os_str().is_empty())
-        {
-            self.cursor.model.path = config_dir.join(&self.cursor.model.path);
+        self.cursor.model.path = resolve_config_path(config_dir, &self.cursor.model.path);
+        if let Some(program) = self.shell.program.as_mut() {
+            *program = resolve_config_path(config_dir, program);
         }
+    }
+}
+
+fn resolve_config_path(config_dir: &Path, path: &Path) -> PathBuf {
+    let expanded = expand_path(path);
+    if !expanded.is_relative() {
+        return expanded;
+    }
+
+    let config_relative = config_dir.join(&expanded);
+    if expanded
+        .parent()
+        .is_some_and(|parent| !parent.as_os_str().is_empty())
+        || config_relative.exists()
+    {
+        config_relative
+    } else {
+        expanded
     }
 }
 

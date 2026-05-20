@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use bevy::asset::AssetPlugin;
 use bevy::prelude::*;
 use bevy::window::WindowResolution;
 use bevy::winit::{UpdateMode, WinitSettings};
@@ -7,6 +8,7 @@ use clap::Parser;
 
 use ratty::cli::Cli;
 use ratty::config::AppConfig;
+use ratty::paths::runtime_asset_root;
 use ratty::plugin::TerminalPlugin;
 use ratty::runtime::{RuntimeOptions, TerminalRuntime};
 use ratty::terminal::TerminalSurface;
@@ -26,6 +28,7 @@ fn main() -> anyhow::Result<()> {
     )?;
     let terminal = TerminalSurface::new(&app_config)?;
     let window_title = cli.title;
+    let asset_root = runtime_asset_root();
 
     App::new()
         .insert_resource(ClearColor(Color::srgba_u8(
@@ -42,19 +45,24 @@ fn main() -> anyhow::Result<()> {
             unfocused_mode: UpdateMode::Continuous,
         })
         .add_plugins(
-            DefaultPlugins.set(WindowPlugin {
-                primary_window: Some(Window {
-                    title: window_title,
-                    resolution: WindowResolution::new(
-                        app_config.window.width,
-                        app_config.window.height,
-                    )
-                    .with_scale_factor_override(app_config.window.scale_factor),
-                    transparent: app_config.window.opacity < 1.0,
+            DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        title: window_title,
+                        resolution: WindowResolution::new(
+                            app_config.window.width,
+                            app_config.window.height,
+                        )
+                        .with_scale_factor_override(app_config.window.scale_factor),
+                        transparent: app_config.window.opacity < 1.0,
+                        ..default()
+                    }),
+                    ..default()
+                })
+                .set(AssetPlugin {
+                    file_path: asset_root.to_string_lossy().into_owned(),
                     ..default()
                 }),
-                ..default()
-            }),
         )
         .add_plugins(TerminalPlugin)
         .run();
