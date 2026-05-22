@@ -29,6 +29,7 @@ fn main() -> anyhow::Result<()> {
     let terminal = TerminalSurface::new(&app_config)?;
     let window_title = cli.title;
     let asset_root = runtime_asset_root();
+    std::fs::create_dir_all(&asset_root)?;
 
     App::new()
         .insert_resource(ClearColor(Color::srgba_u8(

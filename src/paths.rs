@@ -9,7 +9,5 @@ pub fn expand_path(path: &Path) -> PathBuf {
 
 /// Returns the writable runtime asset root used for scene-backed object files.
 pub fn runtime_asset_root() -> PathBuf {
-    std::env::current_dir()
-        .map(|dir| dir.join("assets"))
-        .unwrap_or_else(|_| std::env::temp_dir().join("ratty-assets"))
+    std::env::temp_dir().join("ratty-assets")
 }
