@@ -67,6 +67,7 @@ pub struct TerminalSurface {
     cursor_model_visible: bool,
     font: FontConfig,
     theme: ThemeConfig,
+    window_opacity: f32,
     renderer: TerminalRenderer,
     gpu: Option<OffscreenGpu>,
 }
@@ -151,6 +152,7 @@ impl TerminalSurface {
             cursor_model_visible: config.cursor.model.visible,
             font: config.font.clone(),
             theme: config.theme.clone(),
+            window_opacity: config.window.opacity.clamp(0.0, 1.0),
             renderer,
             gpu: None,
         })
@@ -277,6 +279,15 @@ impl TerminalSurface {
         }
         if gpu.rgba.len() == target_len {
             data.copy_from_slice(&gpu.rgba);
+            let [bg_r, bg_g, bg_b] = self.theme.background;
+            let background_alpha = (self.window_opacity * 255.0).round() as u8;
+            for pixel in data.chunks_exact_mut(4) {
+                if pixel[0] == bg_r && pixel[1] == bg_g && pixel[2] == bg_b {
+                    pixel[3] = background_alpha;
+                } else {
+                    pixel[3] = u8::MAX;
+                }
+            }
         }
 
         Ok(())
