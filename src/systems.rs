@@ -992,6 +992,17 @@ fn extrude_mesh(mesh: Mesh, depth: f32) -> Mesh {
     else {
         return mesh;
     };
+    // `depth` is meant to give thickness to flat artwork. Applying the same extrusion to meshes
+    // that already have volume creates overlapping surfaces and unstable depth ordering.
+    let mut min_z = f32::INFINITY;
+    let mut max_z = f32::NEG_INFINITY;
+    for &[_, _, z] in source_positions {
+        min_z = min_z.min(z);
+        max_z = max_z.max(z);
+    }
+    if (max_z - min_z).abs() > 1e-4 {
+        return mesh;
+    }
     let Some(indices) = mesh.indices() else {
         return mesh;
     };
