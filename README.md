@@ -191,6 +191,10 @@ Endless runner built for Ratty:
 A blazingly fast serial monitor with plotter TUI and 3D telemetry
 
 
+https://github.com/user-attachments/assets/29ba6751-65d7-4103-86b3-705ef47dbbfd
+
+
+
 ## Architecture
 
 ### Rendering pipeline
