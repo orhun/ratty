@@ -186,6 +186,11 @@ Endless runner built for Ratty:
   <video width="80%" src="https://github.com/user-attachments/assets/bf3b84a9-7f45-4fac-ae91-240c7ce7c70e"/>
 </div>
 
+#### [ComChan](https://github.com/Vaishnav-Sabari-Girish/ComChan)
+
+A blazingly fast serial monitor with plotter TUI and 3D telemetry
+
+
 ## Architecture
 
 ### Rendering pipeline
