@@ -45,7 +45,7 @@ fn setup_cursor_effects(mut commands: Commands, asset_server: Res<AssetServer>) 
         .map(ToString::to_string)
         .into_iter()
         .collect(),
-        hit_sounds: ["sounds/hit_1.mp3", "sounds/hit_2.mp3"]
+        hit_sounds: ["sounds/hit_1.ogg", "sounds/hit_2.ogg"]
             .map(ToString::to_string)
             .into_iter()
             .collect(),
@@ -72,7 +72,7 @@ fn setup_cursor_effects(mut commands: Commands, asset_server: Res<AssetServer>) 
         },
         hit_behaviour: HitBehaviour::FloatUp { speed: 100.0 },
     };
-    let runescape = MissileData {
+    let _runescape = MissileData {
         spawn_sounds: [
             "sounds/swing_1.ogg",
             "sounds/swing_2.ogg",
@@ -81,7 +81,7 @@ fn setup_cursor_effects(mut commands: Commands, asset_server: Res<AssetServer>) 
         .map(ToString::to_string)
         .into_iter()
         .collect(),
-        hit_sounds: ["sounds/hit_1.mp3", "sounds/hit_2.mp3"]
+        hit_sounds: ["sounds/hit_1.ogg", "sounds/hit_2.ogg"]
             .map(ToString::to_string)
             .into_iter()
             .collect(),
@@ -94,7 +94,7 @@ fn setup_cursor_effects(mut commands: Commands, asset_server: Res<AssetServer>) 
             "textures/splat_6.png",
             "textures/splat_7.png",
             "textures/splat_8.png",
-            "textures/s3plat_9.png",
+            "textures/splat_9.png",
         ]
         .map(ToString::to_string)
         .into_iter()
@@ -104,18 +104,19 @@ fn setup_cursor_effects(mut commands: Commands, asset_server: Res<AssetServer>) 
             ..default()
         },
         missile_model_or_texture: MissileModelOrTexture::Model(
-            "objects/scimitar/scene.gltf".to_string(),
+            //     "objects/scimitar/scene.gltf".to_string(),
+            "objects/Ferris.glb".to_string(),
         ),
         missile_visual_transform: MissileVisualTransform {
             euler_rotation: Vec3::ZERO,
-            scale: 10000.0,
+            scale: 10.0,
         },
         hit_behaviour: HitBehaviour::None,
     };
 
     // enable/disable these comments to try different effects
-    commands.insert_resource(runescape.to_runtime(&asset_server));
-    // commands.insert_resource(maplestory.to_runtime(&asset_server));
+    // commands.insert_resource(_runescape.to_runtime(&asset_server));
+    commands.insert_resource(_maplestory.to_runtime(&asset_server));
 }
 
 #[derive(Clone)]
