@@ -71,15 +71,17 @@ struct KittyRenderContext<'a> {
     plane_children: &'a mut Vec<Entity>,
 }
 
-struct CursorPoseContext<'a, 'w, 's> {
-    runtime: &'a TerminalRuntime,
-    terminal: &'a TerminalSurface,
-    viewport: &'a TerminalViewport,
-    mode: TerminalPresentationMode,
-    plane_warp_amount: f32,
-    mobius_progress: f32,
-    elapsed_secs: f32,
-    plane_query: &'a Query<'w, 's, &'static Transform, (With<TerminalPlane>, Without<CursorModel>)>,
+#[allow(missing_docs)]
+pub struct CursorPoseContext<'a, 'w, 's> {
+    pub runtime: &'a TerminalRuntime,
+    pub terminal: &'a TerminalSurface,
+    pub viewport: &'a TerminalViewport,
+    pub mode: TerminalPresentationMode,
+    pub plane_warp_amount: f32,
+    pub mobius_progress: f32,
+    pub elapsed_secs: f32,
+    pub plane_query:
+        &'a Query<'w, 's, &'static Transform, (With<TerminalPlane>, Without<CursorModel>)>,
 }
 
 /// Marker for objects that already had instance brightness applied.
@@ -88,7 +90,8 @@ pub struct BrightnessAdjusted;
 
 type PlaneTransformQuery<'w, 's> =
     Query<'w, 's, &'static Transform, (With<TerminalPlane>, Without<TerminalRgpObject>)>;
-type CursorTransformQuery<'w, 's> = Query<
+#[allow(missing_docs)]
+pub type CursorTransformQuery<'w, 's> = Query<
     'w,
     's,
     (&'static mut Transform, &'static mut Visibility),
@@ -870,6 +873,7 @@ pub(crate) fn sync_rgp_objects(mut params: RgpSyncParams) {
                     8.0 + anchor.style.depth * 1.5,
                     mobius_progress,
                 ) + anchor.style.offset;
+
                 transform.translation = plane_transform.transform_point(local_position);
                 transform.rotation = plane_transform.rotation * object_rotation;
                 transform.scale = object_scale;
@@ -1172,7 +1176,8 @@ pub fn animate_mobius_transition(
     }
 }
 
-fn active_mobius_progress(
+#[allow(missing_docs)]
+pub fn active_mobius_progress(
     mode: TerminalPresentationMode,
     mobius_transition: &MobiusTransition,
 ) -> f32 {
@@ -1280,7 +1285,8 @@ pub(crate) fn sync_asset_to_terminal_cursor(mut params: CursorSyncParams) {
     }
 }
 
-fn cursor_pose(
+#[allow(missing_docs)]
+pub fn cursor_pose(
     app_config: &AppConfig,
     ctx: &CursorPoseContext<'_, '_, '_>,
 ) -> (Vec3, Quat, f32, Visibility) {

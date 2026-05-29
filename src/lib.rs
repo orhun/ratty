@@ -8,6 +8,7 @@
 
 pub mod cli;
 pub mod config;
+pub mod cursor_effects;
 pub mod inline;
 pub mod keyboard;
 pub mod kitty;
