@@ -235,7 +235,8 @@ impl TerminalKeyBindings {
 #[derive(Default)]
 pub struct TerminalKeyboard {
     pub(crate) ctrl_pressed: bool,
-    pub(crate) alt_pressed: bool,
+    pub(crate) left_alt_pressed: bool,
+    pub(crate) right_alt_pressed: bool,
     pub(crate) shift_pressed: bool,
     pub(crate) super_pressed: bool,
 }
@@ -244,7 +245,7 @@ impl TerminalKeyboard {
     fn modifiers(&self) -> BindingModifiers {
         BindingModifiers {
             control: self.ctrl_pressed,
-            alt: self.alt_pressed,
+            alt: self.left_alt_pressed,
             shift: self.shift_pressed,
             super_key: self.super_pressed,
         }
@@ -263,8 +264,12 @@ impl TerminalKeyboard {
                 self.ctrl_pressed = event.state == ButtonState::Pressed;
                 return None;
             }
-            KeyCode::AltLeft | KeyCode::AltRight => {
-                self.alt_pressed = event.state == ButtonState::Pressed;
+            KeyCode::AltLeft => {
+                self.left_alt_pressed = event.state == ButtonState::Pressed;
+                return None;
+            }
+            KeyCode::AltRight => {
+                self.right_alt_pressed = event.state == ButtonState::Pressed;
                 return None;
             }
             KeyCode::ShiftLeft | KeyCode::ShiftRight => {
@@ -288,7 +293,8 @@ impl TerminalKeyboard {
                 logical_key: &event.logical_key,
                 text: event.text.as_deref(),
                 ctrl_pressed: self.ctrl_pressed,
-                alt_pressed: self.alt_pressed,
+                alt_pressed: self.left_alt_pressed,
+                alt_gr_pressed: self.right_alt_pressed,
                 shift_pressed: self.shift_pressed,
                 application_cursor,
                 kitty_keyboard_flags,
@@ -512,7 +518,7 @@ pub fn handle_keyboard_input(
 fn current_modifiers(keys: &ButtonInput<KeyCode>) -> BindingModifiers {
     BindingModifiers {
         control: keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]),
-        alt: keys.any_pressed([KeyCode::AltLeft, KeyCode::AltRight]),
+        alt: keys.pressed(KeyCode::AltLeft),
         shift: keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]),
         super_key: keys.any_pressed([KeyCode::SuperLeft, KeyCode::SuperRight]),
     }
@@ -619,6 +625,7 @@ struct KeyTranslationContext<'a> {
     text: Option<&'a str>,
     ctrl_pressed: bool,
     alt_pressed: bool,
+    alt_gr_pressed: bool,
     shift_pressed: bool,
     application_cursor: bool,
     kitty_keyboard_flags: u8,
@@ -627,6 +634,13 @@ struct KeyTranslationContext<'a> {
 
 fn translate_key(key_code: KeyCode, ctx: KeyTranslationContext<'_>) -> Vec<u8> {
     let mut bytes = Vec::new();
+
+    if ctx.alt_gr_pressed
+        && let Some(text) = printable_text(ctx.text, ctx.logical_key)
+    {
+        bytes.extend_from_slice(text.as_bytes());
+        return bytes;
+    }
 
     if ctx.ctrl_pressed
         && let Some(ctrl) = ctrl_keycode_byte(key_code)
@@ -671,15 +685,22 @@ fn translate_key(key_code: KeyCode, ctx: KeyTranslationContext<'_>) -> Vec<u8> {
         KeyCode::Backspace => bytes.push(0x7f),
         KeyCode::Escape => bytes.push(0x1b),
         _ => {
-            if let Some(text) = ctx.text {
+            if let Some(text) = printable_text(ctx.text, ctx.logical_key) {
                 bytes.extend_from_slice(text.as_bytes());
-            } else if let Key::Character(chars) = ctx.logical_key {
-                bytes.extend_from_slice(chars.as_bytes());
             }
         }
     }
 
     bytes
+}
+
+/// Determine the text to send for a key event.
+fn printable_text<'a>(text: Option<&'a str>, logical_key: &'a Key) -> Option<&'a str> {
+    text.or_else(|| match logical_key {
+        Key::Character(chars) => Some(chars.as_str()),
+        _ => None,
+    })
+    .filter(|text| !text.is_empty())
 }
 
 #[derive(Clone, Copy)]
