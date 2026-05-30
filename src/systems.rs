@@ -890,8 +890,8 @@ pub(crate) fn sync_rgp_objects(mut params: RgpSyncParams) {
         match presentation.mode {
             TerminalPresentationMode::Flat2d => {
                 transform.translation = Vec3::new(
-                    layout.center_x + anchor.style.offset.x,
-                    layout.center_y + bob + anchor.style.offset.y,
+                    layout.center_x + anchor.style.offset.x*(terminal.pixmap_dimensions().x as f32),
+                    layout.center_y + bob + anchor.style.offset.y*(terminal.pixmap_dimensions().y as f32),
                     CURSOR_DEPTH + anchor.style.depth * 4.0 + anchor.style.offset.z,
                 );
                 transform.rotation = object_rotation;
