@@ -1,6 +1,6 @@
 [package]
 name = "ratty"
-version = "0.4.0"
+version = "0.4.1"
 description = "A GPU-rendered terminal emulator that supports inline 3D graphics"
 authors = ["Orhun Parmaksız <orhunparmaksiz@gmail.com>"]
 license = "MIT"
@@ -42,7 +42,7 @@ bevy = { version = "0.18.1", default-features = false, features = [
 ] }
 clap = { version = "4.5", features = ["derive"] }
 etcetera = "0.11"
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "ico"] }
 parley_ratatui = "0.2.1"
 pollster = "0.4"
 portable-pty = "0.8"
@@ -54,6 +54,10 @@ shellexpand = "3.1"
 tobj = "4.0"
 toml = "0.8"
 vt100 = "0.16"
+winit = { version = "0.30", default-features = false }
+
+[build-dependencies]
+winresource = "0.1.31"
 
 [profile.dev]
 opt-level = 1

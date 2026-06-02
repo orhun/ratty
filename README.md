@@ -16,7 +16,8 @@ Inspired by TempleOS | Built with Rust & Ratatui
 </div>
 
 ["Rodent-obsessed developer creates Ratty to bring 3D graphics to the command line"](https://www.theregister.com/software/2026/05/11/ratty-terminal-emulator-brings-3d-graphics-to-the-command-line/5238299) - The Register  
-["This New Terminal is Absurd (But Totally Fun)"](https://itsfoss.com/ratty-terminal/) - It's FOSS
+["This New Terminal is Absurd (But Totally Fun)"](https://itsfoss.com/ratty-terminal/) - It's FOSS  
+["10 weird OSS projects you need right now... "](https://www.youtube.com/watch?v=qPuzWFvRajk) - Fireship
 
 ## Features
 
@@ -184,6 +185,14 @@ Endless runner built for Ratty:
 
 <div>
   <video width="80%" src="https://github.com/user-attachments/assets/bf3b84a9-7f45-4fac-ae91-240c7ce7c70e"/>
+</div>
+
+#### [ComChan](https://github.com/Vaishnav-Sabari-Girish/ComChan)
+
+A blazingly fast serial monitor with plotter TUI and 3D telemetry
+
+<div>
+  <video width="80%" src="https://github.com/user-attachments/assets/29ba6751-65d7-4103-86b3-705ef47dbbfd"/>
 </div>
 
 ## Architecture
