@@ -129,7 +129,7 @@ pub enum InitialVelocity {
 }
 
 impl InitialVelocity {
-    ///
+    /// returns a randomized velocity based upon variant
     pub fn get_velocity(&self, start: Vec3, end: Vec3) -> Vec3 {
         let mut rng = rand::rng();
         match self {
@@ -282,9 +282,9 @@ fn update_cursor_effects(
         plane_query,
     };
     let (translation, _rotation, _scale, _cursor_visibility) = cursor_pose(app_config, &pose_ctx);
-    let diff = translation.distance((*prev_pos).clone());
+    let diff = translation.distance(*(*prev_pos));
     if diff > 14.0 {
-        let start = prev_pos.clone();
+        let start = **prev_pos;
         let end = translation;
 
         if let Some(sound_file) = missile_data_runtime.get_random_sound_spawn() {
@@ -390,7 +390,7 @@ impl MissileData {
             hit_sounds,
             hit_textures,
             missile_stats,
-            missile_presentation_runtime: sword_presentation.to_runtime(&asset_server),
+            missile_presentation_runtime: sword_presentation.to_runtime(asset_server),
             missile_visual_transform,
             hit_behaviour,
         }
