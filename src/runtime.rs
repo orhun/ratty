@@ -362,7 +362,7 @@ impl TerminalRuntime {
     }
 
     /// Resizes the PTY and parser screen.
-    pub fn resize(&mut self, cols: u16, rows: u16) {
+    pub fn resize(&mut self, cols: u16, rows: u16, pw: u16, ph: u16) {
         if cols == 0 || rows == 0 {
             return;
         }
@@ -370,9 +370,8 @@ impl TerminalRuntime {
         let _ = self._master.resize(PtySize {
             rows,
             cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        });
+            pixel_width: pw,
+            pixel_height: ph,        });
         self.parser.screen_mut().set_size(rows, cols);
     }
 

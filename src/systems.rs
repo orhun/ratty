@@ -239,7 +239,7 @@ pub(crate) fn handle_window_resize(
     let cols = ((viewport_size.x / char_dims.x as f32).floor() as u16).max(1);
     let rows = ((viewport_size.y / char_dims.y as f32).floor() as u16).max(1);
 
-    runtime.resize(cols, rows);
+    runtime.resize(cols, rows, viewport_size.x as u16, viewport_size.y as u16);
     terminal.resize(cols, rows);
     let _ = terminal.sync_image(images, 0.0);
     redraw.request();

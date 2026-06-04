@@ -483,7 +483,7 @@ pub fn handle_keyboard_input(
                             ((params.viewport.size.x / char_dims.x as f32).floor() as u16).max(1);
                         let rows =
                             ((params.viewport.size.y / char_dims.y as f32).floor() as u16).max(1);
-                        params.runtime.resize(cols, rows);
+                        params.runtime.resize(cols, rows, params.viewport.size.x as u16, params.viewport.size.y as u16);
                         params.terminal.resize(cols, rows);
                         params.redraw.request();
                     }
