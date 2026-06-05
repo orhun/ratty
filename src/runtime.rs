@@ -371,7 +371,8 @@ impl TerminalRuntime {
             rows,
             cols,
             pixel_width: pw,
-            pixel_height: ph,        });
+            pixel_height: ph,
+        });
         self.parser.screen_mut().set_size(rows, cols);
     }
 
