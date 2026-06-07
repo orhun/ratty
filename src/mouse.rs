@@ -15,11 +15,16 @@ use crate::scene::{
 };
 use crate::terminal::TerminalSurface;
 
+/// Distance in pixels the pointer must move with a pending selection to start dragging.
+const SELECTION_DRAG_THRESHOLD: f32 = 4.0;
+
 /// Active terminal text selection.
 #[derive(Resource, Clone, Default)]
 pub struct TerminalSelection {
     start: Option<UVec2>,
     end: Option<UVec2>,
+    pending_start: Option<UVec2>,
+    pending_position: Option<Vec2>,
     dragging: bool,
     cursor_position: Option<Vec2>,
 }
@@ -94,7 +99,20 @@ impl TerminalSelection {
         let changed = self.start != Some(cell) || self.end != Some(cell) || !self.dragging;
         self.start = Some(cell);
         self.end = Some(cell);
+        self.pending_start = None;
+        self.pending_position = None;
         self.dragging = true;
+        changed
+    }
+
+    /// Arms a selection at a cell without making it visible until the pointer is dragged.
+    pub fn begin_pending(&mut self, cell: UVec2, position: Vec2) -> bool {
+        let changed = self.start.is_some() || self.end.is_some() || self.dragging;
+        self.start = None;
+        self.end = None;
+        self.pending_start = Some(cell);
+        self.pending_position = Some(position);
+        self.dragging = false;
         changed
     }
 
@@ -107,18 +125,51 @@ impl TerminalSelection {
         false
     }
 
+    /// Updates the selection from a pointer position.
+    pub fn update_from_cursor(&mut self, cell: UVec2, position: Vec2) -> bool {
+        if self.dragging {
+            return self.update(cell);
+        }
+
+        let Some(start) = self.pending_start else {
+            return false;
+        };
+        let Some(origin) = self.pending_position else {
+            return false;
+        };
+
+        if position.distance(origin) < SELECTION_DRAG_THRESHOLD {
+            return false;
+        }
+
+        self.start = Some(start);
+        self.end = Some(cell);
+        self.pending_start = None;
+        self.pending_position = None;
+        self.dragging = true;
+        true
+    }
+
     /// Ends an in-progress selection.
     pub fn end(&mut self) -> bool {
         let changed = self.dragging;
+        self.pending_start = None;
+        self.pending_position = None;
         self.dragging = false;
         changed
     }
 
     /// Clears the selection.
     pub fn clear(&mut self) -> bool {
-        let changed = self.start.is_some() || self.end.is_some() || self.dragging;
+        let changed = self.start.is_some()
+            || self.end.is_some()
+            || self.pending_start.is_some()
+            || self.pending_position.is_some()
+            || self.dragging;
         self.start = None;
         self.end = None;
+        self.pending_start = None;
+        self.pending_position = None;
         self.dragging = false;
         self.cursor_position = None;
         changed
@@ -287,9 +338,9 @@ pub(crate) fn handle_mouse_input(
                 ));
                 forwarded_mouse.last_cell = Some(cell);
             }
-        } else if selection.dragging
+        } else if (selection.dragging || selection.pending_start.is_some())
             && let Some(cell) = position_to_cell(event.position, viewport, terminal)
-            && selection.update(cell)
+            && selection.update_from_cursor(cell, event.position)
         {
             redraw.request();
         }
@@ -324,7 +375,7 @@ pub(crate) fn handle_mouse_input(
                     plane_view.last_rotate_cursor = selection.cursor_position();
                 } else if let Some(pos) = selection.cursor_position()
                     && let Some(cell) = position_to_cell(pos, viewport, terminal)
-                    && selection.begin(cell)
+                    && selection.begin_pending(cell, pos)
                 {
                     redraw.request();
                 }
