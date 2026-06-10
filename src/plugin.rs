@@ -2,6 +2,7 @@
 
 use bevy::prelude::*;
 
+use crate::cursor_effects::CursorEffectPlugin;
 use crate::inline::TerminalInlineObjects;
 use crate::keyboard::{TerminalClipboard, TerminalKeyBindings, handle_keyboard_input};
 use crate::mouse::{TerminalSelection, handle_mouse_input};
@@ -53,5 +54,6 @@ impl Plugin for TerminalPlugin {
                 Update,
                 sync_asset_to_terminal_cursor.after(redraw_soft_terminal),
             );
+        app.add_plugins(CursorEffectPlugin);
     }
 }
