@@ -19,6 +19,13 @@ but it is designed for Ratty's inline object layer and 3D renderer.
 
 ## Transport
 
+RGP sequences are framed by a standard terminal escape envelope. Two
+envelopes are defined — **APC** (the primary) and **OSC** (the
+compatibility alternative). Both carry identical body grammar; only the
+framing bytes differ.
+
+### APC Envelope (primary)
+
 Ratty Graphics Protocol uses [APC] (Application Program Command):
 
 ```text
@@ -31,6 +38,58 @@ Where:
 - `g` means graphics
 - [`<verb>`](#verbs) selects the operation
 - additional fields are semicolon-separated `key=value` pairs
+
+### OSC Envelope (compatibility)
+
+On platforms where the parent terminal cannot transit APC sequences
+end-to-end, the same body can be carried inside an [OSC] (Operating
+System Command) envelope using private number **8901**:
+
+```text
+ESC ] 8901;ratty;g;<verb>[;<key=value>...] ESC \
+```
+
+The body after `8901;` is byte-identical to the APC body (starting from
+`ratty;g;`). The OSC envelope additionally accepts **BEL** (`0x07`) as
+an alternative terminator, following the historic xterm convention.
+
+#### When to use OSC
+
+The OSC envelope exists for one reason: **Windows ConPTY** silently
+consumes APC sequences before the hosting terminal can see them. This
+is true even with the newer `PSEUDOCONSOLE_INHERIT_CURSOR` plumbing in
+[Microsoft Terminal] 1.22+. Applications that may run under ConPTY
+(cmd, PowerShell, Windows Terminal, SSH into Windows) should emit the
+OSC envelope so that Ratty can parse the sequences.
+
+Applications running on platforms without this limitation (direct PTY on
+Linux/macOS, or inside Ratty's own PTY) should prefer the APC envelope.
+
+#### Why OSC 8901
+
+OSC 8901 was chosen as a 4-digit private number with no known assignment
+in any surveyed terminal ecosystem. Numbers to avoid:
+
+| Number(s) | Owner |
+|-----------|-------|
+| 0–12, 52, 104, 110–119 | conhost / xterm standard |
+| 99 | Kitty notifications |
+| 133 | FinalTerm / Warp prompt marks |
+| 633 | VS Code shell integration |
+| 777 | urxvt |
+| 1337 | iTerm2 image protocol |
+| 9001 | `WTAction` in Microsoft Terminal's `OscActionCodes` enum |
+
+OSC dispatching in conhost is numeric-first — the `;ratty;` qualifier
+after the number does not prevent a terminal from consuming the whole
+sequence as its own action. A unique number avoids collisions entirely.
+
+#### Support reply
+
+The support reply (`s` verb) is always sent using the APC envelope,
+regardless of which envelope the query arrived in, because the reply
+travels from Ratty to the application over the PTY read path where APC
+is safe.
 
 ## Model
 

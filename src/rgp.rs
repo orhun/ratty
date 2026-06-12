@@ -2,10 +2,35 @@
 
 use base64::Engine as _;
 
-/// Ratty Graphics Protocol APC prefix.
+/// Ratty Graphics Protocol APC envelope prefix (`ESC _ ratty;g;`).
 pub const RGP_APC_START: &[u8] = b"\x1b_ratty;g;";
+
+/// Ratty Graphics Protocol OSC envelope prefix (`ESC ] 8901 ; ratty ; g ;`).
+///
+/// The OSC variant is used on platforms where the parent terminal can't
+/// transit APC sequences end-to-end — notably Windows ConPTY, which
+/// consumes APC silently regardless of the new "passthrough" plumbing in
+/// `microsoft/terminal` 1.22+.
+///
+/// OSC 8901 was chosen as a 4-digit private number with no known
+/// assignment in any surveyed ecosystem. Concrete numbers to avoid and
+/// why:
+///
+/// - 0,1,2,4,7,8,9,10,11,12,52,104,110-119 — recognised by conhost itself.
+/// - 99 — kitty notifications.
+/// - 133 — FinalTerm / Warp prompt marks.
+/// - 633 — VS Code shell integration.
+/// - 777 — urxvt.
+/// - 1337 — iTerm2 image protocol.
+/// - 9001 — `WTAction` in Microsoft Terminal's `OscActionCodes` enum
+///   (`src/terminal/parser/OutputStateMachineEngine.hpp`); dispatching is
+///   numeric-first, so `;ratty;` after the number does *not* prevent
+///   conhost from consuming the whole sequence as a WT action.
+pub const RGP_OSC_START: &[u8] = b"\x1b]8901;ratty;g;";
+
 const ST: &[u8] = b"\x1b\\";
 const C1_ST: u8 = 0x9c;
+const BEL: u8 = 0x07;
 
 /// Placement style for an RGP object.
 #[derive(Clone, Copy, Default)]
@@ -67,20 +92,40 @@ pub enum RgpRegisterSource {
     },
 }
 
-/// Consumes an RGP APC sequence.
+/// Consumes an RGP envelope (APC or OSC) and parses the inner body.
+///
+/// Both envelopes carry the same body grammar (`<verb>;<key=value>;...`)
+/// so they share the parser below.
 pub fn consume_sequence(sequence: &[u8]) -> Option<RgpOperation> {
-    if !sequence.starts_with(RGP_APC_START) {
-        return None;
-    }
-
-    let content_end = if sequence.ends_with(&[C1_ST]) {
-        sequence.len() - 1
-    } else if sequence.ends_with(ST) {
-        sequence.len() - 2
+    let (prefix_len, terminator_len) = if sequence.starts_with(RGP_APC_START) {
+        // APC body terminates with ST or C1 ST. BEL is not a legal APC
+        // terminator, so we deliberately don't accept it on the APC path.
+        let trailing = if sequence.ends_with(&[C1_ST]) {
+            1
+        } else if sequence.ends_with(ST) {
+            2
+        } else {
+            return None;
+        };
+        (RGP_APC_START.len(), trailing)
+    } else if sequence.starts_with(RGP_OSC_START) {
+        // OSC body can terminate with BEL, ST, or C1 ST. xterm's
+        // `ctlseqs` calls out BEL as the historic terminator; modern
+        // emitters tend to use ST. Accept all three.
+        let trailing = if sequence.ends_with(&[BEL]) || sequence.ends_with(&[C1_ST]) {
+            1
+        } else if sequence.ends_with(ST) {
+            2
+        } else {
+            return None;
+        };
+        (RGP_OSC_START.len(), trailing)
     } else {
         return None;
     };
-    let content = std::str::from_utf8(&sequence[RGP_APC_START.len()..content_end]).ok()?;
+
+    let content_end = sequence.len() - terminator_len;
+    let content = std::str::from_utf8(&sequence[prefix_len..content_end]).ok()?;
     let mut parts = content.split(';');
     let verb = parts.next()?;
     let mut id = None;

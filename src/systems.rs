@@ -177,15 +177,28 @@ pub fn pump_pty_output(
                 } else {
                     None
                 };
+                // Snapshot anchor ids that existed BEFORE consuming this
+                // chunk. After consume, also collect ids whose `Place`
+                // fired inside the chunk — those rows are already
+                // expressed in post-chunk screen coordinates, so scroll
+                // would double-count. The scroll target is therefore
+                // `pre_anchor_ids \ placed_this_chunk`.
+                let pre_anchor_ids: std::collections::HashSet<u32> =
+                    inline_objects.anchors.keys().copied().collect();
                 let mut replies = inline_objects.consume_pty_output(&chunk, &mut runtime.parser);
                 replies.extend(runtime.parser.callbacks_mut().take_replies());
                 for reply in replies {
                     runtime.write_input(&reply);
                 }
+                let placed_this_chunk = inline_objects.take_placed_this_chunk();
                 if let Some(prev_rows) = prev_rows {
                     let next_rows = screen_rows(runtime.parser.screen());
                     let scrolled = infer_upward_scroll(&prev_rows, &next_rows);
-                    inline_objects.apply_scroll(scrolled);
+                    let eligible: std::collections::HashSet<u32> = pre_anchor_ids
+                        .difference(&placed_this_chunk)
+                        .copied()
+                        .collect();
+                    inline_objects.apply_scroll_to_existing(scrolled, Some(&eligible));
                 }
                 inline_objects.refresh_placeholder_anchors(runtime.parser.screen());
                 processed_output = true;
