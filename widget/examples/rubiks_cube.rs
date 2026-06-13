@@ -27,15 +27,9 @@ use ratatui_ratty::{ObjectFormat, RattyGraphic, RattyGraphicSettings};
 
 const TICK: Duration = Duration::from_millis(33);
 const TURN_DURATION: f32 = 0.26;
-const BODY_SCALE: f32 = 0.15;
+const BODY_SCALE: f32 = 0.46;
 const CUBIE_SPACING: f32 = 1.04;
 const BASE_Z_UNITS: f32 = 2.7;
-const GLB_JSON_CHUNK: u32 = 0x4e4f_534a;
-const GLB_BIN_CHUNK: u32 = 0x004e_4942;
-const ARRAY_BUFFER: u32 = 34_962;
-const ELEMENT_ARRAY_BUFFER: u32 = 34_963;
-const COMPONENT_F32: u32 = 5_126;
-const COMPONENT_U16: u32 = 5_123;
 
 fn main() -> io::Result<()> {
     let mut terminal = ratatui::init();
@@ -163,7 +157,7 @@ impl RubiksApp {
                 ),
             )
         });
-        let payload = cube_glb(&self.cubies, self.palette, active);
+        let payload = cube_obj(&self.cubies, self.palette, active);
         let path = cube_asset_path(self.model_revision, self.palette)?;
         fs::write(&path, payload)?;
         self.cube.graphic.settings_mut().path = Cow::Owned(path.to_string_lossy().into_owned());
@@ -477,9 +471,9 @@ struct SceneObject {
 
 impl SceneObject {
     fn new_cube(id: u32) -> Self {
-        let settings = RattyGraphicSettings::new(format!("rubiks-{id}.glb"))
+        let settings = RattyGraphicSettings::new(format!("rubiks-{id}.obj"))
             .id(id)
-            .format(ObjectFormat::Glb)
+            .format(ObjectFormat::Obj)
             .animate(false)
             .brightness(1.0)
             .depth(0.0);
@@ -886,7 +880,7 @@ fn exposed_faces(pos: Vec3i) -> Vec<(Vec3i, Face)> {
     faces
 }
 
-fn cube_glb(cubies: &[Cubie], palette: Palette, active: Option<(MoveSpec, Mat3)>) -> Vec<u8> {
+fn cube_obj(cubies: &[Cubie], palette: Palette, active: Option<(MoveSpec, Mat3)>) -> Vec<u8> {
     let sticker_count = cubies.iter().map(|cubie| cubie.stickers.len()).sum::<usize>();
     let mut primitives = Vec::with_capacity(cubies.len() + sticker_count);
 
@@ -900,7 +894,7 @@ fn cube_glb(cubies: &[Cubie], palette: Palette, active: Option<(MoveSpec, Mat3)>
         primitives.push(cuboid_primitive(
             center,
             Vec3::new(0.49, 0.49, 0.49),
-            0,
+            [14, 15, 18],
             rotation,
         ));
 
@@ -909,20 +903,20 @@ fn cube_glb(cubies: &[Cubie], palette: Palette, active: Option<(MoveSpec, Mat3)>
             primitives.push(cuboid_primitive(
                 center + rotation.transform_vec(local_center),
                 half,
-                sticker.face.material_index(),
+                palette.color(sticker.face),
                 rotation,
             ));
         }
     }
 
-    build_glb(&primitives, palette)
+    build_obj(&primitives).into_bytes()
 }
 
 fn cube_asset_path(revision: u32, palette: Palette) -> io::Result<PathBuf> {
     let dir = std::env::temp_dir().join("ratty-rubiks-cube");
     fs::create_dir_all(&dir)?;
     Ok(dir.join(format!(
-        "rubiks-cube-v4-{}-{revision}.glb",
+        "rubiks-cube-v5-{}-{revision}.obj",
         palette.name()
     )))
 }
@@ -931,64 +925,8 @@ fn cube_asset_path(revision: u32, palette: Palette) -> io::Result<PathBuf> {
 struct MeshPrimitive {
     positions: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
+    colors: Vec<[u8; 3]>,
     indices: Vec<u16>,
-    material: usize,
-}
-
-#[derive(Clone, Copy)]
-struct PrimitiveAccessors {
-    position: usize,
-    normal: usize,
-    indices: usize,
-    material: usize,
-}
-
-#[derive(Clone, Copy)]
-struct BufferViewInfo {
-    offset: usize,
-    length: usize,
-    target: u32,
-}
-
-enum AccessorInfo {
-    Positions {
-        view: usize,
-        count: usize,
-        min: [f32; 3],
-        max: [f32; 3],
-    },
-    Normals {
-        view: usize,
-        count: usize,
-    },
-    Indices {
-        view: usize,
-        count: usize,
-    },
-}
-
-impl Face {
-    fn material_index(self) -> usize {
-        match self {
-            Self::Up => 1,
-            Self::Down => 2,
-            Self::Front => 3,
-            Self::Back => 4,
-            Self::Right => 5,
-            Self::Left => 6,
-        }
-    }
-
-    fn name(self) -> &'static str {
-        match self {
-            Self::Up => "up",
-            Self::Down => "down",
-            Self::Front => "front",
-            Self::Back => "back",
-            Self::Right => "right",
-            Self::Left => "left",
-        }
-    }
 }
 
 fn sticker_box(normal: Vec3i) -> (Vec3, Vec3) {
@@ -1005,7 +943,7 @@ fn sticker_box(normal: Vec3i) -> (Vec3, Vec3) {
     }
 }
 
-fn cuboid_primitive(center: Vec3, half: Vec3, material: usize, rotation: Mat3) -> MeshPrimitive {
+fn cuboid_primitive(center: Vec3, half: Vec3, color: [u8; 3], rotation: Mat3) -> MeshPrimitive {
     let faces = [
         (
             Vec3::new(0.0, 0.0, 1.0),
@@ -1065,11 +1003,13 @@ fn cuboid_primitive(center: Vec3, half: Vec3, material: usize, rotation: Mat3) -
 
     let mut positions = Vec::with_capacity(24);
     let mut normals = Vec::with_capacity(24);
+    let mut colors = Vec::with_capacity(24);
     let mut indices = Vec::with_capacity(36);
     for (normal, corners) in faces {
         let base = positions.len() as u16;
         for corner in corners {
             positions.push((center + rotation.transform_vec(corner)).to_array());
+            colors.push(color);
         }
         let normal = rotation.transform_vec(normal).to_array();
         for _ in 0..4 {
@@ -1081,244 +1021,52 @@ fn cuboid_primitive(center: Vec3, half: Vec3, material: usize, rotation: Mat3) -
     MeshPrimitive {
         positions,
         normals,
+        colors,
         indices,
-        material,
     }
 }
 
-fn build_glb(primitives: &[MeshPrimitive], palette: Palette) -> Vec<u8> {
-    let mut bin = Vec::new();
-    let mut views = Vec::new();
-    let mut accessors = Vec::new();
-    let mut primitive_accessors = Vec::new();
-
+fn build_obj(primitives: &[MeshPrimitive]) -> String {
+    let mut obj = String::from("# ratty-rubiks-cube\n");
+    let mut vertex_offset = 1usize;
+    let mut normal_offset = 1usize;
     for primitive in primitives {
-        let (position_view, min, max) =
-            push_vec3_buffer(&mut bin, &mut views, &primitive.positions, ARRAY_BUFFER);
-        let position_accessor = accessors.len();
-        accessors.push(AccessorInfo::Positions {
-            view: position_view,
-            count: primitive.positions.len(),
-            min,
-            max,
-        });
-
-        let (normal_view, _, _) =
-            push_vec3_buffer(&mut bin, &mut views, &primitive.normals, ARRAY_BUFFER);
-        let normal_accessor = accessors.len();
-        accessors.push(AccessorInfo::Normals {
-            view: normal_view,
-            count: primitive.normals.len(),
-        });
-
-        let index_view = push_u16_buffer(
-            &mut bin,
-            &mut views,
-            &primitive.indices,
-            ELEMENT_ARRAY_BUFFER,
-        );
-        let index_accessor = accessors.len();
-        accessors.push(AccessorInfo::Indices {
-            view: index_view,
-            count: primitive.indices.len(),
-        });
-
-        primitive_accessors.push(PrimitiveAccessors {
-            position: position_accessor,
-            normal: normal_accessor,
-            indices: index_accessor,
-            material: primitive.material,
-        });
-    }
-
-    align4(&mut bin, 0);
-    let mut json = gltf_json(&views, &accessors, &primitive_accessors, palette).into_bytes();
-    align4(&mut json, b' ');
-
-    let total_len = 12 + 8 + json.len() + 8 + bin.len();
-    let mut glb = Vec::with_capacity(total_len);
-    glb.extend_from_slice(b"glTF");
-    glb.extend_from_slice(&2u32.to_le_bytes());
-    glb.extend_from_slice(&(total_len as u32).to_le_bytes());
-    glb.extend_from_slice(&(json.len() as u32).to_le_bytes());
-    glb.extend_from_slice(&GLB_JSON_CHUNK.to_le_bytes());
-    glb.extend_from_slice(&json);
-    glb.extend_from_slice(&(bin.len() as u32).to_le_bytes());
-    glb.extend_from_slice(&GLB_BIN_CHUNK.to_le_bytes());
-    glb.extend_from_slice(&bin);
-    glb
-}
-
-fn push_vec3_buffer(
-    bin: &mut Vec<u8>,
-    views: &mut Vec<BufferViewInfo>,
-    values: &[[f32; 3]],
-    target: u32,
-) -> (usize, [f32; 3], [f32; 3]) {
-    align4(bin, 0);
-    let offset = bin.len();
-    let mut min = [f32::INFINITY; 3];
-    let mut max = [f32::NEG_INFINITY; 3];
-    for value in values {
-        for index in 0..3 {
-            min[index] = min[index].min(value[index]);
-            max[index] = max[index].max(value[index]);
-            bin.extend_from_slice(&value[index].to_le_bytes());
+        for (position, color) in primitive.positions.iter().zip(&primitive.colors) {
+            let [r, g, b] = *color;
+            obj.push_str(&format!(
+                "v {:.5} {:.5} {:.5} {:.5} {:.5} {:.5}\n",
+                position[0],
+                position[1],
+                position[2],
+                f32::from(r) / 255.0,
+                f32::from(g) / 255.0,
+                f32::from(b) / 255.0,
+            ));
         }
-    }
-    let length = bin.len() - offset;
-    let view = views.len();
-    views.push(BufferViewInfo {
-        offset,
-        length,
-        target,
-    });
-    (view, min, max)
-}
-
-fn push_u16_buffer(
-    bin: &mut Vec<u8>,
-    views: &mut Vec<BufferViewInfo>,
-    values: &[u16],
-    target: u32,
-) -> usize {
-    align4(bin, 0);
-    let offset = bin.len();
-    for value in values {
-        bin.extend_from_slice(&value.to_le_bytes());
-    }
-    let length = bin.len() - offset;
-    let view = views.len();
-    views.push(BufferViewInfo {
-        offset,
-        length,
-        target,
-    });
-    view
-}
-
-fn gltf_json(
-    views: &[BufferViewInfo],
-    accessors: &[AccessorInfo],
-    primitives: &[PrimitiveAccessors],
-    palette: Palette,
-) -> String {
-    let bin_len = views
-        .iter()
-        .map(|view| view.offset + view.length)
-        .max()
-        .unwrap_or(0);
-    let mut json = String::new();
-    json.push_str("{\"asset\":{\"version\":\"2.0\",\"generator\":\"ratty-rubiks-cube\"},");
-    json.push_str("\"scene\":0,\"scenes\":[{\"nodes\":[0]}],\"nodes\":[{\"mesh\":0}],");
-    json.push_str("\"meshes\":[{\"primitives\":[");
-    for (index, primitive) in primitives.iter().enumerate() {
-        if index > 0 {
-            json.push(',');
+        for normal in &primitive.normals {
+            obj.push_str(&format!(
+                "vn {:.5} {:.5} {:.5}\n",
+                normal[0], normal[1], normal[2],
+            ));
         }
-        json.push_str(&format!(
-            "{{\"attributes\":{{\"POSITION\":{},\"NORMAL\":{}}},\"indices\":{},\"material\":{}}}",
-            primitive.position, primitive.normal, primitive.indices, primitive.material
-        ));
-    }
-    json.push_str("]}],\"materials\":[");
-    for (index, material) in material_defs(palette).iter().enumerate() {
-        if index > 0 {
-            json.push(',');
+        for triangle in primitive.indices.chunks_exact(3) {
+            let a = usize::from(triangle[0]);
+            let b = usize::from(triangle[1]);
+            let c = usize::from(triangle[2]);
+            obj.push_str(&format!(
+                "f {}//{} {}//{} {}//{}\n",
+                vertex_offset + a,
+                normal_offset + a,
+                vertex_offset + b,
+                normal_offset + b,
+                vertex_offset + c,
+                normal_offset + c,
+            ));
         }
-        json.push_str(&material_json(material));
+        vertex_offset += primitive.positions.len();
+        normal_offset += primitive.normals.len();
     }
-    json.push_str("],\"buffers\":[{\"byteLength\":");
-    json.push_str(&bin_len.to_string());
-    json.push_str("}],\"bufferViews\":[");
-    for (index, view) in views.iter().enumerate() {
-        if index > 0 {
-            json.push(',');
-        }
-        json.push_str(&format!(
-            "{{\"buffer\":0,\"byteOffset\":{},\"byteLength\":{},\"target\":{}}}",
-            view.offset, view.length, view.target
-        ));
-    }
-    json.push_str("],\"accessors\":[");
-    for (index, accessor) in accessors.iter().enumerate() {
-        if index > 0 {
-            json.push(',');
-        }
-        json.push_str(&accessor_json(accessor));
-    }
-    json.push_str("]}");
-    json
-}
-
-struct MaterialDef {
-    name: &'static str,
-    color: [u8; 3],
-    roughness: f32,
-}
-
-fn material_defs(palette: Palette) -> [MaterialDef; 7] {
-    [
-        MaterialDef {
-            name: "body",
-            color: [14, 15, 18],
-            roughness: 0.68,
-        },
-        face_material(Face::Up, palette),
-        face_material(Face::Down, palette),
-        face_material(Face::Front, palette),
-        face_material(Face::Back, palette),
-        face_material(Face::Right, palette),
-        face_material(Face::Left, palette),
-    ]
-}
-
-fn face_material(face: Face, palette: Palette) -> MaterialDef {
-    MaterialDef {
-        name: face.name(),
-        color: palette.color(face),
-        roughness: 0.46,
-    }
-}
-
-fn material_json(material: &MaterialDef) -> String {
-    let [r, g, b] = material.color;
-    format!(
-        "{{\"name\":\"{}\",\"doubleSided\":true,\"pbrMetallicRoughness\":{{\"baseColorFactor\":[{:.4},{:.4},{:.4},1.0],\"metallicFactor\":0.0,\"roughnessFactor\":{:.3}}}}}",
-        material.name,
-        f32::from(r) / 255.0,
-        f32::from(g) / 255.0,
-        f32::from(b) / 255.0,
-        material.roughness,
-    )
-}
-
-fn accessor_json(accessor: &AccessorInfo) -> String {
-    match accessor {
-        AccessorInfo::Positions {
-            view,
-            count,
-            min,
-            max,
-        } => format!(
-            "{{\"bufferView\":{},\"componentType\":{},\"count\":{},\"type\":\"VEC3\",\"min\":[{:.4},{:.4},{:.4}],\"max\":[{:.4},{:.4},{:.4}]}}",
-            view, COMPONENT_F32, count, min[0], min[1], min[2], max[0], max[1], max[2],
-        ),
-        AccessorInfo::Normals { view, count } => format!(
-            "{{\"bufferView\":{},\"componentType\":{},\"count\":{},\"type\":\"VEC3\"}}",
-            view, COMPONENT_F32, count
-        ),
-        AccessorInfo::Indices { view, count } => format!(
-            "{{\"bufferView\":{},\"componentType\":{},\"count\":{},\"type\":\"SCALAR\"}}",
-            view, COMPONENT_U16, count
-        ),
-    }
-}
-
-fn align4(bytes: &mut Vec<u8>, fill: u8) {
-    while bytes.len() % 4 != 0 {
-        bytes.push(fill);
-    }
+    obj
 }
 
 fn terminal_cell_pixels() -> (f32, f32) {

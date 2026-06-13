@@ -356,6 +356,17 @@ fn build_meshes(models: Vec<tobj::Model>, source: String) -> anyhow::Result<Vec<
         );
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
 
+        if !source_mesh.vertex_color.is_empty() {
+            let colors = source_mesh
+                .vertex_color
+                .chunks_exact(3)
+                .map(|color| [color[0], color[1], color[2], 1.0])
+                .collect::<Vec<[f32; 4]>>();
+            if colors.len() == source_mesh.positions.len() / 3 {
+                mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+            }
+        }
+
         if !source_mesh.normals.is_empty() {
             let normals = source_mesh
                 .normals
