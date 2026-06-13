@@ -139,11 +139,10 @@ impl RubiksApp {
 
     fn status(&self) -> String {
         format!(
-            "3D cube | cubies: {} | move: {active} | queued: {} | zoom: {:.2} | spread: {:.2}",
+            "3D cube | cubies: {} | move: {active} | queued: {} | zoom: {:.2}",
             self.cube.cubie_count(),
             self.cube.queued_count(),
             self.view.zoom,
-            self.view.spread,
             active = self.cube.active_label(),
         )
     }
@@ -214,16 +213,10 @@ impl RubiksApp {
                 let _ = self.object.register_cube(&self.cube);
             }
             KeyCode::Char('+') | KeyCode::Char('=') => {
-                self.view.zoom = (self.view.zoom + 0.06).min(1.6);
+                self.view.zoom += 0.06;
             }
             KeyCode::Char('-') => {
-                self.view.zoom = (self.view.zoom - 0.06).max(0.55);
-            }
-            KeyCode::Char(']') => {
-                self.view.spread = (self.view.spread + 0.03).min(1.22);
-            }
-            KeyCode::Char('[') => {
-                self.view.spread = (self.view.spread - 0.03).max(0.86);
+                self.view.zoom -= 0.06;
             }
             KeyCode::Left => self.view.yaw -= 0.12,
             KeyCode::Right => self.view.yaw += 0.12,
@@ -263,10 +256,10 @@ impl RubiksApp {
                 self.drag_start = None;
             }
             MouseEventKind::ScrollUp if inside => {
-                self.view.zoom = (self.view.zoom + 0.05).min(1.6);
+                self.view.zoom += 0.05;
             }
             MouseEventKind::ScrollDown if inside => {
-                self.view.zoom = (self.view.zoom - 0.05).max(0.55);
+                self.view.zoom -= 0.05;
             }
             _ => {}
         }
@@ -453,7 +446,6 @@ struct SceneView {
     pitch: f32,
     roll: f32,
     zoom: f32,
-    spread: f32,
     placed_area: Option<Rect>,
 }
 
@@ -464,7 +456,6 @@ impl SceneView {
             pitch: -0.42,
             roll: 0.0,
             zoom: 1.0,
-            spread: 1.0,
             placed_area: None,
         }
     }
