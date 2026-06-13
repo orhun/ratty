@@ -474,6 +474,7 @@ impl SceneObject {
         let settings = RattyGraphicSettings::new(format!("rubiks-{id}.obj"))
             .id(id)
             .format(ObjectFormat::Obj)
+            .normalize(false)
             .animate(false)
             .brightness(1.0)
             .depth(0.0);
@@ -1027,7 +1028,7 @@ fn cuboid_primitive(center: Vec3, half: Vec3, color: [u8; 3], rotation: Mat3) ->
 }
 
 fn build_obj(primitives: &[MeshPrimitive]) -> String {
-    let mut obj = String::from("# ratty:preserve-transform\n# ratty-rubiks-cube\n");
+    let mut obj = String::from("# ratty-rubiks-cube\n");
     let mut vertex_offset = 1usize;
     let mut normal_offset = 1usize;
     for primitive in primitives {

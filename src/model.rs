@@ -1,6 +1,6 @@
 //! Cursor and object asset loading.
 
-use std::io::{Cursor, Read};
+use std::io::Cursor;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, bail, ensure};
@@ -27,6 +27,23 @@ pub enum ObjectSource {
     Obj(Vec<Mesh>),
     /// glTF scene asset path.
     Gltf(String),
+}
+
+/// Options that control object source loading.
+#[derive(Clone, Copy, Debug)]
+pub struct ObjectLoadOptions {
+    /// Controls whether OBJ meshes are centered and scaled at load time.
+    ///
+    /// When enabled, each OBJ mesh is centered around its bounding-box center
+    /// and scaled by the largest bounding-box axis. Disable this for generated
+    /// or assembled OBJ assets whose source coordinates should be preserved.
+    pub normalize: bool,
+}
+
+impl Default for ObjectLoadOptions {
+    fn default() -> Self {
+        Self { normalize: true }
+    }
 }
 
 /// Spawns the configured cursor model.
@@ -108,6 +125,18 @@ pub fn spawn_cursor_model(
 ///
 /// Returns an error if the asset cannot be resolved or parsed.
 pub fn load_object_source(path: &Path) -> anyhow::Result<(String, ObjectSource)> {
+    load_object_source_with_options(path, ObjectLoadOptions::default())
+}
+
+/// Loads an object source from a path with explicit load options.
+///
+/// # Errors
+///
+/// Returns an error if the asset cannot be resolved or parsed.
+pub fn load_object_source_with_options(
+    path: &Path,
+    options: ObjectLoadOptions,
+) -> anyhow::Result<(String, ObjectSource)> {
     let expanded_path = expand_path(path);
     let path = expanded_path.as_path();
     if path.exists() {
@@ -118,7 +147,7 @@ pub fn load_object_source(path: &Path) -> anyhow::Result<(String, ObjectSource)>
             .unwrap_or_default();
 
         return match extension.as_str() {
-            "obj" => load_obj_meshes_from_path(path)
+            "obj" => load_obj_meshes_from_path(path, options.normalize)
                 .map(|meshes| (path.display().to_string(), ObjectSource::Obj(meshes))),
             "glb" | "gltf" => {
                 let bytes = std::fs::read(path)
@@ -163,7 +192,7 @@ pub fn load_object_source(path: &Path) -> anyhow::Result<(String, ObjectSource)>
         && let Some(file) = EmbeddedObjects::get(file_name)
     {
         return match extension.as_str() {
-            "obj" => load_obj_meshes_from_bytes(file_name, &file.data)
+            "obj" => load_obj_meshes_from_bytes(file_name, &file.data, options.normalize)
                 .map(|meshes| (format!("embedded:{file_name}"), ObjectSource::Obj(meshes))),
             "glb" | "gltf" => {
                 let asset_path =
@@ -178,9 +207,12 @@ pub fn load_object_source(path: &Path) -> anyhow::Result<(String, ObjectSource)>
     }
 
     match extension.as_str() {
-        "obj" => load_obj_meshes_from_path(runtime_asset_root().join(&candidate).as_path())
-            .or_else(|_| load_obj_meshes_from_path(path))
-            .map(|meshes| (candidate.clone(), ObjectSource::Obj(meshes))),
+        "obj" => load_obj_meshes_from_path(
+            runtime_asset_root().join(&candidate).as_path(),
+            options.normalize,
+        )
+        .or_else(|_| load_obj_meshes_from_path(path, options.normalize))
+        .map(|meshes| (candidate.clone(), ObjectSource::Obj(meshes))),
         "glb" | "gltf" => {
             let asset_path = ensure_scene_asset_path(&candidate, None)?;
             Ok((candidate, ObjectSource::Gltf(asset_path)))
@@ -199,6 +231,20 @@ pub fn load_object_source_from_bytes(
     name: Option<&str>,
     bytes: &[u8],
 ) -> anyhow::Result<(String, ObjectSource)> {
+    load_object_source_from_bytes_with_options(format, name, bytes, ObjectLoadOptions::default())
+}
+
+/// Loads an object source from inline bytes with explicit load options.
+///
+/// # Errors
+///
+/// Returns an error if the payload cannot be parsed or materialized.
+pub fn load_object_source_from_bytes_with_options(
+    format: &str,
+    name: Option<&str>,
+    bytes: &[u8],
+    options: ObjectLoadOptions,
+) -> anyhow::Result<(String, ObjectSource)> {
     let display_name = name.unwrap_or(match format {
         "obj" => "payload.obj",
         "glb" | "gltf" => "payload.glb",
@@ -206,7 +252,7 @@ pub fn load_object_source_from_bytes(
     });
 
     match format {
-        "obj" => load_obj_meshes_from_bytes(display_name, bytes)
+        "obj" => load_obj_meshes_from_bytes(display_name, bytes, options.normalize)
             .map(|meshes| (format!("payload:{display_name}"), ObjectSource::Obj(meshes))),
         "glb" | "gltf" => {
             // Bevy scene loading still goes through the asset server, so payload-backed GLB/GLTF
@@ -297,8 +343,7 @@ fn object_asset_path(path: &Path) -> anyhow::Result<String> {
         .to_string())
 }
 
-fn load_obj_meshes_from_path(path: &Path) -> anyhow::Result<Vec<Mesh>> {
-    let preserve_transform = obj_preserves_transform_from_path(path).unwrap_or(false);
+fn load_obj_meshes_from_path(path: &Path, normalize: bool) -> anyhow::Result<Vec<Mesh>> {
     let options = tobj::LoadOptions {
         triangulate: true,
         single_index: true,
@@ -307,11 +352,14 @@ fn load_obj_meshes_from_path(path: &Path) -> anyhow::Result<Vec<Mesh>> {
     };
     let (models, _) = tobj::load_obj(path, &options)
         .with_context(|| format!("failed to read {}", path.display()))?;
-    build_meshes(models, path.display().to_string(), !preserve_transform)
+    build_meshes(models, path.display().to_string(), normalize)
 }
 
-fn load_obj_meshes_from_bytes(name: &str, bytes: &[u8]) -> anyhow::Result<Vec<Mesh>> {
-    let preserve_transform = obj_preserves_transform(bytes);
+fn load_obj_meshes_from_bytes(
+    name: &str,
+    bytes: &[u8],
+    normalize: bool,
+) -> anyhow::Result<Vec<Mesh>> {
     let options = tobj::LoadOptions {
         triangulate: true,
         single_index: true,
@@ -322,21 +370,7 @@ fn load_obj_meshes_from_bytes(name: &str, bytes: &[u8]) -> anyhow::Result<Vec<Me
         Ok((Vec::new(), Default::default()))
     })
     .with_context(|| format!("failed to read embedded {name}"))?;
-    build_meshes(models, format!("embedded:{name}"), !preserve_transform)
-}
-
-fn obj_preserves_transform_from_path(path: &Path) -> anyhow::Result<bool> {
-    let mut file = std::fs::File::open(path)
-        .with_context(|| format!("failed to inspect {}", path.display()))?;
-    let mut prefix = [0; 256];
-    let read = file
-        .read(&mut prefix)
-        .with_context(|| format!("failed to inspect {}", path.display()))?;
-    Ok(obj_preserves_transform(&prefix[..read]))
-}
-
-fn obj_preserves_transform(bytes: &[u8]) -> bool {
-    std::str::from_utf8(bytes).is_ok_and(|prefix| prefix.contains("ratty:preserve-transform"))
+    build_meshes(models, format!("embedded:{name}"), normalize)
 }
 
 fn build_meshes(
