@@ -1,6 +1,6 @@
 //! Cursor and object asset loading.
 
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, bail, ensure};
@@ -298,6 +298,7 @@ fn object_asset_path(path: &Path) -> anyhow::Result<String> {
 }
 
 fn load_obj_meshes_from_path(path: &Path) -> anyhow::Result<Vec<Mesh>> {
+    let preserve_transform = obj_preserves_transform_from_path(path).unwrap_or(false);
     let options = tobj::LoadOptions {
         triangulate: true,
         single_index: true,
@@ -306,10 +307,11 @@ fn load_obj_meshes_from_path(path: &Path) -> anyhow::Result<Vec<Mesh>> {
     };
     let (models, _) = tobj::load_obj(path, &options)
         .with_context(|| format!("failed to read {}", path.display()))?;
-    build_meshes(models, path.display().to_string())
+    build_meshes(models, path.display().to_string(), !preserve_transform)
 }
 
 fn load_obj_meshes_from_bytes(name: &str, bytes: &[u8]) -> anyhow::Result<Vec<Mesh>> {
+    let preserve_transform = obj_preserves_transform(bytes);
     let options = tobj::LoadOptions {
         triangulate: true,
         single_index: true,
@@ -320,10 +322,28 @@ fn load_obj_meshes_from_bytes(name: &str, bytes: &[u8]) -> anyhow::Result<Vec<Me
         Ok((Vec::new(), Default::default()))
     })
     .with_context(|| format!("failed to read embedded {name}"))?;
-    build_meshes(models, format!("embedded:{name}"))
+    build_meshes(models, format!("embedded:{name}"), !preserve_transform)
 }
 
-fn build_meshes(models: Vec<tobj::Model>, source: String) -> anyhow::Result<Vec<Mesh>> {
+fn obj_preserves_transform_from_path(path: &Path) -> anyhow::Result<bool> {
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("failed to inspect {}", path.display()))?;
+    let mut prefix = [0; 256];
+    let read = file
+        .read(&mut prefix)
+        .with_context(|| format!("failed to inspect {}", path.display()))?;
+    Ok(obj_preserves_transform(&prefix[..read]))
+}
+
+fn obj_preserves_transform(bytes: &[u8]) -> bool {
+    std::str::from_utf8(bytes).is_ok_and(|prefix| prefix.contains("ratty:preserve-transform"))
+}
+
+fn build_meshes(
+    models: Vec<tobj::Model>,
+    source: String,
+    normalize: bool,
+) -> anyhow::Result<Vec<Mesh>> {
     let mut output = Vec::new();
     for model in models {
         let source_mesh = model.mesh;
@@ -341,13 +361,15 @@ fn build_meshes(models: Vec<tobj::Model>, source: String) -> anyhow::Result<Vec<
             positions.push([point.x, point.y, point.z]);
         }
 
-        let center = (min + max) * 0.5;
-        let extent = max - min;
-        let max_extent = extent.max_element().max(1e-6);
-        for p in &mut positions {
-            p[0] = (p[0] - center.x) / max_extent;
-            p[1] = (p[1] - center.y) / max_extent;
-            p[2] = (p[2] - center.z) / max_extent;
+        if normalize {
+            let center = (min + max) * 0.5;
+            let extent = max - min;
+            let max_extent = extent.max_element().max(1e-6);
+            for p in &mut positions {
+                p[0] = (p[0] - center.x) / max_extent;
+                p[1] = (p[1] - center.y) / max_extent;
+                p[2] = (p[2] - center.z) / max_extent;
+            }
         }
 
         let mut mesh = Mesh::new(

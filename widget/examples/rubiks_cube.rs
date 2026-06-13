@@ -27,7 +27,7 @@ use ratatui_ratty::{ObjectFormat, RattyGraphic, RattyGraphicSettings};
 
 const TICK: Duration = Duration::from_millis(33);
 const TURN_DURATION: f32 = 0.26;
-const BODY_SCALE: f32 = 0.46;
+const BODY_SCALE: f32 = 0.10;
 const CUBIE_SPACING: f32 = 1.04;
 const BASE_Z_UNITS: f32 = 2.7;
 
@@ -1027,7 +1027,7 @@ fn cuboid_primitive(center: Vec3, half: Vec3, color: [u8; 3], rotation: Mat3) ->
 }
 
 fn build_obj(primitives: &[MeshPrimitive]) -> String {
-    let mut obj = String::from("# ratty-rubiks-cube\n");
+    let mut obj = String::from("# ratty:preserve-transform\n# ratty-rubiks-cube\n");
     let mut vertex_offset = 1usize;
     let mut normal_offset = 1usize;
     for primitive in primitives {
