@@ -2,7 +2,7 @@ use std::{
     borrow::Cow,
     collections::VecDeque,
     fs,
-    io::{self, Write},
+    io,
     path::PathBuf,
     time::{Duration, Instant},
 };
@@ -58,7 +58,7 @@ struct RubiksApp {
 
 impl RubiksApp {
     fn new() -> io::Result<Self> {
-        clear_demo_objects()?;
+        RattyGraphic::clear_all()?;
         let mut app = Self {
             cube: RubiksCube::new(),
             object: SceneObject::new_cube(900),
@@ -528,9 +528,7 @@ impl SceneObject {
     }
 
     fn clear(&self) -> io::Result<()> {
-        let mut stdout = io::stdout();
-        stdout.write_all(self.graphic.delete_sequence().as_bytes())?;
-        stdout.flush()
+        self.graphic.clear()
     }
 
     fn asset_path(&self) -> io::Result<PathBuf> {
@@ -1116,12 +1114,4 @@ fn emit_sequence(buf: &mut Buffer, x: u16, y: u16, sequence: &str) {
     symbol.push_str(sequence);
     symbol.push_str(existing);
     cell.set_symbol(&symbol);
-}
-
-fn clear_demo_objects() -> io::Result<()> {
-    let mut stdout = io::stdout();
-    for id in 900..980 {
-        stdout.write_all(format!("\x1b_ratty;g;d;id={id}\x1b\\").as_bytes())?;
-    }
-    stdout.flush()
 }

@@ -353,6 +353,15 @@ impl<'a> RattyGraphic<'a> {
         format!("\x1b_ratty;g;d;id={}\x1b\\", self.settings.id)
     }
 
+    /// Returns the RGP sequence that deletes every Ratty graphic object.
+    ///
+    /// This emits `d` without an `id`, which is intentionally broader than
+    /// [`Self::delete_sequence`]. Use it for demo cleanup or full-scene reset
+    /// flows where removing all currently registered RGP objects is expected.
+    pub fn delete_all_sequence() -> String {
+        "\x1b_ratty;g;d\x1b\\".to_string()
+    }
+
     /// Writes the RGP delete sequence to stdout.
     ///
     /// # Errors
@@ -360,6 +369,20 @@ impl<'a> RattyGraphic<'a> {
     /// Returns an error if stdout cannot be written or flushed.
     pub fn clear(&self) -> io::Result<()> {
         io::stdout().write_all(self.delete_sequence().as_bytes())?;
+        io::stdout().flush()
+    }
+
+    /// Deletes every Ratty graphic object.
+    ///
+    /// This writes the RGP delete-all sequence to stdout. It affects all RGP
+    /// objects currently known to Ratty, not only objects created by this
+    /// process.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if stdout cannot be written or flushed.
+    pub fn clear_all() -> io::Result<()> {
+        io::stdout().write_all(Self::delete_all_sequence().as_bytes())?;
         io::stdout().flush()
     }
 
