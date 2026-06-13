@@ -311,8 +311,13 @@ impl TerminalInlineObjects {
             }
             RgpOperation::Update { object_id, update } => {
                 if let Some(anchor) = self.anchors.get_mut(&object_id) {
+                    let needs_respawn = update.depth.is_some()
+                        || update.color.is_some()
+                        || update.brightness.is_some();
                     apply_rgp_update(&mut anchor.style, update);
-                    self.dirty = true;
+                    if needs_respawn {
+                        self.dirty = true;
+                    }
                 }
                 None
             }
