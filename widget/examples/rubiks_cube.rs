@@ -1,8 +1,7 @@
 use std::{
     borrow::Cow,
     collections::VecDeque,
-    fs,
-    io,
+    fs, io,
     path::PathBuf,
     time::{Duration, Instant},
 };
@@ -171,7 +170,12 @@ impl RubiksApp {
         let place_objects = self.view.placed_area != Some(area);
         emit_sequence(buf, area.x, area.y, &self.object.graphic.update_sequence());
         if place_objects {
-            emit_sequence(buf, area.x, area.y, &self.object.graphic.place_sequence(area));
+            emit_sequence(
+                buf,
+                area.x,
+                area.y,
+                &self.object.graphic.place_sequence(area),
+            );
         }
 
         if place_objects {
@@ -180,8 +184,10 @@ impl RubiksApp {
     }
 
     fn sync_scene_objects(&mut self, area: Rect) {
-        self.object
-            .apply(self.view.rotation(), &SceneMetrics::new(area, self.view.zoom));
+        self.object.apply(
+            self.view.rotation(),
+            &SceneMetrics::new(area, self.view.zoom),
+        );
     }
 
     fn handle_event(&mut self, event: Event) -> io::Result<()> {
@@ -341,16 +347,16 @@ impl RubiksCube {
 
     fn tick(&mut self, delta: f32) -> bool {
         let mut changed = false;
-        if self.active_turn.is_none() {
-            if let Some(queued) = self.queued_turns.pop_front() {
-                self.active_turn = Some(ActiveTurn {
-                    spec: queued.spec,
-                    record: queued.record,
-                    elapsed: 0.0,
-                    duration: TURN_DURATION,
-                });
-                changed = true;
-            }
+        if self.active_turn.is_none()
+            && let Some(queued) = self.queued_turns.pop_front()
+        {
+            self.active_turn = Some(ActiveTurn {
+                spec: queued.spec,
+                record: queued.record,
+                elapsed: 0.0,
+                duration: TURN_DURATION,
+            });
+            changed = true;
         }
 
         let Some(turn) = self.active_turn.as_mut() else {
@@ -468,8 +474,8 @@ impl SceneView {
         if viewport.is_empty() {
             return viewport;
         }
-        let width = viewport.width.saturating_sub(2).min(56).max(1);
-        let height = viewport.height.saturating_sub(2).min(24).max(1);
+        let width = viewport.width.saturating_sub(2).clamp(1, 56);
+        let height = viewport.height.saturating_sub(2).clamp(1, 24);
         viewport.centered(Constraint::Length(width), Constraint::Length(height))
     }
 }
@@ -507,11 +513,7 @@ impl SceneObject {
         settings.animate = false;
         settings.depth = 0.0;
         settings.rotation = rotation.to_euler_degrees();
-        settings.offset = [
-            0.0,
-            0.0,
-            metrics.unit * BASE_Z_UNITS,
-        ];
+        settings.offset = [0.0, 0.0, metrics.unit * BASE_Z_UNITS];
         settings.color = None;
         settings.brightness = 1.0;
         settings.scale = metrics.object_scale;
@@ -636,30 +638,12 @@ impl Sticker {
         let thickness = 0.018;
         let lift = 0.516;
         match (self.normal.x, self.normal.y, self.normal.z) {
-            (1, 0, 0) => (
-                Vec3::new(lift, 0.0, 0.0),
-                Vec3::new(thickness, face, face),
-            ),
-            (-1, 0, 0) => (
-                Vec3::new(-lift, 0.0, 0.0),
-                Vec3::new(thickness, face, face),
-            ),
-            (0, 1, 0) => (
-                Vec3::new(0.0, lift, 0.0),
-                Vec3::new(face, thickness, face),
-            ),
-            (0, -1, 0) => (
-                Vec3::new(0.0, -lift, 0.0),
-                Vec3::new(face, thickness, face),
-            ),
-            (0, 0, -1) => (
-                Vec3::new(0.0, 0.0, -lift),
-                Vec3::new(face, face, thickness),
-            ),
-            _ => (
-                Vec3::new(0.0, 0.0, lift),
-                Vec3::new(face, face, thickness),
-            ),
+            (1, 0, 0) => (Vec3::new(lift, 0.0, 0.0), Vec3::new(thickness, face, face)),
+            (-1, 0, 0) => (Vec3::new(-lift, 0.0, 0.0), Vec3::new(thickness, face, face)),
+            (0, 1, 0) => (Vec3::new(0.0, lift, 0.0), Vec3::new(face, thickness, face)),
+            (0, -1, 0) => (Vec3::new(0.0, -lift, 0.0), Vec3::new(face, thickness, face)),
+            (0, 0, -1) => (Vec3::new(0.0, 0.0, -lift), Vec3::new(face, face, thickness)),
+            _ => (Vec3::new(0.0, 0.0, lift), Vec3::new(face, face, thickness)),
         }
     }
 }
@@ -762,7 +746,6 @@ impl MoveSpec {
             Axis::Z => pos.z == self.layer,
         }
     }
-
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
