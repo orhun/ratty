@@ -175,6 +175,14 @@ Split-pane drawing demo with a 2D canvas on the left and a live 3D preview on th
   <video width="80%" src="https://github.com/user-attachments/assets/8b53515b-b887-4d03-a54c-7e7aa7ea128c"/>
 </div>
 
+#### [Rubik's cube](widget/examples/rubiks_cube.rs)
+
+Interactive 3D Rubik's cube demo:
+
+<div>
+  <video width="80%" src="https://github.com/user-attachments/assets/9c5828d5-890a-45ac-80f6-cbc0b22384e6"/>
+</div>
+
 ### Apps
 
 Here are some applications explicitly built around Ratty's Graphics Protocol:

@@ -54,6 +54,8 @@ pub struct RattyGraphicSettings<'a> {
     pub path: Cow<'a, str>,
     /// Asset format.
     pub format: ObjectFormat,
+    /// Controls registration-time normalization for OBJ assets.
+    pub normalize: bool,
     /// Enables default animation.
     pub animate: bool,
     /// Scale multiplier.
@@ -80,6 +82,7 @@ impl<'a> RattyGraphicSettings<'a> {
             id: 1,
             format: ObjectFormat::infer(&path),
             path,
+            normalize: true,
             animate: true,
             scale: 1.0,
             depth: 0.0,
@@ -100,6 +103,21 @@ impl<'a> RattyGraphicSettings<'a> {
     /// Sets the asset format.
     pub fn format(mut self, format: ObjectFormat) -> Self {
         self.format = format;
+        self
+    }
+
+    /// Enables or disables registration-time normalization for OBJ assets.
+    ///
+    /// Normalization is enabled by default. With normalization enabled, Ratty
+    /// recenters each OBJ mesh around its bounding-box center and scales it by
+    /// the largest bounding-box axis so imported models have a predictable
+    /// origin and approximate unit size.
+    ///
+    /// Use `normalize(false)` when the OBJ coordinates are already meaningful,
+    /// for example a generated object that uses Ratty's scene coordinates or a
+    /// larger assembly made from multiple separately registered objects.
+    pub fn normalize(mut self, normalize: bool) -> Self {
+        self.normalize = normalize;
         self
     }
 
@@ -176,10 +194,11 @@ impl<'a> RattyGraphic<'a> {
     /// Returns the RGP register sequence.
     pub fn register_sequence(&self) -> String {
         format!(
-            "\x1b_ratty;g;r;id={};fmt={};path={}\x1b\\",
+            "\x1b_ratty;g;r;id={};fmt={};path={};normalize={}\x1b\\",
             self.settings.id,
             self.settings.format.as_str(),
-            self.settings.path
+            self.settings.path,
+            u8::from(self.settings.normalize)
         )
     }
 
@@ -209,11 +228,12 @@ impl<'a> RattyGraphic<'a> {
             let chunk = &encoded[chunk_start..chunk_end];
             sequences.push(if index == 0 {
                 format!(
-                    "\x1b_ratty;g;r;id={};fmt={};source=payload;more={};name={};{}\x1b\\",
+                    "\x1b_ratty;g;r;id={};fmt={};source=payload;more={};name={};normalize={};{}\x1b\\",
                     self.settings.id,
                     self.settings.format.as_str(),
                     more,
                     name,
+                    u8::from(self.settings.normalize),
                     chunk
                 )
             } else {
@@ -229,10 +249,11 @@ impl<'a> RattyGraphic<'a> {
 
         if sequences.is_empty() {
             sequences.push(format!(
-                "\x1b_ratty;g;r;id={};fmt={};source=payload;more=0;name={};\x1b\\",
+                "\x1b_ratty;g;r;id={};fmt={};source=payload;more=0;name={};normalize={};\x1b\\",
                 self.settings.id,
                 self.settings.format.as_str(),
                 name,
+                u8::from(self.settings.normalize),
             ));
         }
 
@@ -332,6 +353,15 @@ impl<'a> RattyGraphic<'a> {
         format!("\x1b_ratty;g;d;id={}\x1b\\", self.settings.id)
     }
 
+    /// Returns the RGP sequence that deletes every Ratty graphic object.
+    ///
+    /// This emits `d` without an `id`, which is intentionally broader than
+    /// [`Self::delete_sequence`]. Use it for demo cleanup or full-scene reset
+    /// flows where removing all currently registered RGP objects is expected.
+    pub fn delete_all_sequence() -> String {
+        "\x1b_ratty;g;d\x1b\\".to_string()
+    }
+
     /// Writes the RGP delete sequence to stdout.
     ///
     /// # Errors
@@ -339,6 +369,20 @@ impl<'a> RattyGraphic<'a> {
     /// Returns an error if stdout cannot be written or flushed.
     pub fn clear(&self) -> io::Result<()> {
         io::stdout().write_all(self.delete_sequence().as_bytes())?;
+        io::stdout().flush()
+    }
+
+    /// Deletes every Ratty graphic object.
+    ///
+    /// This writes the RGP delete-all sequence to stdout. It affects all RGP
+    /// objects currently known to Ratty, not only objects created by this
+    /// process.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if stdout cannot be written or flushed.
+    pub fn clear_all() -> io::Result<()> {
+        io::stdout().write_all(Self::delete_all_sequence().as_bytes())?;
         io::stdout().flush()
     }
 

@@ -67,6 +67,19 @@ pub enum RgpRegisterSource {
     },
 }
 
+/// Registration-time object loading options.
+#[derive(Clone, Copy)]
+pub struct RgpRegisterOptions {
+    /// Normalizes OBJ meshes into a centered unit-size coordinate space.
+    pub normalize: bool,
+}
+
+impl Default for RgpRegisterOptions {
+    fn default() -> Self {
+        Self { normalize: true }
+    }
+}
+
 /// Consumes an RGP APC sequence.
 pub fn consume_sequence(sequence: &[u8]) -> Option<RgpOperation> {
     if !sequence.starts_with(RGP_APC_START) {
@@ -107,6 +120,7 @@ pub fn consume_sequence(sequence: &[u8]) -> Option<RgpOperation> {
     let mut sx = None;
     let mut sy = None;
     let mut sz = None;
+    let mut normalize = None;
     let mut payload = None;
     for part in parts.filter(|part| !part.is_empty()) {
         let Some((key, value)) = part.split_once('=') else {
@@ -141,6 +155,7 @@ pub fn consume_sequence(sequence: &[u8]) -> Option<RgpOperation> {
             "sx" => sx = value.parse().ok(),
             "sy" => sy = value.parse().ok(),
             "sz" => sz = value.parse().ok(),
+            "normalize" => normalize = parse_bool(value),
             _ if verb == "r" && source.as_deref() == Some("payload") => {
                 payload = Some(part.to_string());
                 break;
@@ -154,6 +169,9 @@ pub fn consume_sequence(sequence: &[u8]) -> Option<RgpOperation> {
         "r" => Some(RgpOperation::Register {
             object_id: id?,
             format: format?,
+            options: RgpRegisterOptions {
+                normalize: normalize.unwrap_or(true),
+            },
             source: if let Some(path) = path {
                 RgpRegisterSource::Path { path }
             } else {
@@ -232,6 +250,8 @@ pub enum RgpOperation {
         object_id: u32,
         /// Declared object format.
         format: String,
+        /// Registration-time object loading options.
+        options: RgpRegisterOptions,
         /// Register source.
         source: RgpRegisterSource,
     },
@@ -260,7 +280,7 @@ pub enum RgpOperation {
 
 /// Returns the RGP support reply sequence.
 pub fn support_reply() -> Vec<u8> {
-    b"\x1b_ratty;g;s;v=1;fmt=obj|glb;path=1;payload=1;chunk=1;anim=1;depth=1;color=1;brightness=1;transform=1;update=1\x1b\\".to_vec()
+    b"\x1b_ratty;g;s;v=1;fmt=obj|glb;path=1;payload=1;chunk=1;anim=1;depth=1;color=1;brightness=1;transform=1;update=1;normalize=1\x1b\\".to_vec()
 }
 
 fn parse_color(value: &str) -> Option<[u8; 3]> {

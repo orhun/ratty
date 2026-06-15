@@ -65,7 +65,7 @@ ESC _ ratty;g;s ESC \
 Ratty replies:
 
 ```text
-ESC _ ratty;g;s;v=1;fmt=obj|glb;path=1;payload=1;chunk=1;anim=1;depth=1;color=1;brightness=1;transform=1;update=1 ESC \
+ESC _ ratty;g;s;v=1;fmt=obj|glb;path=1;payload=1;chunk=1;anim=1;depth=1;color=1;brightness=1;transform=1;update=1;normalize=1 ESC \
 ```
 
 Fields:
@@ -81,6 +81,7 @@ Fields:
 - `brightness=1`: `brightness=<f32>` placement is supported
 - `transform=1`: transform fields such as rotation and offsets are supported
 - `update=1`: `u` object updates are supported
+- `normalize=1`: `normalize=<0|1>` registration is supported for OBJ assets
 
 If no reply arrives, the terminal does not support the protocol.
 
@@ -101,6 +102,13 @@ The required fields are:
 - `id`: object id chosen by the application
 - `fmt`: payload format, `obj` or `glb` in v1
 - `path`: object path known to Ratty
+
+Optional registration fields:
+
+- `normalize`: OBJ normalization flag, defaults to `1`
+  - `1`: center each OBJ mesh around its bounding-box center and scale it by
+    the largest bounding-box axis
+  - `0`: preserve the OBJ's authored vertex coordinates
 
 #### Payload-based registration
 
@@ -136,6 +144,7 @@ Fields:
   - `1`: more register chunks follow for this object id
   - `0`: this is the final chunk and registration can be finalized
 - `name`: optional source name for diagnostics and temporary asset naming
+- `normalize`: optional OBJ normalization flag on the first payload chunk, defaults to `1`
 
 The terminal accumulates chunks for the same `id` until it receives the final
 `more=0` chunk. At that point, the object becomes registered and can be placed

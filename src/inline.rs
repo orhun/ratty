@@ -8,7 +8,10 @@ use bevy::prelude::*;
 use vt100::Callbacks;
 
 use crate::kitty::{KittyOperation, KittyParserState, refresh_kitty_placeholder_anchors};
-use crate::model::{ObjectSource, load_object_source, load_object_source_from_bytes};
+use crate::model::{
+    ObjectLoadOptions, ObjectSource, load_object_source_from_bytes_with_options,
+    load_object_source_with_options,
+};
 use crate::rgp::{
     RgpOperation, RgpPlacementStyle, RgpPlacementUpdate, RgpRegisterSource,
     consume_sequence as consume_rgp_sequence, support_reply,
@@ -246,8 +249,12 @@ impl TerminalInlineObjects {
             RgpOperation::Register {
                 object_id,
                 format,
+                options,
                 source,
             } => {
+                let load_options = ObjectLoadOptions {
+                    normalize: options.normalize,
+                };
                 if format != "obj" && format != "glb" {
                     warn!("unsupported RGP object format `{format}` for object {object_id}");
                     None
@@ -255,7 +262,7 @@ impl TerminalInlineObjects {
                     match source {
                         RgpRegisterSource::Path { path } => {
                             self.pending_rgp_payloads.remove(&object_id);
-                            match load_object_source(Path::new(&path)) {
+                            match load_object_source_with_options(Path::new(&path), load_options) {
                                 Ok((source, source_data)) => {
                                     info!("registered RGP object {} from {}", object_id, source);
                                     self.objects.insert(
@@ -282,9 +289,15 @@ impl TerminalInlineObjects {
                                 }
                             }
                         }
-                        RgpRegisterSource::Payload { name, more, data } => {
-                            self.handle_rgp_payload_chunk(object_id, &format, name, more, data)
-                        }
+                        RgpRegisterSource::Payload { name, more, data } => self
+                            .handle_rgp_payload_chunk(
+                                object_id,
+                                &format,
+                                name,
+                                more,
+                                data,
+                                load_options,
+                            ),
                     }
                 }
             }
@@ -311,8 +324,13 @@ impl TerminalInlineObjects {
             }
             RgpOperation::Update { object_id, update } => {
                 if let Some(anchor) = self.anchors.get_mut(&object_id) {
+                    let needs_respawn = update.depth.is_some()
+                        || update.color.is_some()
+                        || update.brightness.is_some();
                     apply_rgp_update(&mut anchor.style, update);
-                    self.dirty = true;
+                    if needs_respawn {
+                        self.dirty = true;
+                    }
                 }
                 None
             }
@@ -365,6 +383,7 @@ impl TerminalInlineObjects {
         name: Option<String>,
         more: bool,
         data: Vec<u8>,
+        options: ObjectLoadOptions,
     ) -> Option<Vec<u8>> {
         let pending = self
             .pending_rgp_payloads
@@ -373,6 +392,7 @@ impl TerminalInlineObjects {
                 format: format.to_string(),
                 name: name.clone(),
                 data: Vec::new(),
+                options,
             });
         if pending.format != format {
             warn!(
@@ -403,8 +423,12 @@ impl TerminalInlineObjects {
             pending.format,
             pending.data.len()
         );
-        match load_object_source_from_bytes(&pending.format, pending.name.as_deref(), &pending.data)
-        {
+        match load_object_source_from_bytes_with_options(
+            &pending.format,
+            pending.name.as_deref(),
+            &pending.data,
+            pending.options,
+        ) {
             Ok((source, source_data)) => {
                 info!("registered RGP object {} from {}", object_id, source);
                 self.objects.insert(
@@ -435,6 +459,7 @@ struct PendingRgpPayload {
     format: String,
     name: Option<String>,
     data: Vec<u8>,
+    options: ObjectLoadOptions,
 }
 
 fn normalize_hvp_sequences(bytes: &[u8]) -> Cow<'_, [u8]> {
