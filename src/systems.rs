@@ -10,6 +10,7 @@
 //! - [`apply_inline_objects`]
 //! - [`redraw_soft_terminal`]
 //! - [`sync_inline_objects`]
+//! - [`animate_inline_kitty_planes`]
 //! - [`sync_rgp_objects`]
 //! - [`apply_instance_brightness`]
 //! - [`animate_terminal_plane_warp`]
@@ -23,8 +24,8 @@ use std::sync::mpsc::TryRecvError;
 
 use crate::config::{AppConfig, CURSOR_DEPTH};
 use crate::inline::{
-    InlineObject, TerminalInlineObjectPlane, TerminalInlineObjectSprite, TerminalInlineObjects,
-    TerminalRgpObject,
+    InlineKittyPlaneLayout, InlineObject, TerminalInlineObjectPlane, TerminalInlineObjectSprite,
+    TerminalInlineObjects, TerminalRgpObject,
 };
 use crate::model::CursorModel;
 use crate::model::spawn_cursor_model;
@@ -472,6 +473,7 @@ pub(crate) struct SyncInlineParams<'w, 's> {
 ///
 /// In 2D mode it spawns [`TerminalInlineObjectSprite`] entities. In 3D mode it also generates
 /// plane-attached meshes under [`TerminalPlane`] so images follow the warped terminal surface.
+/// Warp motion is handled in place by [`animate_inline_kitty_planes`].
 pub(crate) fn sync_inline_objects(mut params: SyncInlineParams) {
     let SyncInlineParams {
         commands,
@@ -490,12 +492,7 @@ pub(crate) fn sync_inline_objects(mut params: SyncInlineParams) {
         images,
         meshes,
     } = &mut params;
-    let force_warp_sync = matches!(
-        presentation.mode,
-        TerminalPresentationMode::Plane3d | TerminalPresentationMode::Mobius3d
-    ) && plane_warp.amount > 0.0
-        && !inline_objects.anchors.is_empty();
-    if !force_warp_sync && !inline_objects.needs_sync(viewport.size, terminal.cols, terminal.rows) {
+    if !inline_objects.needs_sync(viewport.size, terminal.cols, terminal.rows) {
         return;
     }
 
@@ -620,7 +617,7 @@ fn sync_kitty_inline_image(
             bevy::asset::RenderAssetUsages::default(),
         );
         image.sampler = ImageSampler::nearest();
-        image.data = Some(object.raster.rgba.clone());
+        image.data = Some(std::mem::take(&mut object.raster.rgba));
         let handle = ctx.images.add(image);
         object.raster.handle = Some(handle.clone());
         handle
@@ -640,34 +637,115 @@ fn sync_kitty_inline_image(
         },
     ));
 
-    let x_segments = layout.columns.clamp(2, 24);
-    let y_segments = layout.rows.clamp(2, 24);
-    let vertex_count = ((x_segments + 1) * (y_segments + 1)) as usize;
-    let mut positions = Vec::with_capacity(vertex_count);
-    let mut normals = Vec::with_capacity(vertex_count);
-    let mut uvs = Vec::with_capacity(vertex_count);
-    let mut indices = Vec::with_capacity((x_segments * y_segments * 6) as usize);
+    let plane_layout = inline_kitty_plane_layout(layout);
+    let (mesh_handle, material_handle) = ensure_kitty_plane_assets(
+        object,
+        &plane_layout,
+        &image_handle,
+        ctx.warp_amount,
+        ctx.elapsed_secs,
+        ctx.materials,
+        ctx.meshes,
+    );
+    ctx.plane_children.push(
+        commands
+            .spawn((
+                TerminalInlineObjectPlane,
+                plane_layout,
+                Mesh3d(mesh_handle),
+                MeshMaterial3d(material_handle),
+                Transform::default(),
+            ))
+            .id(),
+    );
+}
 
-    for y in 0..=y_segments {
-        let v = y as f32 / y_segments as f32;
+fn inline_kitty_plane_layout(layout: &InlineLayout) -> InlineKittyPlaneLayout {
+    InlineKittyPlaneLayout {
+        local_x: layout.local_x,
+        local_y: layout.local_y,
+        local_width: layout.local_width,
+        local_height: layout.local_height,
+        x_segments: layout.columns.clamp(2, 24),
+        y_segments: layout.rows.clamp(2, 24),
+    }
+}
+
+fn ensure_kitty_plane_assets(
+    object: &mut crate::inline::KittyInlineObject,
+    layout: &InlineKittyPlaneLayout,
+    image_handle: &Handle<Image>,
+    warp_amount: f32,
+    elapsed_secs: f32,
+    materials: &mut Assets<StandardMaterial>,
+    meshes: &mut Assets<Mesh>,
+) -> (Handle<Mesh>, Handle<StandardMaterial>) {
+    let needs_rebuild = object.plane.as_ref().is_none_or(|cache| {
+        cache.x_segments != layout.x_segments || cache.y_segments != layout.y_segments
+    });
+    if needs_rebuild {
+        if let Some(cache) = object.plane.take() {
+            meshes.remove(&cache.mesh);
+            materials.remove(&cache.material);
+        }
+        let mesh = build_kitty_plane_mesh(layout, warp_amount, elapsed_secs);
+        let mesh_handle = meshes.add(mesh);
+        let material_handle = materials.add(StandardMaterial {
+            base_color: Color::WHITE,
+            base_color_texture: Some(image_handle.clone()),
+            alpha_mode: AlphaMode::Blend,
+            unlit: true,
+            ..default()
+        });
+        object.plane = Some(crate::inline::KittyPlaneCache {
+            x_segments: layout.x_segments,
+            y_segments: layout.y_segments,
+            mesh: mesh_handle.clone(),
+            material: material_handle.clone(),
+        });
+        return (mesh_handle, material_handle);
+    }
+
+    let cache = object.plane.as_mut().expect("plane cache should exist");
+    if let Some(mesh) = meshes.get_mut(&cache.mesh) {
+        write_kitty_plane_positions(mesh, layout, warp_amount, elapsed_secs);
+    }
+    if let Some(material) = materials.get_mut(&cache.material) {
+        material.base_color_texture = Some(image_handle.clone());
+    }
+    (cache.mesh.clone(), cache.material.clone())
+}
+
+fn build_kitty_plane_mesh(
+    layout: &InlineKittyPlaneLayout,
+    warp_amount: f32,
+    elapsed_secs: f32,
+) -> Mesh {
+    let vertex_count = ((layout.x_segments + 1) * (layout.y_segments + 1)) as usize;
+    let mut positions = Vec::with_capacity(vertex_count);
+    let normals = vec![[0.0, 0.0, 1.0]; vertex_count];
+    let mut uvs = Vec::with_capacity(vertex_count);
+    let mut indices = Vec::with_capacity((layout.x_segments * layout.y_segments * 6) as usize);
+
+    for y in 0..=layout.y_segments {
+        let v = y as f32 / layout.y_segments as f32;
         let py = layout.local_y + (0.5 - v) * layout.local_height;
-        for x in 0..=x_segments {
-            let u = x as f32 / x_segments as f32;
+        for x in 0..=layout.x_segments {
+            let u = x as f32 / layout.x_segments as f32;
             let px = layout.local_x + (u - 0.5) * layout.local_width;
             positions.push([
                 px,
                 py,
-                plane_surface_z(px, py, ctx.warp_amount, ctx.elapsed_secs) + 1.5,
+                plane_surface_z(px, py, warp_amount, elapsed_secs) + 1.5,
             ]);
-            normals.push([0.0, 0.0, 1.0]);
             uvs.push([u, v]);
         }
     }
 
-    for y in 0..y_segments {
-        for x in 0..x_segments {
-            let row = y * (x_segments + 1);
-            let next_row = (y + 1) * (x_segments + 1);
+    for y in 0..layout.y_segments {
+        for x in 0..layout.x_segments {
+            let row = y * (layout.x_segments + 1);
+            let next_row = (y + 1) * (layout.x_segments + 1);
             let i0 = row + x;
             let i1 = i0 + 1;
             let i2 = next_row + x;
@@ -676,32 +754,73 @@ fn sync_kitty_inline_image(
         }
     }
 
-    let mesh = ctx.meshes.add(
-        Mesh::new(
-            PrimitiveTopology::TriangleList,
-            bevy::asset::RenderAssetUsages::default(),
-        )
-        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
-        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
-        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
-        .with_inserted_indices(Indices::U32(indices)),
-    );
-    ctx.plane_children.push(
-        commands
-            .spawn((
-                TerminalInlineObjectPlane,
-                Mesh3d(mesh),
-                MeshMaterial3d(ctx.materials.add(StandardMaterial {
-                    base_color: Color::WHITE,
-                    base_color_texture: Some(image_handle),
-                    alpha_mode: AlphaMode::Blend,
-                    unlit: true,
-                    ..default()
-                })),
-                Transform::default(),
-            ))
-            .id(),
-    );
+    Mesh::new(
+        PrimitiveTopology::TriangleList,
+        bevy::asset::RenderAssetUsages::default(),
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
+    .with_inserted_indices(Indices::U32(indices))
+}
+
+fn write_kitty_plane_positions(
+    mesh: &mut Mesh,
+    layout: &InlineKittyPlaneLayout,
+    warp_amount: f32,
+    elapsed_secs: f32,
+) {
+    let Some(VertexAttributeValues::Float32x3(positions)) =
+        mesh.attribute_mut(Mesh::ATTRIBUTE_POSITION)
+    else {
+        return;
+    };
+
+    let mut index = 0;
+    for y in 0..=layout.y_segments {
+        let v = y as f32 / layout.y_segments as f32;
+        let py = layout.local_y + (0.5 - v) * layout.local_height;
+        for x in 0..=layout.x_segments {
+            let u = x as f32 / layout.x_segments as f32;
+            let px = layout.local_x + (u - 0.5) * layout.local_width;
+            if index < positions.len() {
+                positions[index] = [
+                    px,
+                    py,
+                    plane_surface_z(px, py, warp_amount, elapsed_secs) + 1.5,
+                ];
+            }
+            index += 1;
+        }
+    }
+}
+
+/// Animates Kitty image planes attached to the warped terminal surface.
+///
+/// This runs after [`sync_inline_objects`] and updates cached plane mesh positions in place when
+/// warp is active, instead of rebuilding inline entities every frame.
+pub(crate) fn animate_inline_kitty_planes(
+    presentation: Res<TerminalPresentation>,
+    warp: Res<TerminalPlaneWarp>,
+    time: Res<Time>,
+    query: Query<(&InlineKittyPlaneLayout, &Mesh3d), With<TerminalInlineObjectPlane>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    if !matches!(
+        presentation.mode,
+        TerminalPresentationMode::Plane3d | TerminalPresentationMode::Mobius3d
+    ) || warp.amount <= 0.0
+    {
+        return;
+    }
+
+    let elapsed_secs = time.elapsed_secs();
+    for (layout, mesh3d) in query.iter() {
+        let Some(mesh) = meshes.get_mut(&mesh3d.0) else {
+            continue;
+        };
+        write_kitty_plane_positions(mesh, layout, warp.amount, elapsed_secs);
+    }
 }
 
 fn spawn_rgp_object(
@@ -723,6 +842,9 @@ fn spawn_rgp_object(
                 if *existing_key == depth_key {
                     existing_handles.clone()
                 } else {
+                    for handle in existing_handles {
+                        meshes.remove(handle);
+                    }
                     let mesh_handles = source_meshes
                         .iter()
                         .cloned()
@@ -797,6 +919,23 @@ fn spawn_rgp_object(
             ));
         }
         crate::inline::RgpInlineObject::Stl { mesh, handle } => {
+            let depth_key = (style.depth.max(0.0) * 100.0).round() as u32;
+            let mesh_handle = match handle.as_ref() {
+                Some((existing_key, existing_handle)) if *existing_key == depth_key => {
+                    existing_handle.clone()
+                }
+                Some((_, existing_handle)) => {
+                    meshes.remove(existing_handle);
+                    let mesh_handle = meshes.add(extrude_mesh(mesh.clone(), style.depth));
+                    *handle = Some((depth_key, mesh_handle.clone()));
+                    mesh_handle
+                }
+                None => {
+                    let mesh_handle = meshes.add(extrude_mesh(mesh.clone(), style.depth));
+                    *handle = Some((depth_key, mesh_handle.clone()));
+                    mesh_handle
+                }
+            };
             let use_lighting = true;
             let [r, g, b] = match style.color {
                 Some([r, g, b]) => [r, g, b],
@@ -823,9 +962,6 @@ fn spawn_rgp_object(
                     Visibility::Visible,
                 ))
                 .id();
-
-            let mesh_handle = meshes.add(extrude_mesh(mesh.clone(), style.depth));
-            *handle = Some(mesh_handle.clone());
 
             let child = commands
                 .spawn((

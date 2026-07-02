@@ -27,6 +27,35 @@ pub struct TerminalInlineObjectSprite;
 #[derive(Component)]
 pub struct TerminalInlineObjectPlane;
 
+/// Layout data used to animate Kitty image planes on the warped terminal surface.
+#[derive(Component, Clone, Copy)]
+pub(crate) struct InlineKittyPlaneLayout {
+    /// Normalized horizontal center within the terminal plane.
+    pub local_x: f32,
+    /// Normalized vertical center within the terminal plane.
+    pub local_y: f32,
+    /// Normalized width within the terminal plane.
+    pub local_width: f32,
+    /// Normalized height within the terminal plane.
+    pub local_height: f32,
+    /// Horizontal mesh subdivision count.
+    pub x_segments: u32,
+    /// Vertical mesh subdivision count.
+    pub y_segments: u32,
+}
+
+/// Cached GPU assets for a Kitty image plane attached to the terminal surface.
+pub(crate) struct KittyPlaneCache {
+    /// Cached horizontal mesh subdivision count.
+    pub x_segments: u32,
+    /// Cached vertical mesh subdivision count.
+    pub y_segments: u32,
+    /// Cached plane mesh handle.
+    pub mesh: Handle<Mesh>,
+    /// Cached plane material handle.
+    pub material: Handle<StandardMaterial>,
+}
+
 /// Marker for RGP-backed inline objects.
 #[derive(Component)]
 pub struct TerminalRgpObject {
@@ -531,6 +560,8 @@ pub struct KittyInlineObject {
     pub raster: RasterObject,
     /// Indicates placeholder-driven placement.
     pub uses_placeholders: bool,
+    /// Cached plane mesh and material for 3D presentation.
+    pub(crate) plane: Option<KittyPlaneCache>,
 }
 
 /// RGP-backed inline object.
@@ -539,9 +570,8 @@ pub enum RgpInlineObject {
     Stl {
         /// The loaded mesh
         mesh: Mesh,
-        /// This gets created on the fly when it's actually needed.
-        /// If you are creating a [`RgpInlineObject`], chances are that you can set this to `None`.
-        handle: Option<Handle<Mesh>>,
+        /// Cached extruded mesh handle keyed by extrusion depth.
+        handle: Option<(u32, Handle<Mesh>)>,
     },
     /// OBJ mesh payload.
     Obj {
