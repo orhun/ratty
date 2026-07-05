@@ -456,11 +456,8 @@ pub fn handle_keyboard_input(
                 }
                 BindingAction::Paste => {
                     if let Some(text) = params.clipboard.paste() {
-                        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
-                        let mut bytes = Vec::from(b"\x1b[200~".as_slice());
-                        bytes.extend_from_slice(normalized.as_bytes());
-                        bytes.extend_from_slice(b"\x1b[201~");
-                        params.runtime.write_input(&bytes);
+                        let bracketed = params.runtime.parser.screen().bracketed_paste();
+                        params.runtime.write_input(&encode_paste(&text, bracketed));
                     } else {
                         warn!("failed to read clipboard contents for paste");
                     }
@@ -710,6 +707,32 @@ fn translate_key(key_code: KeyCode, ctx: KeyTranslationContext<'_>) -> Vec<u8> {
     }
 
     bytes
+}
+
+/// Bracketed paste start marker (DECSET 2004).
+const PASTE_START: &[u8] = b"\x1b[200~";
+/// Bracketed paste end marker.
+const PASTE_END: &[u8] = b"\x1b[201~";
+
+/// Encodes clipboard text as terminal input, wrapping it in bracketed paste
+/// markers when DECSET 2004 is active. The 7-bit `ESC` and 8-bit `CSI` control
+/// introducers are dropped from bracketed payloads so a paste can never
+/// terminate its own bracket (paste injection).
+fn encode_paste(text: &str, bracketed: bool) -> Vec<u8> {
+    if bracketed {
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        let sanitized: String = normalized
+            .chars()
+            .filter(|&ch| ch != '\u{1b}' && ch != '\u{9b}')
+            .collect();
+        let mut bytes = Vec::with_capacity(sanitized.len() + PASTE_START.len() + PASTE_END.len());
+        bytes.extend_from_slice(PASTE_START);
+        bytes.extend_from_slice(sanitized.as_bytes());
+        bytes.extend_from_slice(PASTE_END);
+        bytes
+    } else {
+        text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
+    }
 }
 
 /// Determine the text to send for a key event.
@@ -1009,5 +1032,53 @@ fn ctrl_keycode_byte(key: KeyCode) -> Option<u8> {
         KeyCode::KeyY => Some(0x19),
         KeyCode::KeyZ => Some(0x1a),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bracketed_paste_wraps_payload_in_markers() {
+        assert_eq!(
+            encode_paste("echo hi", true),
+            b"\x1b[200~echo hi\x1b[201~".to_vec()
+        );
+    }
+
+    #[test]
+    fn bracketed_paste_normalizes_newlines() {
+        assert_eq!(
+            encode_paste("one\r\ntwo\rthree\n", true),
+            b"\x1b[200~one\ntwo\nthree\n\x1b[201~".to_vec()
+        );
+    }
+
+    #[test]
+    fn bracketed_paste_strips_control_introducers() {
+        // A 7-bit ESC or 8-bit CSI end marker embedded in the payload must be
+        // neutralized so the paste cannot terminate its own bracket.
+        assert_eq!(
+            encode_paste("before\x1b[201~after", true),
+            b"\x1b[200~before[201~after\x1b[201~".to_vec()
+        );
+        assert_eq!(
+            encode_paste("before\u{9b}201~after", true),
+            b"\x1b[200~before201~after\x1b[201~".to_vec()
+        );
+    }
+
+    #[test]
+    fn plain_paste_sends_no_markers() {
+        assert_eq!(encode_paste("echo hi", false), b"echo hi".to_vec());
+    }
+
+    #[test]
+    fn plain_paste_sends_newlines_as_carriage_returns() {
+        assert_eq!(
+            encode_paste("one\r\ntwo\nthree", false),
+            b"one\rtwo\rthree".to_vec()
+        );
     }
 }
