@@ -1,37 +1,63 @@
 //! Terminal surface rendering and Ratatui integration.
 
-use std::time::{Duration, Instant};
-
 use bevy::prelude::*;
 use parley_ratatui::ratatui::Terminal;
 use parley_ratatui::ratatui::buffer::Buffer;
 use parley_ratatui::ratatui::layout::Rect;
 use parley_ratatui::ratatui::style::{Color as TuiColor, Modifier, Style};
 use parley_ratatui::ratatui::widgets::Widget;
-use parley_ratatui::vello::wgpu;
 use parley_ratatui::{
-    FontOptions, GpuRenderer, ParleyBackend, TerminalRenderer, TextureReadback, TextureTarget,
+    CellQuantization, FontOptions, ParleyBackend, TerminalRenderer, TexturePresentation,
 };
 
-use crate::config::{AppConfig, FontConfig, FontStyleConfig, TERMINAL_TEXTURE_LABEL, ThemeConfig};
+use crate::config::{AppConfig, FontConfig, FontStyleConfig, ThemeConfig};
+use crate::direct_render::{
+    DirectTerminalSceneExchange, TerminalImages, resize_terminal_image,
+    update_direct_terminal_frame,
+};
 use crate::mouse::TerminalSelection;
 
-/// Minimum interval between terminal redraws.
-const REDRAW_THROTTLE: Duration = Duration::from_millis(16);
+/// Terminal grid and presentation dimensions.
+#[derive(Clone, Copy, Debug)]
+pub struct TerminalLayout {
+    /// Terminal column count.
+    pub cols: u16,
+    /// Terminal row count.
+    pub rows: u16,
+    /// Physical texture size in pixels.
+    pub texture_size: UVec2,
+    /// Logical presentation size in Bevy world units.
+    pub logical_size: Vec2,
+    /// Physical render scale used for the terminal texture.
+    pub render_scale: f32,
+}
+
+impl TerminalLayout {
+    fn new(cols: u16, rows: u16, texture_size: UVec2, render_scale: f32) -> Self {
+        Self {
+            cols,
+            rows,
+            texture_size,
+            logical_size: texture_logical_size(texture_size, render_scale),
+            render_scale,
+        }
+    }
+
+    /// Returns PTY pixel dimensions clamped to portable-pty's `u16` API.
+    pub fn pty_pixels(self) -> UVec2 {
+        self.texture_size.min(UVec2::splat(u16::MAX as u32))
+    }
+}
 
 /// Terminal redraw flag.
 #[derive(Resource)]
 pub struct TerminalRedrawState {
     needs_redraw: bool,
-    last_redraw: Instant,
 }
 
 impl Default for TerminalRedrawState {
     fn default() -> Self {
-        Self {
-            needs_redraw: true,
-            last_redraw: Instant::now() - REDRAW_THROTTLE,
-        }
+        Self { needs_redraw: true }
     }
 }
 
@@ -43,21 +69,20 @@ impl TerminalRedrawState {
 
     /// Returns whether a redraw was pending.
     pub fn take(&mut self) -> bool {
-        if !self.needs_redraw || self.last_redraw.elapsed() < REDRAW_THROTTLE {
-            return false;
-        }
-        self.needs_redraw = false;
-        self.last_redraw = Instant::now();
-        true
+        std::mem::take(&mut self.needs_redraw)
     }
 }
 
 /// Terminal surface and render state.
+#[derive(Resource)]
 pub struct TerminalSurface {
     /// Ratatui terminal backend.
     pub tui: Terminal<ParleyBackend>,
-    /// Front texture image handle.
+    /// Front texture image handle (sampled by the plane material and sprite).
     pub image_handle: Option<Handle<Image>>,
+    /// Vello render-target handle. Vello rasterizes into this storage texture
+    /// and it is copied into [`Self::image_handle`] each frame.
+    pub render_image_handle: Option<Handle<Image>>,
     /// Back texture image handle.
     pub back_image_handle: Option<Handle<Image>>,
     /// Terminal column count.
@@ -68,60 +93,8 @@ pub struct TerminalSurface {
     window_opacity: f32,
     font: FontConfig,
     theme: ThemeConfig,
+    render_scale: f32,
     renderer: TerminalRenderer,
-    gpu: Option<OffscreenGpu>,
-}
-
-struct OffscreenGpu {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    renderer: GpuRenderer,
-    target: TextureTarget,
-    readback: TextureReadback,
-    rgba: Vec<u8>,
-}
-
-impl OffscreenGpu {
-    async fn new(width: u32, height: u32) -> anyhow::Result<Self> {
-        let instance = wgpu::Instance::default();
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions::default())
-            .await
-            .map_err(|_| anyhow::anyhow!("failed to request wgpu adapter for parley_ratatui"))?;
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor::default())
-            .await?;
-        let target = TextureTarget::new(
-            &device,
-            width,
-            height,
-            wgpu::TextureFormat::Rgba8Unorm,
-            Some(TERMINAL_TEXTURE_LABEL),
-        );
-        let renderer = GpuRenderer::new(&device)?;
-        Ok(Self {
-            device,
-            queue,
-            renderer,
-            target,
-            readback: TextureReadback::new(),
-            rgba: Vec::new(),
-        })
-    }
-
-    fn resize(&mut self, width: u32, height: u32) {
-        if self.target.width == width && self.target.height == height {
-            return;
-        }
-
-        self.target = TextureTarget::new(
-            &self.device,
-            width,
-            height,
-            self.target.format,
-            Some(TERMINAL_TEXTURE_LABEL),
-        );
-    }
 }
 
 impl TerminalSurface {
@@ -141,11 +114,20 @@ impl TerminalSurface {
         } else {
             tui.show_cursor()?;
         }
-        let renderer = build_terminal_renderer(&config.font, &config.theme, config.window.opacity);
+        // The real scale arrives with the first `resize_to_fit` once the
+        // window exists; an explicit override seeds it early.
+        let render_scale = config.window.scale_factor.unwrap_or(1.0).max(1.0);
+        let renderer = build_terminal_renderer(
+            &config.font,
+            &config.theme,
+            config.window.opacity,
+            render_scale,
+        );
 
         Ok(Self {
             tui,
             image_handle: None,
+            render_image_handle: None,
             back_image_handle: None,
             cols,
             rows,
@@ -153,8 +135,8 @@ impl TerminalSurface {
             window_opacity: config.window.opacity.clamp(0.0, 1.0),
             font: config.font.clone(),
             theme: config.theme.clone(),
+            render_scale,
             renderer,
-            gpu: None,
         })
     }
 
@@ -166,19 +148,49 @@ impl TerminalSurface {
         }
 
         self.font.size = new_size;
-        self.renderer = build_terminal_renderer(&self.font, &self.theme, self.window_opacity);
-        if let Some(gpu) = self.gpu.as_mut() {
-            let (width, height) = self
-                .renderer
-                .texture_size_for_buffer(self.tui.backend().buffer());
-            gpu.resize(width, height);
-        }
+        self.rebuild_renderer();
         true
     }
 
     /// Returns the current font size.
     pub fn font_size(&self) -> i32 {
         self.font.size
+    }
+
+    /// Updates the physical render scale.
+    fn set_render_scale(&mut self, render_scale: f32) -> bool {
+        let render_scale = render_scale.max(1.0);
+        if (render_scale - self.render_scale).abs() < f32::EPSILON {
+            return false;
+        }
+
+        self.render_scale = render_scale;
+        self.rebuild_renderer();
+        true
+    }
+
+    /// Resizes the terminal grid to fit a logical window size.
+    pub fn resize_to_fit(&mut self, logical_size: Vec2, render_scale: f32) -> TerminalLayout {
+        self.set_render_scale(render_scale);
+
+        let metrics = self.renderer.logical_metrics(self.render_scale);
+        let logical_size = logical_size.max(Vec2::ONE);
+        // A single-column grid makes vt100's wide-character wrap logic
+        // underflow (`cols - width` for a 2-cell glyph), so keep at least two.
+        let cols = (logical_size.x / metrics.cell_width)
+            .floor()
+            .clamp(2.0, u16::MAX as f32) as u16;
+        // Likewise, a single-row grid makes vt100's wrap/scroll bookkeeping
+        // underflow (`prev_row - scrolled`), so keep at least two rows.
+        let rows = (logical_size.y / metrics.cell_height)
+            .floor()
+            .clamp(2.0, u16::MAX as f32) as u16;
+
+        if cols != self.cols || rows != self.rows {
+            self.resize(cols, rows);
+        }
+
+        self.layout()
     }
 
     /// Resizes the terminal grid.
@@ -196,22 +208,12 @@ impl TerminalSurface {
         }
         self.cols = cols;
         self.rows = rows;
-
-        if let Some(gpu) = self.gpu.as_mut() {
-            let (width, height) = self
-                .renderer
-                .texture_size_for_buffer(self.tui.backend().buffer());
-            gpu.resize(width, height);
-        }
     }
 
-    /// Returns the rendered cell size in pixels.
-    pub fn char_dimensions(&self) -> UVec2 {
-        let metrics = self.renderer.metrics();
-        UVec2::new(
-            metrics.cell_width.ceil().max(1.0) as u32,
-            metrics.cell_height.ceil().max(1.0) as u32,
-        )
+    /// Returns the rendered cell size in logical pixels.
+    pub fn char_dimensions(&self) -> Vec2 {
+        let metrics = self.renderer.logical_metrics(self.render_scale);
+        Vec2::new(metrics.cell_width.max(1.0), metrics.cell_height.max(1.0))
     }
 
     /// Returns the terminal pixmap dimensions in pixels.
@@ -222,73 +224,109 @@ impl TerminalSurface {
         UVec2::new(width, height)
     }
 
+    /// Returns the current terminal layout.
+    fn layout(&self) -> TerminalLayout {
+        TerminalLayout::new(
+            self.cols,
+            self.rows,
+            self.pixmap_dimensions(),
+            self.render_scale,
+        )
+    }
+
     /// Synchronizes the rendered terminal image.
     ///
     /// # Errors
     ///
     /// Returns an error if the offscreen renderer cannot be initialized or rendered.
-    pub fn sync_image(
+    pub(crate) fn sync_image(
         &mut self,
         images: &mut Assets<Image>,
+        exchange: &DirectTerminalSceneExchange,
         elapsed_secs: f32,
     ) -> anyhow::Result<()> {
-        let Some(handle) = self.image_handle.as_ref() else {
+        let (Some(render_handle), Some(present_handle)) =
+            (self.render_image_handle.clone(), self.image_handle.clone())
+        else {
             return Ok(());
         };
-        let Some(image) = images.get_mut(handle) else {
-            return Ok(());
-        };
-
         let (width, height) = self
             .renderer
             .texture_size_for_buffer(self.tui.backend().buffer());
-        if self.gpu.is_none() {
-            self.gpu = Some(pollster::block_on(OffscreenGpu::new(width, height))?);
+        // The render and present textures are kept the same size so the copy is
+        // a plain texel copy. `get_mut` marks the asset modified, which makes
+        // Bevy re-extract and re-upload the CPU-side buffer; only take it when
+        // the size changes.
+        for handle in [&render_handle, &present_handle] {
+            let Some(image) = images.get(handle) else {
+                continue;
+            };
+            let size = image.texture_descriptor.size;
+            if (size.width != width || size.height != height)
+                && let Some(mut image) = images.get_mut(handle)
+            {
+                resize_terminal_image(&mut image, width, height);
+            }
         }
-        let Some(gpu) = self.gpu.as_mut() else {
-            anyhow::bail!("offscreen GPU renderer should be initialized");
-        };
-        gpu.resize(width, height);
 
         let buffer = self.tui.backend().buffer();
         let cursor = Some(self.tui.backend().cursor_position());
         let cursor_visible = self.tui.backend().cursor_visible();
-
-        gpu.renderer.render_to_rgba8_with_elapsed_into(
+        update_direct_terminal_frame(
+            exchange,
+            TerminalImages {
+                render: render_handle,
+                present: present_handle,
+            },
             &mut self.renderer,
-            &mut gpu.readback,
-            &gpu.device,
-            &gpu.queue,
-            &gpu.target,
             buffer,
             cursor,
             cursor_visible,
             elapsed_secs,
-            &mut gpu.rgba,
-        )?;
-
-        image.resize(bevy::render::render_resource::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        });
-        let data = image.data.get_or_insert_with(Vec::new);
-        let target_len = width as usize * height as usize * 4;
-        if data.len() != target_len {
-            data.resize(target_len, 0);
-        }
-        if gpu.rgba.len() == target_len {
-            data.copy_from_slice(&gpu.rgba);
-        }
+        );
 
         Ok(())
     }
+
+    fn rebuild_renderer(&mut self) {
+        self.renderer = build_terminal_renderer(
+            &self.font,
+            &self.theme,
+            self.window_opacity,
+            self.render_scale,
+        );
+    }
+}
+
+/// Computes the physical render scale for a Bevy window.
+pub fn render_scale_for_window(window: &Window) -> f32 {
+    // The presenting window's *actual* framebuffer ratio (physical / logical), so the
+    // terminal texture is rasterized at exactly the framebuffer resolution and can be
+    // presented 1:1 with physical pixels. Deriving it from the real physical size —
+    // rather than the reported scale factor — keeps it correct when they disagree.
+    //
+    // The previous version took the max with the backend's base scale factor; on a
+    // mixed-DPI multi-monitor setup that leaked a higher-DPI monitor's scale, over-sizing
+    // the texture so it had to be resampled onto the low-DPI window.
+    let logical = window.resolution.size().max(Vec2::ONE);
+    let physical = window.resolution.physical_size().as_vec2();
+    (physical.x / logical.x)
+        .min(physical.y / logical.y)
+        .max(1.0)
+}
+
+/// Returns the logical size for a physical terminal texture.
+pub fn texture_logical_size(texture_size: UVec2, render_scale: f32) -> Vec2 {
+    let [width, height] =
+        TexturePresentation::new([texture_size.x, texture_size.y], render_scale).logical_size();
+    Vec2::new(width, height)
 }
 
 fn build_terminal_renderer(
     font: &FontConfig,
     theme_config: &ThemeConfig,
     window_opacity: f32,
+    render_scale: f32,
 ) -> TerminalRenderer {
     let palette = theme_config
         .palette()
@@ -312,13 +350,20 @@ fn build_terminal_renderer(
         ),
         palette,
     };
-    let font_options = FontOptions::default().with_family(font.family.clone());
-    TerminalRenderer::new(
+    // Config font sizes are points; Parley takes pixels (1pt = 4/3px at 96dpi).
+    const PT_TO_PX: f32 = 96.0 / 72.0;
+    let font_options = FontOptions::default()
+        .with_family(font.family.clone())
+        // Fractional cells keep font-size zoom proportional on both axes even
+        // when a single step moves the glyph advance by less than one pixel.
+        .with_cell_quantization(CellQuantization::Fractional);
+    TerminalRenderer::new_scaled(
         FontOptions {
-            size: font.size as f32,
+            size: font.size as f32 * PT_TO_PX,
             ..font_options
         },
         theme,
+        render_scale,
     )
 }
 
@@ -436,6 +481,44 @@ fn ansi_index_to_tui(index: u8, theme_palette: &[TuiColor; 16]) -> TuiColor {
         232..=255 => {
             let shade = 8 + (index - 232) * 10;
             TuiColor::Rgb(shade, shade, shade)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression test for vertical-only zoom steps (#97): with fractional
+    /// cell quantization, every font-size step must grow both axes.
+    #[test]
+    fn font_size_steps_scale_cells_on_both_axes() {
+        for render_scale in [1.0, 2.0] {
+            let mut previous: Option<(f32, f32)> = None;
+            for size in 8..=24 {
+                let font = FontConfig {
+                    size,
+                    ..FontConfig::default()
+                };
+                let renderer =
+                    build_terminal_renderer(&font, &ThemeConfig::default(), 1.0, render_scale);
+                let metrics = renderer.logical_metrics(render_scale);
+                if let Some((width, height)) = previous {
+                    assert!(
+                        metrics.cell_width > width,
+                        "cell width must grow at size {size} (scale {render_scale}): \
+                         {width} -> {}",
+                        metrics.cell_width
+                    );
+                    assert!(
+                        metrics.cell_height > height,
+                        "cell height must grow at size {size} (scale {render_scale}): \
+                         {height} -> {}",
+                        metrics.cell_height
+                    );
+                }
+                previous = Some((metrics.cell_width, metrics.cell_height));
+            }
         }
     }
 }

@@ -12,9 +12,15 @@ use bevy::image::ImageSampler;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, Face, TextureDimension, TextureFormat};
+use bevy::window::PrimaryWindow;
+
+use bevy::camera::visibility::NoFrustumCulling;
 
 use crate::config::AppConfig;
-use crate::terminal::TerminalSurface;
+use crate::direct_render::{new_terminal_image, new_terminal_render_image};
+use crate::present::{TerminalPresentMaterial, fullscreen_quad};
+use crate::runtime::TerminalRuntime;
+use crate::terminal::{TerminalLayout, TerminalSurface, render_scale_for_window};
 
 /// Marker for the 2D terminal sprite.
 #[derive(Component)]
@@ -172,6 +178,18 @@ type PlaneBackTransformQuery<'w, 's> =
     Query<'w, 's, &'static mut Transform, With<TerminalPlaneBack>>;
 type PlaneCameraQuery<'w, 's> =
     Query<'w, 's, (&'static mut Projection, &'static mut Transform), With<TerminalPlaneCamera>>;
+pub(crate) type TerminalPlaneLayoutQuery<'w, 's> =
+    Query<'w, 's, &'static mut Transform, (With<TerminalPlane>, Without<TerminalSprite>)>;
+pub(crate) type TerminalPlaneBackLayoutQuery<'w, 's> = Query<
+    'w,
+    's,
+    &'static mut Transform,
+    (
+        With<TerminalPlaneBack>,
+        Without<TerminalPlane>,
+        Without<TerminalSprite>,
+    ),
+>;
 
 #[derive(SystemParam)]
 pub(crate) struct PresentationParams<'w, 's> {
@@ -195,21 +213,51 @@ pub(crate) struct PresentationParams<'w, 's> {
             PlaneCameraQuery<'w, 's>,
         ),
     >,
+    camera_2d: Query<'w, 's, &'static mut Camera, (With<Camera2d>, Without<TerminalPlaneCamera>)>,
+    camera_3d: Query<'w, 's, &'static mut Camera, (With<TerminalPlaneCamera>, Without<Camera2d>)>,
+}
+
+#[derive(SystemParam)]
+pub(crate) struct SetupSceneParams<'w, 's> {
+    commands: Commands<'w, 's>,
+    app_config: Res<'w, AppConfig>,
+    meshes: ResMut<'w, Assets<Mesh>>,
+    materials: ResMut<'w, Assets<StandardMaterial>>,
+    images: ResMut<'w, Assets<Image>>,
+    present_materials: ResMut<'w, Assets<TerminalPresentMaterial>>,
+    primary_window: Query<'w, 's, &'static Window, With<PrimaryWindow>>,
+    runtime: ResMut<'w, TerminalRuntime>,
+    terminal: ResMut<'w, TerminalSurface>,
 }
 
 /// Sets up the terminal presentation scene.
 ///
 /// This startup system creates the 2D and 3D cameras, terminal sprite, terminal plane meshes,
 /// backing images, lighting and presentation resources used by later update systems.
-pub fn setup_scene(
-    mut commands: Commands,
-    app_config: Res<AppConfig>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut images: ResMut<Assets<Image>>,
-    mut terminal: NonSendMut<TerminalSurface>,
-) {
+pub(crate) fn setup_scene(mut params: SetupSceneParams) {
+    let SetupSceneParams {
+        commands,
+        app_config,
+        meshes,
+        materials,
+        images,
+        present_materials,
+        primary_window,
+        runtime,
+        terminal,
+    } = &mut params;
     let terminal_opacity = app_config.window.opacity.clamp(0.0, 1.0);
+    let window = primary_window.single().expect("primary window");
+    let window_size = window.resolution.size().max(Vec2::ONE);
+    let render_scale = render_scale_for_window(window);
+    let layout = terminal.resize_to_fit(window_size, render_scale);
+    let pty_pixels = layout.pty_pixels();
+    runtime.resize(
+        layout.cols,
+        layout.rows,
+        pty_pixels.x as u16,
+        pty_pixels.y as u16,
+    );
 
     commands.spawn((
         Camera2d,
@@ -236,21 +284,25 @@ pub fn setup_scene(
         Msaa::Off,
     ));
 
-    let pixmap = terminal.pixmap_dimensions();
-    let pixmap_width = pixmap.x;
-    let pixmap_height = pixmap.y;
-
     let terminal_alpha = (terminal_opacity * 255.0).round() as u8;
-    let mut image = create_terminal_image(pixmap_width, pixmap_height, [0, 0, 0, 0]);
-    image.data = Some(vec![0; (pixmap_width * pixmap_height * 4) as usize]);
+    let render_image_handle = images.add(new_terminal_render_image(
+        layout.texture_size.x,
+        layout.texture_size.y,
+        crate::config::TERMINAL_RENDER_TEXTURE_LABEL,
+    ));
+    terminal.render_image_handle = Some(render_image_handle);
 
-    let image_handle = images.add(image);
+    let image_handle = images.add(new_terminal_image(
+        layout.texture_size.x,
+        layout.texture_size.y,
+        crate::config::TERMINAL_TEXTURE_LABEL,
+    ));
     terminal.image_handle = Some(image_handle.clone());
 
     let [r, g, b] = app_config.theme.background;
     let back_image = create_terminal_image(
-        pixmap_width,
-        pixmap_height,
+        layout.texture_size.x,
+        layout.texture_size.y,
         [
             r.saturating_sub(13),
             g.saturating_sub(11),
@@ -261,23 +313,25 @@ pub fn setup_scene(
     let back_image_handle = images.add(back_image);
     terminal.back_image_handle = Some(back_image_handle.clone());
 
-    let viewport_size = Vec2::new(
-        app_config.window.width as f32,
-        app_config.window.height as f32,
-    );
     let viewport_center = Vec2::ZERO;
     commands.insert_resource(TerminalViewport {
-        size: viewport_size,
+        size: layout.logical_size,
         center: viewport_center,
     });
 
-    let mut sprite = Sprite::from_image(image_handle);
-    sprite.custom_size = Some(viewport_size);
-    sprite.color = Color::srgba(1.0, 1.0, 1.0, terminal_opacity);
+    // Present the terminal texture 1:1 with physical pixels via a fullscreen quad
+    // whose shader fetches each texel by pixel coordinate (no resampling), rather
+    // than a world-positioned sprite whose interpolated UVs resample it. The
+    // `TerminalSprite` marker is kept so the flat/3D visibility toggle applies.
     commands.spawn((
         TerminalSprite,
-        sprite,
-        Transform::from_translation(Vec3::new(viewport_center.x, viewport_center.y, 0.0)),
+        Mesh2d(meshes.add(fullscreen_quad())),
+        MeshMaterial2d(present_materials.add(TerminalPresentMaterial {
+            texture: image_handle,
+        })),
+        Transform::default(),
+        Visibility::Visible,
+        NoFrustumCulling,
     ));
 
     let front_mesh = meshes.add(terminal_plane_mesh(32, 20));
@@ -298,7 +352,7 @@ pub fn setup_scene(
             unlit: true,
             ..default()
         })),
-        Transform::from_scale(viewport_size.extend(1.0)),
+        Transform::from_scale(layout.logical_size.extend(1.0)),
         Visibility::Hidden,
     ));
 
@@ -315,7 +369,7 @@ pub fn setup_scene(
         Transform {
             translation: Vec3::new(0.0, 0.0, -2.0),
             rotation: Quat::from_rotation_y(std::f32::consts::PI),
-            scale: viewport_size.extend(1.0),
+            scale: layout.logical_size.extend(1.0),
         },
         Visibility::Hidden,
     ));
@@ -324,7 +378,7 @@ pub fn setup_scene(
         PointLight {
             intensity: 190_000.0,
             range: 2200.0,
-            shadows_enabled: false,
+            shadow_maps_enabled: false,
             ..default()
         },
         Transform::from_xyz(220.0, 320.0, 1000.0),
@@ -332,7 +386,7 @@ pub fn setup_scene(
     commands.spawn((
         DirectionalLight {
             illuminance: 15_000.0,
-            shadows_enabled: false,
+            shadow_maps_enabled: false,
             ..default()
         },
         Transform::from_rotation(Quat::from_euler(EulerRot::ZYX, 0.0, -0.9, -0.45)),
@@ -341,7 +395,7 @@ pub fn setup_scene(
         PointLight {
             intensity: 45_000.0,
             range: 1800.0,
-            shadows_enabled: false,
+            shadow_maps_enabled: false,
             ..default()
         },
         Transform::from_xyz(-280.0, -120.0, 700.0),
@@ -355,6 +409,25 @@ pub fn setup_scene(
         loaded: false,
         first_frame_uploaded: false,
     });
+}
+
+/// Synchronizes Bevy presentation entities to the terminal texture layout.
+pub(crate) fn sync_terminal_layout(
+    layout: TerminalLayout,
+    viewport: &mut TerminalViewport,
+    plane_query: &mut TerminalPlaneLayoutQuery,
+    plane_back_query: &mut TerminalPlaneBackLayoutQuery,
+) {
+    viewport.size = layout.logical_size;
+    viewport.center = Vec2::ZERO;
+
+    for mut transform in plane_query.iter_mut() {
+        transform.scale = layout.logical_size.extend(1.0);
+    }
+
+    for mut transform in plane_back_query.iter_mut() {
+        transform.scale = layout.logical_size.extend(1.0);
+    }
 }
 
 fn create_terminal_image(width: u32, height: u32, fill: [u8; 4]) -> Image {
@@ -385,6 +458,8 @@ pub(crate) fn apply_terminal_presentation(
         plane_materials,
         materials,
         plane_transforms,
+        camera_2d,
+        camera_3d,
     } = &mut params;
     let is_3d = presentation.mode.is_3d();
     let is_mobius = presentation.mode.is_mobius();
@@ -432,10 +507,35 @@ pub(crate) fn apply_terminal_presentation(
         };
     }
 
-    if let Ok(front_material) = plane_materials.single()
-        && let Some(material) = materials.get_mut(&front_material.0)
-    {
-        material.cull_mode = if is_mobius { None } else { Some(Face::Back) };
+    if let Ok(front_material) = plane_materials.single() {
+        let cull_mode = if is_mobius { None } else { Some(Face::Back) };
+        // `get_mut` marks the material modified and re-prepares it on the
+        // GPU; only take it when the cull mode actually changes.
+        let needs_update = materials
+            .get(&front_material.0)
+            .is_some_and(|material| material.cull_mode != cull_mode);
+        if needs_update && let Some(mut material) = materials.get_mut(&front_material.0) {
+            material.cull_mode = cull_mode;
+        }
+    }
+
+    // The 2D camera only contributes in flat mode; the 3D camera stays active
+    // everywhere because the cursor model and RGP objects render through it
+    // even in 2D mode. Whichever camera renders first owns the screen clear.
+    for mut camera in camera_2d.iter_mut() {
+        let active = !is_3d;
+        if camera.is_active != active {
+            camera.is_active = active;
+        }
+    }
+    // This system only runs when presentation state changes, so assigning
+    // unconditionally does not churn change detection every frame.
+    for mut camera in camera_3d.iter_mut() {
+        camera.clear_color = if is_3d {
+            ClearColorConfig::Default
+        } else {
+            ClearColorConfig::None
+        };
     }
 
     for mut transform in &mut plane_transforms.p0() {

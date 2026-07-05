@@ -8,6 +8,7 @@
 
 pub mod cli;
 pub mod config;
+mod direct_render;
 pub mod inline;
 pub mod keyboard;
 pub mod kitty;
@@ -15,6 +16,7 @@ pub mod model;
 pub mod mouse;
 pub mod paths;
 pub mod plugin;
+pub mod present;
 pub mod rendering;
 pub mod rgp;
 pub mod runtime;

@@ -5,6 +5,7 @@ use bevy::ecs::world::FromWorld;
 use bevy::input::ButtonState;
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
+use bevy::window::{PrimaryWindow, Window};
 
 use arboard::Clipboard;
 
@@ -12,10 +13,11 @@ use crate::config::{AppConfig, BindingAction, FontConfig, KeyBindingConfig};
 use crate::mouse::{TerminalSelection, encode_mouse_wheel};
 use crate::runtime::TerminalRuntime;
 use crate::scene::{
-    MobiusTransition, TerminalPlaneView, TerminalPlaneWarp, TerminalPresentation,
-    TerminalPresentationMode, TerminalViewport,
+    MobiusTransition, TerminalPlaneBackLayoutQuery, TerminalPlaneLayoutQuery, TerminalPlaneView,
+    TerminalPlaneWarp, TerminalPresentation, TerminalPresentationMode, TerminalViewport,
+    sync_terminal_layout,
 };
-use crate::terminal::{TerminalRedrawState, TerminalSurface};
+use crate::terminal::{TerminalRedrawState, TerminalSurface, render_scale_for_window};
 
 /// Clipboard bridge for terminal copy and paste.
 pub struct TerminalClipboard {
@@ -314,9 +316,12 @@ pub struct KeyboardSystemParams<'w, 's> {
     presentation: ResMut<'w, TerminalPresentation>,
     mobius_transition: ResMut<'w, MobiusTransition>,
     clipboard: NonSendMut<'w, TerminalClipboard>,
-    runtime: NonSendMut<'w, TerminalRuntime>,
-    terminal: NonSendMut<'w, TerminalSurface>,
-    viewport: Res<'w, TerminalViewport>,
+    runtime: ResMut<'w, TerminalRuntime>,
+    terminal: ResMut<'w, TerminalSurface>,
+    primary_window: Query<'w, 's, &'static Window, With<PrimaryWindow>>,
+    viewport: ResMut<'w, TerminalViewport>,
+    plane_query: TerminalPlaneLayoutQuery<'w, 's>,
+    plane_back_query: TerminalPlaneBackLayoutQuery<'w, 's>,
     bindings: Res<'w, TerminalKeyBindings>,
     redraw: ResMut<'w, TerminalRedrawState>,
     _marker: std::marker::PhantomData<&'s ()>,
@@ -478,18 +483,26 @@ pub fn handle_keyboard_input(
                         _ => false,
                     };
                     if resized {
-                        let char_dims = params.terminal.char_dimensions().max(UVec2::ONE);
-                        let cols =
-                            ((params.viewport.size.x / char_dims.x as f32).floor() as u16).max(1);
-                        let rows =
-                            ((params.viewport.size.y / char_dims.y as f32).floor() as u16).max(1);
-                        params.runtime.resize(
-                            cols,
-                            rows,
-                            params.viewport.size.x as u16,
-                            params.viewport.size.y as u16,
+                        let Ok(window) = params.primary_window.single() else {
+                            continue;
+                        };
+                        let layout = params.terminal.resize_to_fit(
+                            window.resolution.size().max(Vec2::ONE),
+                            render_scale_for_window(window),
                         );
-                        params.terminal.resize(cols, rows);
+                        let pty_pixels = layout.pty_pixels();
+                        params.runtime.resize(
+                            layout.cols,
+                            layout.rows,
+                            pty_pixels.x as u16,
+                            pty_pixels.y as u16,
+                        );
+                        sync_terminal_layout(
+                            layout,
+                            &mut params.viewport,
+                            &mut params.plane_query,
+                            &mut params.plane_back_query,
+                        );
                         params.redraw.request();
                     }
                     continue;

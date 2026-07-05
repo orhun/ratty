@@ -585,7 +585,7 @@ pub enum RgpInlineObject {
         /// Scene asset path.
         asset_path: String,
         /// Cached scene handle.
-        handle: Option<Handle<Scene>>,
+        handle: Option<Handle<WorldAsset>>,
     },
 }
 

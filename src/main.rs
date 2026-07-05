@@ -1,13 +1,11 @@
-use std::time::Duration;
-
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 use anyhow::anyhow;
 use bevy::asset::AssetPlugin;
 use bevy::prelude::*;
 use bevy::render::RenderPlugin;
 use bevy::render::settings::{WgpuSettings, WgpuSettingsPriority};
-use bevy::window::{PrimaryWindow, WindowCreated, WindowResolution};
-use bevy::winit::{UpdateMode, WINIT_WINDOWS, WinitSettings};
+use bevy::window::{PrimaryWindow, WindowCreated, WindowResizeConstraints, WindowResolution};
+use bevy::winit::{WINIT_WINDOWS, WinitSettings};
 use clap::Parser;
 
 #[cfg(target_os = "windows")]
@@ -21,8 +19,6 @@ use ratty::plugin::TerminalPlugin;
 use ratty::runtime::{RuntimeOptions, TerminalRuntime};
 use ratty::terminal::TerminalSurface;
 
-/// Focused-window update interval for low-power winit mode.
-const FOCUSED_UPDATE_INTERVAL: Duration = Duration::from_millis(33);
 // Matches the default icon id used by `winresource::WindowsResource::set_icon`.
 #[cfg(target_os = "windows")]
 const WINDOW_ICON_RESOURCE_ID: u16 = 1;
@@ -31,6 +27,16 @@ const WINDOW_ICON: &[u8] = include_bytes!("../assets/ratty.ico");
 
 struct AppWindowIcon {
     icon: Option<Icon>,
+}
+
+/// Builds the primary window resolution, overriding the display scale factor
+/// only when the config asks for it.
+fn window_resolution(app_config: &AppConfig) -> WindowResolution {
+    let resolution = WindowResolution::new(app_config.window.width, app_config.window.height);
+    match app_config.window.scale_factor {
+        Some(scale_factor) => resolution.with_scale_factor_override(scale_factor),
+        None => resolution,
+    }
 }
 
 fn main() -> anyhow::Result<()> {
@@ -57,24 +63,25 @@ fn main() -> anyhow::Result<()> {
             (app_config.window.opacity.clamp(0.0, 1.0) * 255.0).round() as u8,
         )))
         .insert_resource(app_config.clone())
-        .insert_non_send_resource(runtime)
-        .insert_non_send_resource(terminal)
-        .insert_non_send_resource(AppWindowIcon { icon: window_icon })
-        .insert_resource(WinitSettings {
-            focused_mode: UpdateMode::reactive_low_power(FOCUSED_UPDATE_INTERVAL),
-            unfocused_mode: UpdateMode::Continuous,
-        })
+        .insert_resource(runtime)
+        .insert_resource(terminal)
+        .insert_non_send(AppWindowIcon { icon: window_icon })
+        // Always update continuously, focused or not. Bevy's default switches
+        // unfocused windows to a reactive mode, which would delay background
+        // PTY output.
+        .insert_resource(WinitSettings::continuous())
         .add_plugins(
             DefaultPlugins
                 .set(WindowPlugin {
                     primary_window: Some(Window {
                         title: window_title.clone(),
                         name: Some(window_title),
-                        resolution: WindowResolution::new(
-                            app_config.window.width,
-                            app_config.window.height,
-                        )
-                        .with_scale_factor_override(app_config.window.scale_factor),
+                        resolution: window_resolution(&app_config),
+                        resize_constraints: WindowResizeConstraints {
+                            min_width: 1.0,
+                            min_height: 1.0,
+                            ..default()
+                        },
                         transparent: app_config.window.opacity < 1.0,
                         visible: false,
                         ..default()
@@ -86,12 +93,12 @@ fn main() -> anyhow::Result<()> {
                     ..default()
                 })
                 .set(RenderPlugin {
-                    render_creation: bevy::render::settings::RenderCreation::Automatic(
+                    render_creation: bevy::render::settings::RenderCreation::Automatic(Box::new(
                         WgpuSettings {
-                            priority: WgpuSettingsPriority::Compatibility,
+                            priority: WgpuSettingsPriority::WebGPU,
                             ..default()
                         },
-                    ),
+                    )),
                     ..default()
                 }),
         )

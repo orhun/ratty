@@ -70,6 +70,7 @@ pub fn spawn_cursor_model(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
+    images: &mut Assets<Image>,
     asset_server: &AssetServer,
     app_config: &AppConfig,
 ) {
@@ -81,9 +82,23 @@ pub fn spawn_cursor_model(
         ))
         .id();
 
+    let base_color_texture = app_config.cursor.model.texture.as_deref().and_then(|path| {
+        match load_texture_image(path) {
+            Ok(image) => {
+                info!("loaded cursor texture from {}", path.display());
+                Some(images.add(image))
+            }
+            Err(error) => {
+                warn!("failed to load cursor texture: {error:#}");
+                None
+            }
+        }
+    });
+
     let [r, g, b] = app_config.cursor.model.color;
     let material = materials.add(StandardMaterial {
         base_color: Color::srgb_u8(r, g, b),
+        base_color_texture,
         emissive: LinearRgba::rgb(0.35, 0.35, 0.35),
         metallic: 0.0,
         perceptual_roughness: 0.28,
@@ -112,7 +127,7 @@ pub fn spawn_cursor_model(
         Ok((source, ObjectSource::Gltf(asset_path))) => {
             info!("loading cursor model from {}", source);
             commands.entity(root).with_children(|parent| {
-                parent.spawn(SceneRoot(
+                parent.spawn(WorldAssetRoot(
                     asset_server.load(GltfAssetLabel::Scene(0).from_asset(asset_path)),
                 ));
             });
@@ -142,6 +157,27 @@ pub fn spawn_cursor_model(
             });
         }
     }
+}
+
+/// Loads a base-color texture image from a path into a Bevy [`Image`].
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be read or decoded.
+fn load_texture_image(path: &Path) -> anyhow::Result<Image> {
+    let path = expand_path(path);
+    let bytes =
+        std::fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let dynamic = image::load_from_memory(&bytes)
+        .with_context(|| format!("failed to decode texture {}", path.display()))?;
+    // Normalize to 8-bit RGBA so the texture uses a widely supported GPU format.
+    // Decoded 16-bit images would otherwise need the TEXTURE_FORMAT_16BIT_NORM feature.
+    let rgba = image::DynamicImage::ImageRgba8(dynamic.into_rgba8());
+    Ok(Image::from_dynamic(
+        rgba,
+        true,
+        RenderAssetUsages::default(),
+    ))
 }
 
 /// Loads an object source from a path.
@@ -492,6 +528,7 @@ fn build_meshes(
             PrimitiveTopology::TriangleList,
             RenderAssetUsages::default(),
         );
+        let position_count = positions.len();
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
 
         if !source_mesh.vertex_color.is_empty() {
@@ -512,6 +549,17 @@ fn build_meshes(
                 .map(|normal| [normal[0], normal[1], normal[2]])
                 .collect::<Vec<[f32; 3]>>();
             mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+        }
+
+        if !source_mesh.texcoords.is_empty() {
+            let uvs = source_mesh
+                .texcoords
+                .chunks_exact(2)
+                .map(|uv| [uv[0], 1.0 - uv[1]])
+                .collect::<Vec<[f32; 2]>>();
+            if uvs.len() == position_count {
+                mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+            }
         }
 
         mesh.insert_indices(Indices::U32(source_mesh.indices));

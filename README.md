@@ -222,19 +222,18 @@ and [Bevy](https://bevyengine.org/) for scene presentation.
 
 Current workflow:
 
-1. Ratatui buffer on CPU
-2. Parley/Vello renders on GPU
-3. Read back RGBA to CPU
-4. Copy into Bevy image
-5. Bevy presents that image in 2D and 3D
+1. PTY output is parsed by `vt100` and drawn into a Ratatui buffer on CPU
+2. `parley_ratatui` shapes the buffer with Parley and records it as a Vello scene
+3. The scene is handed to Bevy's render world through a double-buffered
+   exchange (scenes are recycled between frames, never cloned or re-recorded)
+4. Vello renders the scene on Bevy's render-world device into a plain
+   `Rgba8Unorm` storage texture, with no CPU readback in between
+5. That storage texture is copied into an `Rgba8UnormSrgb` present texture
+   (sampled through an sRGB view, so Vello's sRGB-encoded output is decoded on
+   sample instead of re-encoded), which Bevy presents in the 2D and 3D scenes
 
-Terminal drawing is GPU-rendered through Parley/Vello, but the main terminal
-image still crosses back through CPU memory before Bevy presents it. This is a
-GPU-powered bridge, not a fully GPU-resident shared-texture path.
-
-If the project later moves to a fully GPU-resident path, that will require a
-dedicated Bevy render integration that renders into a Bevy-owned texture on
-Bevy's render-world device instead of using the current readback bridge.
+The terminal image is fully GPU-resident: the only data crossing from the main
+world to the render world each frame is the recorded scene, not pixels.
 
 ## Endorsements
 
