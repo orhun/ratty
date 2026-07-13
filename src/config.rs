@@ -159,6 +159,8 @@ pub struct TerminalConfig {
     pub default_rows: u16,
     /// Scrollback line count.
     pub scrollback: usize,
+    /// Number of lines scrolled per mouse wheel tick in flat 2D mode.
+    pub mouse_scroll_lines: usize,
 }
 
 impl Default for TerminalConfig {
@@ -167,6 +169,7 @@ impl Default for TerminalConfig {
             default_cols: 104,
             default_rows: 32,
             scrollback: 2_000,
+            mouse_scroll_lines: 3,
         }
     }
 }

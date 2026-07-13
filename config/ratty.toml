@@ -8,6 +8,7 @@ opacity = 0.8
 default_cols = 104
 default_rows = 32
 scrollback = 2000
+mouse_scroll_lines = 3
 
 # [shell]
 # program = "/bin/bash" 

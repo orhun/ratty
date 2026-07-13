@@ -8,6 +8,7 @@ use bevy::prelude::*;
 use bevy::window::{CursorMoved, PrimaryWindow, Window};
 use vt100::{MouseProtocolEncoding, MouseProtocolMode};
 
+use crate::config::AppConfig;
 use crate::runtime::TerminalRuntime;
 use crate::scene::{
     MobiusTransition, TerminalPlaneView, TerminalPresentation, TerminalPresentationMode,
@@ -245,6 +246,7 @@ pub struct MouseSystemParams<'w, 's> {
     plane_view: ResMut<'w, TerminalPlaneView>,
     selection: ResMut<'w, TerminalSelection>,
     redraw: ResMut<'w, crate::terminal::TerminalRedrawState>,
+    app_config: Res<'w, AppConfig>,
 }
 
 /// Handles terminal mouse input.
@@ -266,6 +268,7 @@ pub(crate) fn handle_mouse_input(
         plane_view,
         selection,
         redraw,
+        app_config,
     } = &mut params;
     let Ok((primary_window, window)) = primary_window.single() else {
         return;
@@ -507,7 +510,10 @@ pub(crate) fn handle_mouse_input(
             && !runtime.parser.screen().alternate_screen()
         {
             let amount = match event.unit {
-                MouseScrollUnit::Line => event.y.round() as isize,
+                MouseScrollUnit::Line => {
+                    app_config.terminal.mouse_scroll_lines as isize
+                        * (if delta < 0.0 { -1 } else { 1 })
+                }
                 MouseScrollUnit::Pixel => {
                     let char_height = terminal.char_dimensions().y;
                     local_scroll.pixel_remainder += event.y / char_height;
