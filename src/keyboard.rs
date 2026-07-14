@@ -338,6 +338,7 @@ pub fn handle_keyboard_input(
         let modifiers = current_modifiers(&params.keys).union(keyboard.modifiers());
         if event.state == ButtonState::Pressed
             && let Some(action) = params.bindings.action_for(binding_key_code, modifiers)
+            && !(is_scroll_action(action) && params.runtime.parser.screen().alternate_screen())
         {
             if event.repeat
                 && !matches!(
@@ -530,6 +531,16 @@ pub fn handle_keyboard_input(
     }
 }
 
+fn is_scroll_action(action: BindingAction) -> bool {
+    matches!(
+        action,
+        BindingAction::ScrollPageUp
+            | BindingAction::ScrollPageDown
+            | BindingAction::ScrollUp
+            | BindingAction::ScrollDown
+    )
+}
+
 fn current_modifiers(keys: &ButtonInput<KeyCode>) -> BindingModifiers {
     BindingModifiers {
         control: keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]),
@@ -682,15 +693,20 @@ fn translate_key(key_code: KeyCode, ctx: KeyTranslationContext<'_>) -> Vec<u8> {
         return bytes;
     }
 
-    if ctx.alt_pressed {
-        bytes.push(0x1b);
-    }
-
     let navigation_key = NavigationKey::from_key_code(key_code)
         .or_else(|| NavigationKey::from_logical_key(ctx.logical_key));
     if let Some(key) = navigation_key {
-        bytes.extend_from_slice(&key.encode(ctx.ctrl_pressed, ctx.application_cursor));
+        bytes.extend_from_slice(&key.encode(
+            ctx.ctrl_pressed,
+            ctx.alt_pressed,
+            ctx.shift_pressed,
+            ctx.application_cursor,
+        ));
         return bytes;
+    }
+
+    if ctx.alt_pressed {
+        bytes.push(0x1b);
     }
 
     match key_code {
@@ -794,7 +810,44 @@ impl NavigationKey {
         }
     }
 
-    fn encode(self, ctrl_pressed: bool, application_cursor: bool) -> Vec<u8> {
+    fn encode(
+        self,
+        ctrl_pressed: bool,
+        alt_pressed: bool,
+        shift_pressed: bool,
+        application_cursor: bool,
+    ) -> Vec<u8> {
+        let modifier_code =
+            1 + shift_pressed as u8 + (alt_pressed as u8 * 2) + (ctrl_pressed as u8 * 4);
+
+        if modifier_code != 1 {
+            let arrow_suffix = match self {
+                Self::ArrowUp => Some('A'),
+                Self::ArrowDown => Some('B'),
+                Self::ArrowRight => Some('C'),
+                Self::ArrowLeft => Some('D'),
+                Self::Home => Some('H'),
+                Self::End => Some('F'),
+                _ => None,
+            };
+
+            if let Some(suffix) = arrow_suffix {
+                return format!("\x1b[1;{modifier_code}{suffix}").into_bytes();
+            }
+
+            let tilde_code = match self {
+                Self::PageUp => Some(5),
+                Self::PageDown => Some(6),
+                Self::Insert => Some(2),
+                Self::Delete => Some(3),
+                _ => None,
+            };
+
+            if let Some(code) = tilde_code {
+                return format!("\x1b[{code};{modifier_code}~").into_bytes();
+            }
+        }
+
         match self {
             Self::ArrowUp => {
                 if ctrl_pressed {
@@ -1032,6 +1085,78 @@ fn ctrl_keycode_byte(key: KeyCode) -> Option<u8> {
         KeyCode::KeyY => Some(0x19),
         KeyCode::KeyZ => Some(0x1a),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod keyboard_translation_tests {
+    use super::*;
+
+    fn translate_navigation_key(
+        key_code: KeyCode,
+        logical_key: Key,
+        ctrl_pressed: bool,
+        alt_pressed: bool,
+        shift_pressed: bool,
+        application_cursor: bool,
+    ) -> Vec<u8> {
+        translate_key(
+            key_code,
+            KeyTranslationContext {
+                logical_key: &logical_key,
+                text: None,
+                ctrl_pressed,
+                alt_pressed,
+                alt_gr_pressed: false,
+                shift_pressed,
+                application_cursor,
+                kitty_keyboard_flags: 0,
+                modify_other_keys: None,
+            },
+        )
+    }
+
+    #[test]
+    fn encodes_alt_arrow_keys_as_modified_csi_sequences() {
+        assert_eq!(
+            translate_navigation_key(KeyCode::ArrowUp, Key::ArrowUp, false, true, false, false),
+            b"\x1b[1;3A"
+        );
+        assert_eq!(
+            translate_navigation_key(
+                KeyCode::ArrowDown,
+                Key::ArrowDown,
+                false,
+                true,
+                false,
+                false
+            ),
+            b"\x1b[1;3B"
+        );
+    }
+
+    #[test]
+    fn modified_navigation_keys_do_not_use_application_cursor_mode() {
+        assert_eq!(
+            translate_navigation_key(KeyCode::ArrowUp, Key::ArrowUp, false, true, false, true),
+            b"\x1b[1;3A"
+        );
+        assert_eq!(
+            translate_navigation_key(KeyCode::ArrowUp, Key::ArrowUp, false, false, false, true),
+            b"\x1bOA"
+        );
+    }
+
+    #[test]
+    fn encodes_modified_page_keys_with_tilde_sequences() {
+        assert_eq!(
+            translate_navigation_key(KeyCode::PageUp, Key::PageUp, false, true, false, false),
+            b"\x1b[5;3~"
+        );
+        assert_eq!(
+            translate_navigation_key(KeyCode::PageDown, Key::PageDown, false, true, false, false),
+            b"\x1b[6;3~"
+        );
     }
 }
 
