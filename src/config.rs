@@ -136,6 +136,11 @@ pub struct WindowConfig {
     pub scale_factor: Option<f32>,
     /// Window opacity from `0.0` to `1.0`.
     pub opacity: f32,
+    /// How the window schedules redraws while focused.
+    pub update_mode: UpdateModeConfig,
+    /// Minimum time between redraws while focused, in milliseconds.
+    /// Only applies when `update_mode` is `LowPower`.
+    pub frame_interval_ms: u64,
 }
 
 impl Default for WindowConfig {
@@ -145,8 +150,22 @@ impl Default for WindowConfig {
             height: 620,
             scale_factor: None,
             opacity: 1.0,
+            update_mode: UpdateModeConfig::Continuous,
+            frame_interval_ms: 33,
         }
     }
+}
+
+/// How the window schedules redraws while focused.
+#[derive(Debug, Clone, Copy, Deserialize, Default)]
+pub enum UpdateModeConfig {
+    /// Redraw continuously, regardless of input.
+    #[serde(rename = "Continuous")]
+    #[default]
+    Continuous,
+    /// Redraw in response to events, rate-limited to `frame_interval_ms`.
+    #[serde(rename = "LowPower")]
+    LowPower,
 }
 
 /// Terminal grid configuration.

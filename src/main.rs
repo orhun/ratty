@@ -5,15 +5,16 @@ use bevy::prelude::*;
 use bevy::render::RenderPlugin;
 use bevy::render::settings::{WgpuSettings, WgpuSettingsPriority};
 use bevy::window::{PrimaryWindow, WindowCreated, WindowResizeConstraints, WindowResolution};
-use bevy::winit::{WINIT_WINDOWS, WinitSettings};
+use bevy::winit::{UpdateMode, WINIT_WINDOWS, WinitSettings};
 use clap::Parser;
+use std::time::Duration;
 
 #[cfg(target_os = "windows")]
 use winit::platform::windows::{IconExtWindows, WindowExtWindows};
 use winit::window::Icon;
 
 use ratty::cli::Cli;
-use ratty::config::AppConfig;
+use ratty::config::{AppConfig, UpdateModeConfig};
 use ratty::paths::runtime_asset_root;
 use ratty::plugin::TerminalPlugin;
 use ratty::runtime::{RuntimeOptions, TerminalRuntime};
@@ -66,10 +67,19 @@ fn main() -> anyhow::Result<()> {
         .insert_resource(runtime)
         .insert_resource(terminal)
         .insert_non_send(AppWindowIcon { icon: window_icon })
-        // Always update continuously, focused or not. Bevy's default switches
-        // unfocused windows to a reactive mode, which would delay background
-        // PTY output.
-        .insert_resource(WinitSettings::continuous())
+        // Unfocused windows always update continuously. Bevy's default switches
+        // them to a reactive mode, which would delay background PTY output.
+        // While focused, `update_mode` picks between updating continuously and
+        // updating reactively at a capped frame rate to reduce idle CPU usage.
+        .insert_resource(match app_config.window.update_mode {
+            UpdateModeConfig::Continuous => WinitSettings::continuous(),
+            UpdateModeConfig::LowPower => WinitSettings {
+                focused_mode: UpdateMode::reactive_low_power(Duration::from_millis(
+                    app_config.window.frame_interval_ms,
+                )),
+                unfocused_mode: UpdateMode::Continuous,
+            },
+        })
         .add_plugins(
             DefaultPlugins
                 .set(WindowPlugin {
