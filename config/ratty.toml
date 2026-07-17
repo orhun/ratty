@@ -3,8 +3,8 @@ width = 960
 height = 620
 opacity = 0.8
 # scale_factor = 1.0
-# update_mode = "Continuous"  # or "LowPower" to redraw reactively while focused
-# frame_interval_ms = 33      # frame rate cap in "LowPower" mode
+# update_mode = "Continuous"  # Use "LowPower" to redraw only after input or terminal output.
+# frame_interval_ms = 33      # Minimum milliseconds between LowPower redraws.
 
 [terminal]
 default_cols = 104
