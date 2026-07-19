@@ -9,8 +9,7 @@ use vt100::Callbacks;
 
 use crate::kitty::{KittyOperation, KittyParserState, refresh_kitty_placeholder_anchors};
 use crate::model::{
-    ObjectLoadOptions, ObjectSource, load_object_source_from_bytes_with_options,
-    load_object_source_with_options,
+    ObjectLoadOptions, load_object_source_from_bytes_with_options, load_object_source_with_options,
 };
 use crate::rgp::{
     RgpOperation, RgpPlacementStyle, RgpPlacementUpdate, RgpRegisterSource,
@@ -27,6 +26,35 @@ pub struct TerminalInlineObjectSprite;
 /// Marker for 3D inline object planes.
 #[derive(Component)]
 pub struct TerminalInlineObjectPlane;
+
+/// Layout data used to animate Kitty image planes on the warped terminal surface.
+#[derive(Component, Clone, Copy)]
+pub(crate) struct InlineKittyPlaneLayout {
+    /// Normalized horizontal center within the terminal plane.
+    pub local_x: f32,
+    /// Normalized vertical center within the terminal plane.
+    pub local_y: f32,
+    /// Normalized width within the terminal plane.
+    pub local_width: f32,
+    /// Normalized height within the terminal plane.
+    pub local_height: f32,
+    /// Horizontal mesh subdivision count.
+    pub x_segments: u32,
+    /// Vertical mesh subdivision count.
+    pub y_segments: u32,
+}
+
+/// Cached GPU assets for a Kitty image plane attached to the terminal surface.
+pub(crate) struct KittyPlaneCache {
+    /// Cached horizontal mesh subdivision count.
+    pub x_segments: u32,
+    /// Cached vertical mesh subdivision count.
+    pub y_segments: u32,
+    /// Cached plane mesh handle.
+    pub mesh: Handle<Mesh>,
+    /// Cached plane material handle.
+    pub material: Handle<StandardMaterial>,
+}
 
 /// Marker for RGP-backed inline objects.
 #[derive(Component)]
@@ -65,10 +93,18 @@ impl TerminalInlineObjects {
                 .windows(APC_START.len())
                 .position(|window| window == APC_START)
             else {
-                if cursor < self.pending_bytes.len() {
-                    parser.process(&normalize_hvp_sequences(&self.pending_bytes[cursor..]));
+                let pending_len = self.pending_bytes.len();
+                let keep_from = pending_apc_prefix_start(&self.pending_bytes, cursor);
+                if cursor < keep_from {
+                    parser.process(&normalize_hvp_sequences(
+                        &self.pending_bytes[cursor..keep_from],
+                    ));
                 }
-                self.pending_bytes.clear();
+                if keep_from < pending_len {
+                    self.pending_bytes.drain(..keep_from);
+                } else {
+                    self.pending_bytes.clear();
+                }
                 return replies;
             };
             let start = cursor + start_offset;
@@ -255,7 +291,7 @@ impl TerminalInlineObjects {
                 let load_options = ObjectLoadOptions {
                     normalize: options.normalize,
                 };
-                if format != "obj" && format != "glb" {
+                if format != "obj" && format != "glb" && format != "stl" {
                     warn!("unsupported RGP object format `{format}` for object {object_id}");
                     None
                 } else {
@@ -265,21 +301,7 @@ impl TerminalInlineObjects {
                             match load_object_source_with_options(Path::new(&path), load_options) {
                                 Ok((source, source_data)) => {
                                     info!("registered RGP object {} from {}", object_id, source);
-                                    self.objects.insert(
-                                        object_id,
-                                        InlineObject::RgpObject(match source_data {
-                                            ObjectSource::Obj(meshes) => RgpInlineObject::Obj {
-                                                meshes,
-                                                handles: None,
-                                            },
-                                            ObjectSource::Gltf(asset_path) => {
-                                                RgpInlineObject::Gltf {
-                                                    asset_path,
-                                                    handle: None,
-                                                }
-                                            }
-                                        }),
-                                    );
+                                    self.objects.insert(object_id, source_data.into());
                                     self.dirty = true;
                                     None
                                 }
@@ -431,19 +453,7 @@ impl TerminalInlineObjects {
         ) {
             Ok((source, source_data)) => {
                 info!("registered RGP object {} from {}", object_id, source);
-                self.objects.insert(
-                    object_id,
-                    InlineObject::RgpObject(match source_data {
-                        ObjectSource::Obj(meshes) => RgpInlineObject::Obj {
-                            meshes,
-                            handles: None,
-                        },
-                        ObjectSource::Gltf(asset_path) => RgpInlineObject::Gltf {
-                            asset_path,
-                            handle: None,
-                        },
-                    }),
-                );
+                self.objects.insert(object_id, source_data.into());
                 self.dirty = true;
                 None
             }
@@ -499,6 +509,15 @@ fn normalize_hvp_sequences(bytes: &[u8]) -> Cow<'_, [u8]> {
     }
 }
 
+fn pending_apc_prefix_start(bytes: &[u8], cursor: usize) -> usize {
+    let start = cursor.min(bytes.len());
+    if bytes[start..].ends_with(&APC_START[..1]) {
+        bytes.len() - 1
+    } else {
+        bytes.len()
+    }
+}
+
 fn apc_end(bytes: &[u8], payload_start: usize) -> Option<usize> {
     let mut index = payload_start;
     loop {
@@ -541,10 +560,19 @@ pub struct KittyInlineObject {
     pub raster: RasterObject,
     /// Indicates placeholder-driven placement.
     pub uses_placeholders: bool,
+    /// Cached plane mesh and material for 3D presentation.
+    pub(crate) plane: Option<KittyPlaneCache>,
 }
 
 /// RGP-backed inline object.
 pub enum RgpInlineObject {
+    /// STL mesh payload.
+    Stl {
+        /// The loaded mesh
+        mesh: Mesh,
+        /// Cached extruded mesh handle keyed by extrusion depth.
+        handle: Option<(u32, Handle<Mesh>)>,
+    },
     /// OBJ mesh payload.
     Obj {
         /// Loaded mesh parts.
@@ -557,7 +585,7 @@ pub enum RgpInlineObject {
         /// Scene asset path.
         asset_path: String,
         /// Cached scene handle.
-        handle: Option<Handle<Scene>>,
+        handle: Option<Handle<WorldAsset>>,
     },
 }
 

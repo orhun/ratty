@@ -8,6 +8,7 @@ use bevy::prelude::*;
 use bevy::window::{CursorMoved, PrimaryWindow, Window};
 use vt100::{MouseProtocolEncoding, MouseProtocolMode};
 
+use crate::config::AppConfig;
 use crate::runtime::TerminalRuntime;
 use crate::scene::{
     MobiusTransition, TerminalPlaneView, TerminalPresentation, TerminalPresentationMode,
@@ -237,14 +238,15 @@ impl TerminalSelection {
 #[derive(SystemParam)]
 pub struct MouseSystemParams<'w, 's> {
     primary_window: Query<'w, 's, (Entity, &'static Window), With<PrimaryWindow>>,
-    runtime: NonSendMut<'w, TerminalRuntime>,
-    terminal: NonSend<'w, TerminalSurface>,
+    runtime: ResMut<'w, TerminalRuntime>,
+    terminal: Res<'w, TerminalSurface>,
     viewport: Res<'w, TerminalViewport>,
     presentation: Res<'w, TerminalPresentation>,
     mobius_transition: Res<'w, MobiusTransition>,
     plane_view: ResMut<'w, TerminalPlaneView>,
     selection: ResMut<'w, TerminalSelection>,
     redraw: ResMut<'w, crate::terminal::TerminalRedrawState>,
+    app_config: Res<'w, AppConfig>,
 }
 
 /// Handles terminal mouse input.
@@ -266,10 +268,12 @@ pub(crate) fn handle_mouse_input(
         plane_view,
         selection,
         redraw,
+        app_config,
     } = &mut params;
     let Ok((primary_window, window)) = primary_window.single() else {
         return;
     };
+    let window_size = window.resolution.size().max(Vec2::ONE);
     let mouse_mode = runtime.parser.screen().mouse_protocol_mode();
     let mouse_encoding = runtime.parser.screen().mouse_protocol_encoding();
     let mobius_animating =
@@ -309,7 +313,7 @@ pub(crate) fn handle_mouse_input(
                 plane_view.last_pan_cursor = Some(event.position);
             }
         } else if forward_mouse {
-            if let Some(cell) = position_to_cell(event.position, viewport, terminal)
+            if let Some(cell) = position_to_cell(event.position, window_size, viewport, terminal)
                 && forwarded_mouse.last_cell != Some(cell)
                 && match mouse_mode {
                     MouseProtocolMode::ButtonMotion => {
@@ -339,7 +343,7 @@ pub(crate) fn handle_mouse_input(
                 forwarded_mouse.last_cell = Some(cell);
             }
         } else if (selection.dragging || selection.pending_start.is_some())
-            && let Some(cell) = position_to_cell(event.position, viewport, terminal)
+            && let Some(cell) = position_to_cell(event.position, window_size, viewport, terminal)
             && selection.update_from_cursor(cell, event.position)
         {
             redraw.request();
@@ -362,7 +366,9 @@ pub(crate) fn handle_mouse_input(
                     if let Some(cell) = window
                         .cursor_position()
                         .or(selection.cursor_position())
-                        .and_then(|position| position_to_cell(position, viewport, terminal))
+                        .and_then(|position| {
+                            position_to_cell(position, window_size, viewport, terminal)
+                        })
                     {
                         runtime.write_input(&encode_mouse_event(cell, 0, false, mouse_encoding));
                         forwarded_mouse.last_cell = Some(cell);
@@ -374,7 +380,7 @@ pub(crate) fn handle_mouse_input(
                     plane_view.rotating = true;
                     plane_view.last_rotate_cursor = selection.cursor_position();
                 } else if let Some(pos) = selection.cursor_position()
-                    && let Some(cell) = position_to_cell(pos, viewport, terminal)
+                    && let Some(cell) = position_to_cell(pos, window_size, viewport, terminal)
                     && selection.begin_pending(cell, pos)
                 {
                     redraw.request();
@@ -386,7 +392,9 @@ pub(crate) fn handle_mouse_input(
                     if let Some(cell) = window
                         .cursor_position()
                         .or(selection.cursor_position())
-                        .and_then(|position| position_to_cell(position, viewport, terminal))
+                        .and_then(|position| {
+                            position_to_cell(position, window_size, viewport, terminal)
+                        })
                     {
                         runtime.write_input(&encode_mouse_event(cell, 0, true, mouse_encoding));
                         forwarded_mouse.last_cell = Some(cell);
@@ -406,7 +414,9 @@ pub(crate) fn handle_mouse_input(
                 if let Some(cell) = window
                     .cursor_position()
                     .or(selection.cursor_position())
-                    .and_then(|position| position_to_cell(position, viewport, terminal))
+                    .and_then(|position| {
+                        position_to_cell(position, window_size, viewport, terminal)
+                    })
                 {
                     runtime.write_input(&encode_mouse_event(cell, 1, false, mouse_encoding));
                     forwarded_mouse.last_cell = Some(cell);
@@ -417,7 +427,9 @@ pub(crate) fn handle_mouse_input(
                 if let Some(cell) = window
                     .cursor_position()
                     .or(selection.cursor_position())
-                    .and_then(|position| position_to_cell(position, viewport, terminal))
+                    .and_then(|position| {
+                        position_to_cell(position, window_size, viewport, terminal)
+                    })
                 {
                     runtime.write_input(&encode_mouse_event(cell, 1, true, mouse_encoding));
                     forwarded_mouse.last_cell = Some(cell);
@@ -428,7 +440,9 @@ pub(crate) fn handle_mouse_input(
                 if let Some(cell) = window
                     .cursor_position()
                     .or(selection.cursor_position())
-                    .and_then(|position| position_to_cell(position, viewport, terminal))
+                    .and_then(|position| {
+                        position_to_cell(position, window_size, viewport, terminal)
+                    })
                 {
                     runtime.write_input(&encode_mouse_event(cell, 2, false, mouse_encoding));
                     forwarded_mouse.last_cell = Some(cell);
@@ -439,7 +453,9 @@ pub(crate) fn handle_mouse_input(
                 if let Some(cell) = window
                     .cursor_position()
                     .or(selection.cursor_position())
-                    .and_then(|position| position_to_cell(position, viewport, terminal))
+                    .and_then(|position| {
+                        position_to_cell(position, window_size, viewport, terminal)
+                    })
                 {
                     runtime.write_input(&encode_mouse_event(cell, 2, true, mouse_encoding));
                     forwarded_mouse.last_cell = Some(cell);
@@ -481,7 +497,7 @@ pub(crate) fn handle_mouse_input(
             if let Some(cell) = window
                 .cursor_position()
                 .or(selection.cursor_position())
-                .and_then(|position| position_to_cell(position, viewport, terminal))
+                .and_then(|position| position_to_cell(position, window_size, viewport, terminal))
             {
                 runtime.write_input(&encode_mouse_event(
                     cell,
@@ -494,9 +510,12 @@ pub(crate) fn handle_mouse_input(
             && !runtime.parser.screen().alternate_screen()
         {
             let amount = match event.unit {
-                MouseScrollUnit::Line => event.y.round() as isize,
+                MouseScrollUnit::Line => {
+                    app_config.terminal.mouse_scroll_lines as isize
+                        * (if delta < 0.0 { -1 } else { 1 })
+                }
                 MouseScrollUnit::Pixel => {
-                    let char_height = terminal.char_dimensions().y.max(1) as f32;
+                    let char_height = terminal.char_dimensions().y;
                     local_scroll.pixel_remainder += event.y / char_height;
                     let amount = local_scroll.pixel_remainder.trunc() as isize;
                     local_scroll.pixel_remainder -= amount as f32;
@@ -555,6 +574,7 @@ pub(crate) fn encode_mouse_wheel(
 
 fn position_to_cell(
     position: Vec2,
+    window_size: Vec2,
     viewport: &TerminalViewport,
     terminal: &TerminalSurface,
 ) -> Option<UVec2> {
@@ -570,8 +590,18 @@ fn position_to_cell(
         return None;
     }
 
-    let x = position.x.clamp(0.0, viewport.size.x - 1.0);
-    let y = position.y.clamp(0.0, viewport.size.y - 1.0);
+    let margin = (window_size - viewport.size).max(Vec2::ZERO) * 0.5;
+    let local_position = position - margin;
+    if local_position.x < 0.0
+        || local_position.y < 0.0
+        || local_position.x >= viewport.size.x
+        || local_position.y >= viewport.size.y
+    {
+        return None;
+    }
+
+    let x = local_position.x.clamp(0.0, viewport.size.x - 1.0);
+    let y = local_position.y.clamp(0.0, viewport.size.y - 1.0);
     let col = (x / cell_width).floor() as u32;
     let row = (y / cell_height).floor() as u32;
 

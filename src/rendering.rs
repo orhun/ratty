@@ -22,7 +22,7 @@ pub fn sync_terminal_debug_image(
     let Some(handle) = terminal.back_image_handle.as_ref() else {
         return;
     };
-    let Some(image) = images.get_mut(handle) else {
+    let Some(mut image) = images.get_mut(handle) else {
         return;
     };
 
@@ -46,6 +46,16 @@ pub fn sync_terminal_debug_image(
 }
 
 /// Synchronizes an image handle across plane materials.
+///
+/// Re-binds the texture on every call rather than only when the handle changes.
+/// The terminal plane textures are rebuilt on the GPU as the terminal updates:
+/// the back debug texture is re-uploaded each redraw, and the front present
+/// texture's GPU image is recreated whenever the terminal resizes. Either rebuild
+/// leaves a material's cached bind group pointing at a stale texture, so the plane
+/// freezes (front) or blanks (back) until the material is re-prepared.
+/// Unconditionally re-binding re-prepares the bind group so the planes always
+/// sample the current texture. The caller only runs this on redraw frames (gated
+/// by the frame-dirty flag), so it is not per-frame churn.
 pub fn sync_plane_texture<'a>(
     image_handle: Option<&Handle<Image>>,
     material_handles: impl IntoIterator<Item = &'a MeshMaterial3d<StandardMaterial>>,
@@ -56,7 +66,7 @@ pub fn sync_plane_texture<'a>(
     };
 
     for material_handle in material_handles {
-        if let Some(material) = materials.get_mut(&material_handle.0) {
+        if let Some(mut material) = materials.get_mut(&material_handle.0) {
             material.base_color_texture = Some(image_handle.clone());
         }
     }

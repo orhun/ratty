@@ -1,4 +1,4 @@
-/target
 assets/img
+**/target
 result
 result-*

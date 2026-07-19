@@ -15,6 +15,8 @@ pub enum ObjectFormat {
     Obj,
     /// Binary glTF.
     Glb,
+    // STL
+    Stl,
 }
 
 impl ObjectFormat {
@@ -22,6 +24,7 @@ impl ObjectFormat {
         match self {
             Self::Obj => "obj",
             Self::Glb => "glb",
+            Self::Stl => "stl",
         }
     }
 
@@ -33,6 +36,7 @@ impl ObjectFormat {
             .as_deref()
         {
             Some("obj") => Self::Obj,
+            Some("stl") => Self::Stl,
             _ => Self::Glb,
         }
     }
@@ -41,6 +45,7 @@ impl ObjectFormat {
         match self {
             Self::Obj => "payload.obj",
             Self::Glb => "payload.glb",
+            Self::Stl => "payload.stl",
         }
     }
 }

@@ -36,27 +36,6 @@ nix profile install github:orhun/ratty
 }
 ```
 
-### Overlay
-
-To make `pkgs.ratty` available in your configuration:
-
-```nix
-{
-  inputs.ratty.url = "github:orhun/ratty";
-
-  outputs = { nixpkgs, ratty, ... }: {
-    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
-      system = "x86_64-linux";
-      modules = [
-        { nixpkgs.overlays = [ ratty.overlays.default ]; }
-        ratty.nixosModules.default
-        ./configuration.nix
-      ];
-    };
-  };
-}
-```
-
 ## NixOS System Configuration
 
 Add ratty to your system packages with optional declarative configuration:
@@ -202,14 +181,13 @@ binary wrapper:
 
 Both `nixosModules.default` and `homeManagerModules.default` expose:
 
-| Option                       | Type          | Default       | Description                                        |
-| ---------------------------- | ------------- | ------------- | -------------------------------------------------- |
-| `programs.ratty.enable`      | bool          | `false`       | Enable Ratty installation                          |
-| `programs.ratty.package`     | package       | `pkgs.ratty`  | The Ratty package to use                           |
-| `programs.ratty.settings`    | attrset       | `{}`          | Configuration written to `ratty.toml`              |
-| `programs.ratty.gpuBackend`  | null or enum  | `null`        | Force wgpu backend: `"vulkan"` (Linux), `"metal"` (macOS), `"gl"`, or `"gles"`. null = auto-detect |
-| `programs.ratty.gpuAdapter`  | null or str   | `null`        | Substring match to select a specific GPU adapter (e.g. `"RTX 3060"`). null = auto-detect |
-| `programs.ratty.defaultShell` | null or package | `null`      | Default shell for -e fallback. null = package default (bash) |
+| Option                      | Type         | Default                        | Description                                                                              |
+| --------------------------- | ------------ | ------------------------------ | ---------------------------------------------------------------------------------------- |
+| `programs.ratty.enable`     | bool         | `false`                        | Enable Ratty installation                                                                |
+| `programs.ratty.package`    | package      | `self.packages.<system>.ratty` | The Ratty package to use                                                                 |
+| `programs.ratty.settings`   | attrset      | `{}`                           | Configuration written to `ratty.toml`                                                    |
+| `programs.ratty.gpuBackend` | null or enum | `null`                         | Force wgpu backend: `"vulkan"`, `"gl"`, or `"gles"`. null = auto-detect                  |
+| `programs.ratty.gpuAdapter` | null or str  | `null`                         | Substring match to select a specific GPU adapter (e.g. `"RTX 3060"`). null = auto-detect |
 
 ## Package Architecture
 

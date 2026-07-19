@@ -5,6 +5,7 @@ use bevy::ecs::world::FromWorld;
 use bevy::input::ButtonState;
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
+use bevy::window::{PrimaryWindow, Window};
 
 use arboard::Clipboard;
 
@@ -12,10 +13,11 @@ use crate::config::{AppConfig, BindingAction, FontConfig, KeyBindingConfig};
 use crate::mouse::{TerminalSelection, encode_mouse_wheel};
 use crate::runtime::TerminalRuntime;
 use crate::scene::{
-    MobiusTransition, TerminalPlaneView, TerminalPlaneWarp, TerminalPresentation,
-    TerminalPresentationMode, TerminalViewport,
+    MobiusTransition, TerminalPlaneBackLayoutQuery, TerminalPlaneLayoutQuery, TerminalPlaneView,
+    TerminalPlaneWarp, TerminalPresentation, TerminalPresentationMode, TerminalViewport,
+    sync_terminal_layout,
 };
-use crate::terminal::{TerminalRedrawState, TerminalSurface};
+use crate::terminal::{TerminalRedrawState, TerminalSurface, render_scale_for_window};
 
 /// Clipboard bridge for terminal copy and paste.
 pub struct TerminalClipboard {
@@ -314,9 +316,12 @@ pub struct KeyboardSystemParams<'w, 's> {
     presentation: ResMut<'w, TerminalPresentation>,
     mobius_transition: ResMut<'w, MobiusTransition>,
     clipboard: NonSendMut<'w, TerminalClipboard>,
-    runtime: NonSendMut<'w, TerminalRuntime>,
-    terminal: NonSendMut<'w, TerminalSurface>,
-    viewport: Res<'w, TerminalViewport>,
+    runtime: ResMut<'w, TerminalRuntime>,
+    terminal: ResMut<'w, TerminalSurface>,
+    primary_window: Query<'w, 's, &'static Window, With<PrimaryWindow>>,
+    viewport: ResMut<'w, TerminalViewport>,
+    plane_query: TerminalPlaneLayoutQuery<'w, 's>,
+    plane_back_query: TerminalPlaneBackLayoutQuery<'w, 's>,
     bindings: Res<'w, TerminalKeyBindings>,
     redraw: ResMut<'w, TerminalRedrawState>,
     _marker: std::marker::PhantomData<&'s ()>,
@@ -333,6 +338,7 @@ pub fn handle_keyboard_input(
         let modifiers = current_modifiers(&params.keys).union(keyboard.modifiers());
         if event.state == ButtonState::Pressed
             && let Some(action) = params.bindings.action_for(binding_key_code, modifiers)
+            && !(is_scroll_action(action) && params.runtime.parser.screen().alternate_screen())
         {
             if event.repeat
                 && !matches!(
@@ -451,11 +457,8 @@ pub fn handle_keyboard_input(
                 }
                 BindingAction::Paste => {
                     if let Some(text) = params.clipboard.paste() {
-                        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
-                        let mut bytes = Vec::from(b"\x1b[200~".as_slice());
-                        bytes.extend_from_slice(normalized.as_bytes());
-                        bytes.extend_from_slice(b"\x1b[201~");
-                        params.runtime.write_input(&bytes);
+                        let bracketed = params.runtime.parser.screen().bracketed_paste();
+                        params.runtime.write_input(&encode_paste(&text, bracketed));
                     } else {
                         warn!("failed to read clipboard contents for paste");
                     }
@@ -478,18 +481,26 @@ pub fn handle_keyboard_input(
                         _ => false,
                     };
                     if resized {
-                        let char_dims = params.terminal.char_dimensions().max(UVec2::ONE);
-                        let cols =
-                            ((params.viewport.size.x / char_dims.x as f32).floor() as u16).max(1);
-                        let rows =
-                            ((params.viewport.size.y / char_dims.y as f32).floor() as u16).max(1);
-                        params.runtime.resize(
-                            cols,
-                            rows,
-                            params.viewport.size.x as u16,
-                            params.viewport.size.y as u16,
+                        let Ok(window) = params.primary_window.single() else {
+                            continue;
+                        };
+                        let layout = params.terminal.resize_to_fit(
+                            window.resolution.size().max(Vec2::ONE),
+                            render_scale_for_window(window),
                         );
-                        params.terminal.resize(cols, rows);
+                        let pty_pixels = layout.pty_pixels();
+                        params.runtime.resize(
+                            layout.cols,
+                            layout.rows,
+                            pty_pixels.x as u16,
+                            pty_pixels.y as u16,
+                        );
+                        sync_terminal_layout(
+                            layout,
+                            &mut params.viewport,
+                            &mut params.plane_query,
+                            &mut params.plane_back_query,
+                        );
                         params.redraw.request();
                     }
                     continue;
@@ -518,6 +529,16 @@ pub fn handle_keyboard_input(
             params.runtime.write_input(&input);
         }
     }
+}
+
+fn is_scroll_action(action: BindingAction) -> bool {
+    matches!(
+        action,
+        BindingAction::ScrollPageUp
+            | BindingAction::ScrollPageDown
+            | BindingAction::ScrollUp
+            | BindingAction::ScrollDown
+    )
 }
 
 fn current_modifiers(keys: &ButtonInput<KeyCode>) -> BindingModifiers {
@@ -672,15 +693,20 @@ fn translate_key(key_code: KeyCode, ctx: KeyTranslationContext<'_>) -> Vec<u8> {
         return bytes;
     }
 
-    if ctx.alt_pressed {
-        bytes.push(0x1b);
-    }
-
     let navigation_key = NavigationKey::from_key_code(key_code)
         .or_else(|| NavigationKey::from_logical_key(ctx.logical_key));
     if let Some(key) = navigation_key {
-        bytes.extend_from_slice(&key.encode(ctx.ctrl_pressed, ctx.application_cursor));
+        bytes.extend_from_slice(&key.encode(
+            ctx.ctrl_pressed,
+            ctx.alt_pressed,
+            ctx.shift_pressed,
+            ctx.application_cursor,
+        ));
         return bytes;
+    }
+
+    if ctx.alt_pressed {
+        bytes.push(0x1b);
     }
 
     match key_code {
@@ -697,6 +723,32 @@ fn translate_key(key_code: KeyCode, ctx: KeyTranslationContext<'_>) -> Vec<u8> {
     }
 
     bytes
+}
+
+/// Bracketed paste start marker (DECSET 2004).
+const PASTE_START: &[u8] = b"\x1b[200~";
+/// Bracketed paste end marker.
+const PASTE_END: &[u8] = b"\x1b[201~";
+
+/// Encodes clipboard text as terminal input, wrapping it in bracketed paste
+/// markers when DECSET 2004 is active. The 7-bit `ESC` and 8-bit `CSI` control
+/// introducers are dropped from bracketed payloads so a paste can never
+/// terminate its own bracket (paste injection).
+fn encode_paste(text: &str, bracketed: bool) -> Vec<u8> {
+    if bracketed {
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        let sanitized: String = normalized
+            .chars()
+            .filter(|&ch| ch != '\u{1b}' && ch != '\u{9b}')
+            .collect();
+        let mut bytes = Vec::with_capacity(sanitized.len() + PASTE_START.len() + PASTE_END.len());
+        bytes.extend_from_slice(PASTE_START);
+        bytes.extend_from_slice(sanitized.as_bytes());
+        bytes.extend_from_slice(PASTE_END);
+        bytes
+    } else {
+        text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
+    }
 }
 
 /// Determine the text to send for a key event.
@@ -758,7 +810,44 @@ impl NavigationKey {
         }
     }
 
-    fn encode(self, ctrl_pressed: bool, application_cursor: bool) -> Vec<u8> {
+    fn encode(
+        self,
+        ctrl_pressed: bool,
+        alt_pressed: bool,
+        shift_pressed: bool,
+        application_cursor: bool,
+    ) -> Vec<u8> {
+        let modifier_code =
+            1 + shift_pressed as u8 + (alt_pressed as u8 * 2) + (ctrl_pressed as u8 * 4);
+
+        if modifier_code != 1 {
+            let arrow_suffix = match self {
+                Self::ArrowUp => Some('A'),
+                Self::ArrowDown => Some('B'),
+                Self::ArrowRight => Some('C'),
+                Self::ArrowLeft => Some('D'),
+                Self::Home => Some('H'),
+                Self::End => Some('F'),
+                _ => None,
+            };
+
+            if let Some(suffix) = arrow_suffix {
+                return format!("\x1b[1;{modifier_code}{suffix}").into_bytes();
+            }
+
+            let tilde_code = match self {
+                Self::PageUp => Some(5),
+                Self::PageDown => Some(6),
+                Self::Insert => Some(2),
+                Self::Delete => Some(3),
+                _ => None,
+            };
+
+            if let Some(code) = tilde_code {
+                return format!("\x1b[{code};{modifier_code}~").into_bytes();
+            }
+        }
+
         match self {
             Self::ArrowUp => {
                 if ctrl_pressed {
@@ -996,5 +1085,125 @@ fn ctrl_keycode_byte(key: KeyCode) -> Option<u8> {
         KeyCode::KeyY => Some(0x19),
         KeyCode::KeyZ => Some(0x1a),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod keyboard_translation_tests {
+    use super::*;
+
+    fn translate_navigation_key(
+        key_code: KeyCode,
+        logical_key: Key,
+        ctrl_pressed: bool,
+        alt_pressed: bool,
+        shift_pressed: bool,
+        application_cursor: bool,
+    ) -> Vec<u8> {
+        translate_key(
+            key_code,
+            KeyTranslationContext {
+                logical_key: &logical_key,
+                text: None,
+                ctrl_pressed,
+                alt_pressed,
+                alt_gr_pressed: false,
+                shift_pressed,
+                application_cursor,
+                kitty_keyboard_flags: 0,
+                modify_other_keys: None,
+            },
+        )
+    }
+
+    #[test]
+    fn encodes_alt_arrow_keys_as_modified_csi_sequences() {
+        assert_eq!(
+            translate_navigation_key(KeyCode::ArrowUp, Key::ArrowUp, false, true, false, false),
+            b"\x1b[1;3A"
+        );
+        assert_eq!(
+            translate_navigation_key(
+                KeyCode::ArrowDown,
+                Key::ArrowDown,
+                false,
+                true,
+                false,
+                false
+            ),
+            b"\x1b[1;3B"
+        );
+    }
+
+    #[test]
+    fn modified_navigation_keys_do_not_use_application_cursor_mode() {
+        assert_eq!(
+            translate_navigation_key(KeyCode::ArrowUp, Key::ArrowUp, false, true, false, true),
+            b"\x1b[1;3A"
+        );
+        assert_eq!(
+            translate_navigation_key(KeyCode::ArrowUp, Key::ArrowUp, false, false, false, true),
+            b"\x1bOA"
+        );
+    }
+
+    #[test]
+    fn encodes_modified_page_keys_with_tilde_sequences() {
+        assert_eq!(
+            translate_navigation_key(KeyCode::PageUp, Key::PageUp, false, true, false, false),
+            b"\x1b[5;3~"
+        );
+        assert_eq!(
+            translate_navigation_key(KeyCode::PageDown, Key::PageDown, false, true, false, false),
+            b"\x1b[6;3~"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bracketed_paste_wraps_payload_in_markers() {
+        assert_eq!(
+            encode_paste("echo hi", true),
+            b"\x1b[200~echo hi\x1b[201~".to_vec()
+        );
+    }
+
+    #[test]
+    fn bracketed_paste_normalizes_newlines() {
+        assert_eq!(
+            encode_paste("one\r\ntwo\rthree\n", true),
+            b"\x1b[200~one\ntwo\nthree\n\x1b[201~".to_vec()
+        );
+    }
+
+    #[test]
+    fn bracketed_paste_strips_control_introducers() {
+        // A 7-bit ESC or 8-bit CSI end marker embedded in the payload must be
+        // neutralized so the paste cannot terminate its own bracket.
+        assert_eq!(
+            encode_paste("before\x1b[201~after", true),
+            b"\x1b[200~before[201~after\x1b[201~".to_vec()
+        );
+        assert_eq!(
+            encode_paste("before\u{9b}201~after", true),
+            b"\x1b[200~before201~after\x1b[201~".to_vec()
+        );
+    }
+
+    #[test]
+    fn plain_paste_sends_no_markers() {
+        assert_eq!(encode_paste("echo hi", false), b"echo hi".to_vec());
+    }
+
+    #[test]
+    fn plain_paste_sends_newlines_as_carriage_returns() {
+        assert_eq!(
+            encode_paste("one\r\ntwo\nthree", false),
+            b"one\rtwo\rthree".to_vec()
+        );
     }
 }

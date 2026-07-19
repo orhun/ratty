@@ -65,13 +65,13 @@ ESC _ ratty;g;s ESC \
 Ratty replies:
 
 ```text
-ESC _ ratty;g;s;v=1;fmt=obj|glb;path=1;payload=1;chunk=1;anim=1;depth=1;color=1;brightness=1;transform=1;update=1;normalize=1 ESC \
+ESC _ ratty;g;s;v=1;fmt=obj|glb|stl;path=1;payload=1;chunk=1;anim=1;depth=1;color=1;brightness=1;transform=1;update=1;normalize=1 ESC \
 ```
 
 Fields:
 
 - `v=1`: protocol version
-- `fmt=glb`: `obj` and `glb` are supported
+- `fmt=glb`: `obj`, `glb` and `stl` are supported
 - `path=1`: path-based object registration is supported
 - `payload=1`: payload-based asset registration is supported
 - `chunk=1`: chunked payload-based registration is supported
@@ -100,7 +100,7 @@ This registers object `42` using an object asset.
 The required fields are:
 
 - `id`: object id chosen by the application
-- `fmt`: payload format, `obj` or `glb` in v1
+- `fmt`: payload format, `obj`, `glb`, or `stl` in v1
 - `path`: object path known to Ratty
 
 Optional registration fields:
@@ -137,7 +137,7 @@ ESC _ ratty;g;r;id=42;fmt=glb;source=payload;more=0;<chunk-n> ESC \
 Fields:
 
 - `id`: object id chosen by the application
-- `fmt`: payload format, `obj` or `glb`
+- `fmt`: payload format, `obj`, `glb`, or `stl`
 - `source`: registration source
   - `payload`: asset bytes are carried in this command
 - `more`: continuation flag

@@ -4,11 +4,13 @@ use std::collections::HashSet;
 use std::env;
 use std::io::{ErrorKind, Read, Write};
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use anyhow::Context;
+use bevy::platform::cell::SyncCell;
+use bevy::prelude::Resource;
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use vt100::{Callbacks, Parser, Screen};
 
@@ -169,13 +171,18 @@ impl Callbacks for TerminalParserCallbacks {
 }
 
 /// Running PTY and parser state.
+///
+/// The `!Sync` PTY handles (the output channel receiver and the master) live
+/// in [`SyncCell`]s so the runtime qualifies as a regular [`Resource`] and
+/// systems using it are not pinned to the main thread.
+#[derive(Resource)]
 pub struct TerminalRuntime {
     /// PTY output channel.
-    pub rx: Receiver<Vec<u8>>,
+    rx: SyncCell<Receiver<Vec<u8>>>,
     /// PTY input writer.
     pub writer: Arc<Mutex<Option<Box<dyn Write + Send>>>>,
     /// PTY master handle.
-    master: Option<Box<dyn MasterPty + Send>>,
+    master: SyncCell<Option<Box<dyn MasterPty + Send>>>,
     /// Child process handle.
     child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
     /// PTY reader thread.
@@ -339,9 +346,9 @@ impl TerminalRuntime {
         });
 
         Ok(Self {
-            rx,
+            rx: SyncCell::new(rx),
             writer: Arc::new(Mutex::new(Some(writer))),
-            master: Some(pair.master),
+            master: SyncCell::new(Some(pair.master)),
             child: Some(child),
             reader_thread: Some(reader_thread),
             parser: Parser::new_with_callbacks(
@@ -354,6 +361,11 @@ impl TerminalRuntime {
             pty_disconnected: false,
             shutdown_started: false,
         })
+    }
+
+    /// Receives pending PTY output without blocking.
+    pub fn try_recv(&mut self) -> Result<Vec<u8>, TryRecvError> {
+        self.rx.get().try_recv()
     }
 
     /// Writes input bytes to the PTY.
@@ -376,7 +388,7 @@ impl TerminalRuntime {
             return;
         }
 
-        if let Some(master) = self.master.as_ref() {
+        if let Some(master) = self.master.get().as_ref() {
             let _ = master.resize(PtySize {
                 rows,
                 cols,
@@ -423,7 +435,7 @@ impl TerminalRuntime {
             let _ = child.kill();
         }
         self.child.take();
-        self.master.take();
+        self.master.get().take();
 
         if self
             .reader_thread

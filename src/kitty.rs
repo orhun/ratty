@@ -161,6 +161,7 @@ impl KittyImage {
                 handle: None,
             },
             uses_placeholders: self.uses_placeholders,
+            plane: None,
         }
     }
 }

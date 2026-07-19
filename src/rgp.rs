@@ -280,7 +280,7 @@ pub enum RgpOperation {
 
 /// Returns the RGP support reply sequence.
 pub fn support_reply() -> Vec<u8> {
-    b"\x1b_ratty;g;s;v=1;fmt=obj|glb;path=1;payload=1;chunk=1;anim=1;depth=1;color=1;brightness=1;transform=1;update=1;normalize=1\x1b\\".to_vec()
+    b"\x1b_ratty;g;s;v=1;fmt=obj|glb|stl;path=1;payload=1;chunk=1;anim=1;depth=1;color=1;brightness=1;transform=1;update=1;normalize=1\x1b\\".to_vec()
 }
 
 fn parse_color(value: &str) -> Option<[u8; 3]> {

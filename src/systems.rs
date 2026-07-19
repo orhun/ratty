@@ -8,8 +8,9 @@
 //! - [`handle_window_resize`]
 //! - [`crate::scene::apply_terminal_presentation`]
 //! - [`apply_inline_objects`]
-//! - [`redraw_soft_terminal`]
+//! - [`render_terminal_widget`]
 //! - [`sync_inline_objects`]
+//! - [`animate_inline_kitty_planes`]
 //! - [`sync_rgp_objects`]
 //! - [`apply_instance_brightness`]
 //! - [`animate_terminal_plane_warp`]
@@ -22,22 +23,28 @@ use std::collections::HashMap;
 use std::sync::mpsc::TryRecvError;
 
 use crate::config::{AppConfig, CURSOR_DEPTH};
+use crate::direct_render::DirectTerminalSceneExchange;
 use crate::inline::{
-    InlineObject, TerminalInlineObjectPlane, TerminalInlineObjectSprite, TerminalInlineObjects,
-    TerminalRgpObject,
+    InlineKittyPlaneLayout, InlineObject, TerminalInlineObjectPlane, TerminalInlineObjectSprite,
+    TerminalInlineObjects, TerminalRgpObject,
 };
 use crate::model::CursorModel;
 use crate::model::spawn_cursor_model;
 use crate::mouse::TerminalSelection;
+use crate::present::TerminalPresentMaterial;
 use crate::rendering::{sync_plane_texture, sync_terminal_debug_image};
 use crate::runtime::TerminalRuntime;
 use crate::scene::{
-    MobiusTransition, ModelLoadState, TerminalPlane, TerminalPlaneBack, TerminalPlaneMeshes,
-    TerminalPlaneView, TerminalPlaneWarp, TerminalPresentation, TerminalPresentationMode,
-    TerminalSprite, TerminalViewport,
+    MobiusTransition, ModelLoadState, TerminalPlane, TerminalPlaneBack,
+    TerminalPlaneBackLayoutQuery, TerminalPlaneLayoutQuery, TerminalPlaneMeshes, TerminalPlaneView,
+    TerminalPlaneWarp, TerminalPresentation, TerminalPresentationMode, TerminalViewport,
+    sync_terminal_layout,
 };
-use crate::terminal::{TerminalRedrawState, TerminalSurface, TerminalWidget};
+use crate::terminal::{
+    TerminalRedrawState, TerminalSurface, TerminalWidget, render_scale_for_window,
+};
 use bevy::app::AppExit;
+use bevy::asset::AssetMut;
 use bevy::ecs::message::{MessageReader, MessageWriter};
 use bevy::ecs::system::SystemParam;
 use bevy::gltf::GltfAssetLabel;
@@ -46,7 +53,7 @@ use bevy::mesh::{Indices, VertexAttributeValues};
 use bevy::prelude::*;
 use bevy::render::render_resource::PrimitiveTopology;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-use bevy::window::{PrimaryWindow, WindowCloseRequested, WindowResized};
+use bevy::window::{PrimaryWindow, Window, WindowCloseRequested, WindowResized};
 
 struct InlineLayout {
     columns: u32,
@@ -94,16 +101,6 @@ type CursorTransformQuery<'w, 's> = Query<
     (&'static mut Transform, &'static mut Visibility),
     (With<CursorModel>, Without<TerminalPlane>),
 >;
-type PlaneBackResizeQuery<'w, 's> = Query<
-    'w,
-    's,
-    &'static mut Transform,
-    (
-        With<TerminalPlaneBack>,
-        Without<TerminalPlane>,
-        Without<TerminalSprite>,
-    ),
->;
 
 /// Requests application exit as soon as the primary window is asked to close.
 pub(crate) fn request_exit_on_primary_window_close(
@@ -133,7 +130,7 @@ pub(crate) fn request_exit_on_primary_window_close(
 /// Shuts down the PTY runtime when Bevy begins exiting.
 pub(crate) fn shutdown_terminal_runtime_on_exit(
     mut app_exit: MessageReader<AppExit>,
-    mut runtime: NonSendMut<TerminalRuntime>,
+    mut runtime: ResMut<TerminalRuntime>,
     mut shutdown_started: Local<bool>,
 ) {
     if *shutdown_started {
@@ -149,14 +146,14 @@ pub(crate) fn shutdown_terminal_runtime_on_exit(
 
 /// Pumps PTY output into the terminal parser.
 ///
-/// This runs early in the update schedule, before [`redraw_soft_terminal`]. It drains PTY output
+/// This runs early in the update schedule, before [`render_terminal_widget`]. It drains PTY output
 /// from [`TerminalRuntime`], feeds it through [`TerminalInlineObjects::consume_pty_output`] and
 /// requests a redraw through [`TerminalRedrawState`] when terminal state changed.
 ///
 /// It also updates scroll-coupled inline anchors before the redraw and sync passes rebuild the
 /// scene.
 pub fn pump_pty_output(
-    mut runtime: NonSendMut<TerminalRuntime>,
+    mut runtime: ResMut<TerminalRuntime>,
     mut inline_objects: ResMut<TerminalInlineObjects>,
     mut app_exit: MessageWriter<AppExit>,
     mut redraw: ResMut<TerminalRedrawState>,
@@ -168,7 +165,7 @@ pub fn pump_pty_output(
 
     let mut processed_output = false;
     loop {
-        match runtime.rx.try_recv() {
+        match runtime.try_recv() {
             Ok(chunk) => {
                 let track_scroll = inline_objects.has_scroll_tracked_anchors();
                 let prev_rows: Option<Vec<String>> = if track_scroll {
@@ -223,16 +220,13 @@ fn infer_upward_scroll(prev_rows: &[String], next_rows: &[String]) -> u16 {
 
 #[derive(SystemParam)]
 pub(crate) struct ResizeParams<'w, 's> {
-    primary_window: Query<'w, 's, Entity, With<PrimaryWindow>>,
-    runtime: NonSendMut<'w, TerminalRuntime>,
-    terminal: NonSendMut<'w, TerminalSurface>,
+    primary_window: Query<'w, 's, (Entity, &'static Window), With<PrimaryWindow>>,
+    runtime: ResMut<'w, TerminalRuntime>,
+    terminal: ResMut<'w, TerminalSurface>,
     redraw: ResMut<'w, TerminalRedrawState>,
     viewport: ResMut<'w, TerminalViewport>,
-    sprite_query: Query<'w, 's, &'static mut Sprite, With<TerminalSprite>>,
-    plane_query:
-        Query<'w, 's, &'static mut Transform, (With<TerminalPlane>, Without<TerminalSprite>)>,
-    plane_back_query: PlaneBackResizeQuery<'w, 's>,
-    images: ResMut<'w, Assets<Image>>,
+    plane_query: TerminalPlaneLayoutQuery<'w, 's>,
+    plane_back_query: TerminalPlaneBackLayoutQuery<'w, 's>,
 }
 
 /// Handles primary window resize events.
@@ -241,8 +235,8 @@ pub(crate) struct ResizeParams<'w, 's> {
 /// [`TerminalRuntime`], [`TerminalSurface`], [`TerminalViewport`], the 2D terminal sprite and the
 /// front and back terminal plane transforms.
 ///
-/// The updated terminal image is uploaded immediately so later systems in the same frame see the
-/// new geometry.
+/// The redraw system runs after this system and uploads the resized terminal image in the same
+/// frame.
 pub(crate) fn handle_window_resize(
     mut resize_events: MessageReader<WindowResized>,
     mut params: ResizeParams,
@@ -253,12 +247,10 @@ pub(crate) fn handle_window_resize(
         terminal,
         redraw,
         viewport,
-        sprite_query,
         plane_query,
         plane_back_query,
-        images,
     } = &mut params;
-    let Ok(primary_window) = primary_window.single() else {
+    let Ok((primary_window, window)) = primary_window.single() else {
         return;
     };
 
@@ -273,30 +265,24 @@ pub(crate) fn handle_window_resize(
         return;
     };
 
-    let viewport_size = Vec2::new(window_size.x.max(1.0), window_size.y.max(1.0));
-    viewport.size = viewport_size;
-    viewport.center = Vec2::ZERO;
+    // Minimizing the window reports a 0x0 size. Skip it so the terminal keeps
+    // its last good grid instead of collapsing to a degenerate size that the
+    // vt100 parser can't safely process.
+    if window_size.x < 1.0 || window_size.y < 1.0 {
+        return;
+    }
 
-    let char_dims = terminal.char_dimensions().max(UVec2::ONE);
-    let cols = ((viewport_size.x / char_dims.x as f32).floor() as u16).max(1);
-    let rows = ((viewport_size.y / char_dims.y as f32).floor() as u16).max(1);
-
-    runtime.resize(cols, rows, viewport_size.x as u16, viewport_size.y as u16);
-    terminal.resize(cols, rows);
-    let _ = terminal.sync_image(images, 0.0);
+    let window_size = window_size.max(Vec2::ONE);
+    let layout = terminal.resize_to_fit(window_size, render_scale_for_window(window));
+    let pty_pixels = layout.pty_pixels();
+    runtime.resize(
+        layout.cols,
+        layout.rows,
+        pty_pixels.x as u16,
+        pty_pixels.y as u16,
+    );
+    sync_terminal_layout(layout, viewport, plane_query, plane_back_query);
     redraw.request();
-
-    for mut sprite in sprite_query.iter_mut() {
-        sprite.custom_size = Some(viewport_size);
-    }
-
-    for mut transform in plane_query.iter_mut() {
-        transform.scale = viewport_size.extend(1.0);
-    }
-
-    for mut transform in plane_back_query.iter_mut() {
-        transform.scale = viewport_size.extend(1.0);
-    }
 }
 
 /// Applies inline object visibility for the current presentation mode.
@@ -337,58 +323,63 @@ pub fn apply_inline_objects(
 }
 
 /// Redraw system parameters.
+/// Tracks whether the terminal frame was redrawn during the current update.
+#[derive(Resource, Default)]
+pub(crate) struct TerminalFrameDirty(pub bool);
+
+/// Ordered terminal redraw pipeline:
+/// [`render_terminal_widget`] → [`sync_terminal_materials`] →
+/// [`finish_terminal_model_load`].
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct TerminalRedrawSet;
+
+/// Half-period of the fastest blink cadence the renderer supports (rapid
+/// blink); slow blink (0.5s) is a multiple of it.
+const BLINK_TICK_SECS: f32 = 0.25;
+
 #[derive(SystemParam)]
-pub(crate) struct RedrawParams<'w, 's> {
+pub(crate) struct RenderWidgetParams<'w, 's> {
     app_config: Res<'w, AppConfig>,
-    runtime: NonSend<'w, TerminalRuntime>,
-    terminal: NonSendMut<'w, TerminalSurface>,
+    runtime: Res<'w, TerminalRuntime>,
+    terminal: ResMut<'w, TerminalSurface>,
     selection: Res<'w, TerminalSelection>,
-    presentation: Res<'w, TerminalPresentation>,
     time: Res<'w, Time>,
     redraw: ResMut<'w, TerminalRedrawState>,
     images: ResMut<'w, Assets<Image>>,
-    model_load_state: ResMut<'w, ModelLoadState>,
-    commands: Commands<'w, 's>,
-    meshes: ResMut<'w, Assets<Mesh>>,
-    materials: ResMut<'w, Assets<StandardMaterial>>,
-    plane_materials: Query<'w, 's, &'static MeshMaterial3d<StandardMaterial>, With<TerminalPlane>>,
-    plane_back_materials:
-        Query<'w, 's, &'static MeshMaterial3d<StandardMaterial>, With<TerminalPlaneBack>>,
-    asset_server: Res<'w, AssetServer>,
+    direct_render: Res<'w, DirectTerminalSceneExchange>,
+    model_load_state: Res<'w, ModelLoadState>,
+    frame_dirty: ResMut<'w, TerminalFrameDirty>,
+    blink_phase: Local<'s, u64>,
 }
 
-/// Redraws the terminal surface.
+/// Redraws the Ratatui buffer and publishes the rendered terminal frame.
 ///
-/// This runs after [`pump_pty_output`] and [`crate::mouse::handle_mouse_input`]. It redraws the
-/// Ratatui buffer into [`TerminalSurface`], uploads the rendered image, refreshes the debug back
-/// texture and synchronizes the front and back plane materials to the latest terminal images.
-///
-/// On the first successful upload it defers cursor-model spawning to the next frame. After that,
-/// it ensures the cursor model exists so [`sync_asset_to_terminal_cursor`] can position it.
-pub(crate) fn redraw_soft_terminal(mut params: RedrawParams) {
-    let RedrawParams {
+/// This runs after [`pump_pty_output`] and [`crate::mouse::handle_mouse_input`]. It records
+/// whether the frame changed in [`TerminalFrameDirty`] so the rest of [`TerminalRedrawSet`]
+/// can skip its work on clean frames.
+pub(crate) fn render_terminal_widget(mut params: RenderWidgetParams) {
+    let RenderWidgetParams {
         app_config,
         runtime,
         terminal,
         selection,
-        presentation,
         time,
         redraw,
         images,
+        direct_render,
         model_load_state,
-        commands,
-        meshes,
-        materials,
-        plane_materials,
-        plane_back_materials,
-        asset_server,
+        frame_dirty,
+        blink_phase,
     } = &mut params;
     let needs_redraw = redraw.take();
-    let force_live_redraw = matches!(
-        presentation.mode,
-        TerminalPresentationMode::Plane3d | TerminalPresentationMode::Mobius3d
-    ) && !app_config.cursor.model.visible;
-    if !needs_redraw && !force_live_redraw && model_load_state.loaded {
+    // The texture content only changes with terminal state or blink phase;
+    // warp and camera animations are mesh- and camera-side. Rebuilding on
+    // blink ticks instead of every frame keeps idle scene builds at 4Hz.
+    let phase = (time.elapsed_secs() / BLINK_TICK_SECS) as u64;
+    let blink_ticked = **blink_phase != phase;
+    **blink_phase = phase;
+    frame_dirty.0 = needs_redraw || blink_ticked || !model_load_state.loaded;
+    if !frame_dirty.0 {
         return;
     }
 
@@ -410,24 +401,105 @@ pub(crate) fn redraw_soft_terminal(mut params: RedrawParams) {
         }
     });
 
-    let _ = terminal.sync_image(images, time.elapsed_secs());
-    if matches!(
+    let _ = terminal.sync_image(images, direct_render, time.elapsed_secs());
+}
+
+#[derive(SystemParam)]
+pub(crate) struct SyncMaterialsParams<'w, 's> {
+    runtime: Res<'w, TerminalRuntime>,
+    terminal: Res<'w, TerminalSurface>,
+    presentation: Res<'w, TerminalPresentation>,
+    images: ResMut<'w, Assets<Image>>,
+    materials: ResMut<'w, Assets<StandardMaterial>>,
+    plane_materials: Query<'w, 's, &'static MeshMaterial3d<StandardMaterial>, With<TerminalPlane>>,
+    plane_back_materials:
+        Query<'w, 's, &'static MeshMaterial3d<StandardMaterial>, With<TerminalPlaneBack>>,
+    present_materials: ResMut<'w, Assets<TerminalPresentMaterial>>,
+    present_query: Query<'w, 's, &'static MeshMaterial2d<TerminalPresentMaterial>>,
+    frame_dirty: Res<'w, TerminalFrameDirty>,
+}
+
+/// Refreshes the debug back texture and plane materials after a redraw.
+pub(crate) fn sync_terminal_materials(mut params: SyncMaterialsParams) {
+    let SyncMaterialsParams {
+        runtime,
+        terminal,
+        presentation,
+        images,
+        materials,
+        plane_materials,
+        plane_back_materials,
+        present_materials,
+        present_query,
+        frame_dirty,
+    } = &mut params;
+    if !frame_dirty.0 {
+        return;
+    }
+
+    // The present texture's GpuImage is recreated when the terminal resizes (window
+    // resize / font zoom), which invalidates the 2D present material's cached bind
+    // group. Writing the texture handle — not merely touching the asset with
+    // `get_mut` — advances the material's change tick so Bevy re-prepares the bind
+    // group against the current GpuImage; a no-op touch leaves the quad sampling a
+    // stale texture and the flat view freezes. Matches the plane handling.
+    if let Some(present_image) = terminal.image_handle.as_ref() {
+        for present_handle in present_query.iter() {
+            if let Some(mut material) = present_materials.get_mut(&present_handle.0) {
+                material.texture = present_image.clone();
+            }
+        }
+    }
+
+    let in_3d = matches!(
         presentation.mode,
         TerminalPresentationMode::Plane3d | TerminalPresentationMode::Mobius3d
-    ) {
-        sync_terminal_debug_image(terminal, images, screen);
+    );
+    if in_3d {
+        sync_terminal_debug_image(terminal, images, runtime.parser.screen());
     }
 
     sync_plane_texture(terminal.image_handle.as_ref(), plane_materials, materials);
-    if matches!(
-        presentation.mode,
-        TerminalPresentationMode::Plane3d | TerminalPresentationMode::Mobius3d
-    ) {
+    if in_3d {
         sync_plane_texture(
             terminal.back_image_handle.as_ref(),
             plane_back_materials,
             materials,
         );
+    }
+}
+
+#[derive(SystemParam)]
+pub(crate) struct ModelLoadParams<'w, 's> {
+    app_config: Res<'w, AppConfig>,
+    model_load_state: ResMut<'w, ModelLoadState>,
+    redraw: ResMut<'w, TerminalRedrawState>,
+    commands: Commands<'w, 's>,
+    meshes: ResMut<'w, Assets<Mesh>>,
+    materials: ResMut<'w, Assets<StandardMaterial>>,
+    images: ResMut<'w, Assets<Image>>,
+    asset_server: Res<'w, AssetServer>,
+    frame_dirty: Res<'w, TerminalFrameDirty>,
+}
+
+/// Completes deferred cursor-model loading once the first frame is uploaded.
+///
+/// The first successful upload defers cursor-model spawning to the next frame. After that, it
+/// ensures the cursor model exists so [`sync_asset_to_terminal_cursor`] can position it.
+pub(crate) fn finish_terminal_model_load(mut params: ModelLoadParams) {
+    let ModelLoadParams {
+        app_config,
+        model_load_state,
+        redraw,
+        commands,
+        meshes,
+        materials,
+        images,
+        asset_server,
+        frame_dirty,
+    } = &mut params;
+    if !frame_dirty.0 {
+        return;
     }
 
     if !model_load_state.first_frame_uploaded {
@@ -438,7 +510,14 @@ pub(crate) fn redraw_soft_terminal(mut params: RedrawParams) {
 
     if !model_load_state.loaded {
         if app_config.cursor.model.visible {
-            spawn_cursor_model(commands, meshes, materials, asset_server, app_config);
+            spawn_cursor_model(
+                commands,
+                meshes,
+                materials,
+                images,
+                asset_server,
+                app_config,
+            );
         }
         model_load_state.loaded = true;
     }
@@ -449,7 +528,7 @@ pub(crate) fn redraw_soft_terminal(mut params: RedrawParams) {
 pub(crate) struct SyncInlineParams<'w, 's> {
     commands: Commands<'w, 's>,
     inline_objects: ResMut<'w, TerminalInlineObjects>,
-    terminal: NonSend<'w, TerminalSurface>,
+    terminal: Res<'w, TerminalSurface>,
     viewport: Res<'w, TerminalViewport>,
     presentation: Res<'w, TerminalPresentation>,
     plane_warp: Res<'w, TerminalPlaneWarp>,
@@ -466,12 +545,13 @@ pub(crate) struct SyncInlineParams<'w, 's> {
 
 /// Synchronizes Kitty inline object entities.
 ///
-/// This runs after [`redraw_soft_terminal`]. It rebuilds the scene entities for registered
+/// This runs after [`render_terminal_widget`]. It rebuilds the scene entities for registered
 /// [`InlineObject::KittyImage`] values and clears stale inline entities first so the scene matches
 /// the latest terminal anchors exactly.
 ///
 /// In 2D mode it spawns [`TerminalInlineObjectSprite`] entities. In 3D mode it also generates
 /// plane-attached meshes under [`TerminalPlane`] so images follow the warped terminal surface.
+/// Warp motion is handled in place by [`animate_inline_kitty_planes`].
 pub(crate) fn sync_inline_objects(mut params: SyncInlineParams) {
     let SyncInlineParams {
         commands,
@@ -490,12 +570,7 @@ pub(crate) fn sync_inline_objects(mut params: SyncInlineParams) {
         images,
         meshes,
     } = &mut params;
-    let force_warp_sync = matches!(
-        presentation.mode,
-        TerminalPresentationMode::Plane3d | TerminalPresentationMode::Mobius3d
-    ) && plane_warp.amount > 0.0
-        && !inline_objects.anchors.is_empty();
-    if !force_warp_sync && !inline_objects.needs_sync(viewport.size, terminal.cols, terminal.rows) {
+    if !inline_objects.needs_sync(viewport.size, terminal.cols, terminal.rows) {
         return;
     }
 
@@ -620,7 +695,7 @@ fn sync_kitty_inline_image(
             bevy::asset::RenderAssetUsages::default(),
         );
         image.sampler = ImageSampler::nearest();
-        image.data = Some(object.raster.rgba.clone());
+        image.data = Some(std::mem::take(&mut object.raster.rgba));
         let handle = ctx.images.add(image);
         object.raster.handle = Some(handle.clone());
         handle
@@ -640,34 +715,115 @@ fn sync_kitty_inline_image(
         },
     ));
 
-    let x_segments = layout.columns.clamp(2, 24);
-    let y_segments = layout.rows.clamp(2, 24);
-    let vertex_count = ((x_segments + 1) * (y_segments + 1)) as usize;
-    let mut positions = Vec::with_capacity(vertex_count);
-    let mut normals = Vec::with_capacity(vertex_count);
-    let mut uvs = Vec::with_capacity(vertex_count);
-    let mut indices = Vec::with_capacity((x_segments * y_segments * 6) as usize);
+    let plane_layout = inline_kitty_plane_layout(layout);
+    let (mesh_handle, material_handle) = ensure_kitty_plane_assets(
+        object,
+        &plane_layout,
+        &image_handle,
+        ctx.warp_amount,
+        ctx.elapsed_secs,
+        ctx.materials,
+        ctx.meshes,
+    );
+    ctx.plane_children.push(
+        commands
+            .spawn((
+                TerminalInlineObjectPlane,
+                plane_layout,
+                Mesh3d(mesh_handle),
+                MeshMaterial3d(material_handle),
+                Transform::default(),
+            ))
+            .id(),
+    );
+}
 
-    for y in 0..=y_segments {
-        let v = y as f32 / y_segments as f32;
+fn inline_kitty_plane_layout(layout: &InlineLayout) -> InlineKittyPlaneLayout {
+    InlineKittyPlaneLayout {
+        local_x: layout.local_x,
+        local_y: layout.local_y,
+        local_width: layout.local_width,
+        local_height: layout.local_height,
+        x_segments: layout.columns.clamp(2, 24),
+        y_segments: layout.rows.clamp(2, 24),
+    }
+}
+
+fn ensure_kitty_plane_assets(
+    object: &mut crate::inline::KittyInlineObject,
+    layout: &InlineKittyPlaneLayout,
+    image_handle: &Handle<Image>,
+    warp_amount: f32,
+    elapsed_secs: f32,
+    materials: &mut Assets<StandardMaterial>,
+    meshes: &mut Assets<Mesh>,
+) -> (Handle<Mesh>, Handle<StandardMaterial>) {
+    let needs_rebuild = object.plane.as_ref().is_none_or(|cache| {
+        cache.x_segments != layout.x_segments || cache.y_segments != layout.y_segments
+    });
+    if needs_rebuild {
+        if let Some(cache) = object.plane.take() {
+            meshes.remove(&cache.mesh);
+            materials.remove(&cache.material);
+        }
+        let mesh = build_kitty_plane_mesh(layout, warp_amount, elapsed_secs);
+        let mesh_handle = meshes.add(mesh);
+        let material_handle = materials.add(StandardMaterial {
+            base_color: Color::WHITE,
+            base_color_texture: Some(image_handle.clone()),
+            alpha_mode: AlphaMode::Blend,
+            unlit: true,
+            ..default()
+        });
+        object.plane = Some(crate::inline::KittyPlaneCache {
+            x_segments: layout.x_segments,
+            y_segments: layout.y_segments,
+            mesh: mesh_handle.clone(),
+            material: material_handle.clone(),
+        });
+        return (mesh_handle, material_handle);
+    }
+
+    let cache = object.plane.as_mut().expect("plane cache should exist");
+    if let Some(mut mesh) = meshes.get_mut(&cache.mesh) {
+        write_kitty_plane_positions(&mut mesh, layout, warp_amount, elapsed_secs);
+    }
+    if let Some(mut material) = materials.get_mut(&cache.material) {
+        material.base_color_texture = Some(image_handle.clone());
+    }
+    (cache.mesh.clone(), cache.material.clone())
+}
+
+fn build_kitty_plane_mesh(
+    layout: &InlineKittyPlaneLayout,
+    warp_amount: f32,
+    elapsed_secs: f32,
+) -> Mesh {
+    let vertex_count = ((layout.x_segments + 1) * (layout.y_segments + 1)) as usize;
+    let mut positions = Vec::with_capacity(vertex_count);
+    let normals = vec![[0.0, 0.0, 1.0]; vertex_count];
+    let mut uvs = Vec::with_capacity(vertex_count);
+    let mut indices = Vec::with_capacity((layout.x_segments * layout.y_segments * 6) as usize);
+
+    for y in 0..=layout.y_segments {
+        let v = y as f32 / layout.y_segments as f32;
         let py = layout.local_y + (0.5 - v) * layout.local_height;
-        for x in 0..=x_segments {
-            let u = x as f32 / x_segments as f32;
+        for x in 0..=layout.x_segments {
+            let u = x as f32 / layout.x_segments as f32;
             let px = layout.local_x + (u - 0.5) * layout.local_width;
             positions.push([
                 px,
                 py,
-                plane_surface_z(px, py, ctx.warp_amount, ctx.elapsed_secs) + 1.5,
+                plane_surface_z(px, py, warp_amount, elapsed_secs) + 1.5,
             ]);
-            normals.push([0.0, 0.0, 1.0]);
             uvs.push([u, v]);
         }
     }
 
-    for y in 0..y_segments {
-        for x in 0..x_segments {
-            let row = y * (x_segments + 1);
-            let next_row = (y + 1) * (x_segments + 1);
+    for y in 0..layout.y_segments {
+        for x in 0..layout.x_segments {
+            let row = y * (layout.x_segments + 1);
+            let next_row = (y + 1) * (layout.x_segments + 1);
             let i0 = row + x;
             let i1 = i0 + 1;
             let i2 = next_row + x;
@@ -676,32 +832,73 @@ fn sync_kitty_inline_image(
         }
     }
 
-    let mesh = ctx.meshes.add(
-        Mesh::new(
-            PrimitiveTopology::TriangleList,
-            bevy::asset::RenderAssetUsages::default(),
-        )
-        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
-        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
-        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
-        .with_inserted_indices(Indices::U32(indices)),
-    );
-    ctx.plane_children.push(
-        commands
-            .spawn((
-                TerminalInlineObjectPlane,
-                Mesh3d(mesh),
-                MeshMaterial3d(ctx.materials.add(StandardMaterial {
-                    base_color: Color::WHITE,
-                    base_color_texture: Some(image_handle),
-                    alpha_mode: AlphaMode::Blend,
-                    unlit: true,
-                    ..default()
-                })),
-                Transform::default(),
-            ))
-            .id(),
-    );
+    Mesh::new(
+        PrimitiveTopology::TriangleList,
+        bevy::asset::RenderAssetUsages::default(),
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
+    .with_inserted_indices(Indices::U32(indices))
+}
+
+fn write_kitty_plane_positions(
+    mesh: &mut Mesh,
+    layout: &InlineKittyPlaneLayout,
+    warp_amount: f32,
+    elapsed_secs: f32,
+) {
+    let Some(VertexAttributeValues::Float32x3(positions)) =
+        mesh.attribute_mut(Mesh::ATTRIBUTE_POSITION)
+    else {
+        return;
+    };
+
+    let mut index = 0;
+    for y in 0..=layout.y_segments {
+        let v = y as f32 / layout.y_segments as f32;
+        let py = layout.local_y + (0.5 - v) * layout.local_height;
+        for x in 0..=layout.x_segments {
+            let u = x as f32 / layout.x_segments as f32;
+            let px = layout.local_x + (u - 0.5) * layout.local_width;
+            if index < positions.len() {
+                positions[index] = [
+                    px,
+                    py,
+                    plane_surface_z(px, py, warp_amount, elapsed_secs) + 1.5,
+                ];
+            }
+            index += 1;
+        }
+    }
+}
+
+/// Animates Kitty image planes attached to the warped terminal surface.
+///
+/// This runs after [`sync_inline_objects`] and updates cached plane mesh positions in place when
+/// warp is active, instead of rebuilding inline entities every frame.
+pub(crate) fn animate_inline_kitty_planes(
+    presentation: Res<TerminalPresentation>,
+    warp: Res<TerminalPlaneWarp>,
+    time: Res<Time>,
+    query: Query<(&InlineKittyPlaneLayout, &Mesh3d), With<TerminalInlineObjectPlane>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    if !matches!(
+        presentation.mode,
+        TerminalPresentationMode::Plane3d | TerminalPresentationMode::Mobius3d
+    ) || warp.amount <= 0.0
+    {
+        return;
+    }
+
+    let elapsed_secs = time.elapsed_secs();
+    for (layout, mesh3d) in query.iter() {
+        let Some(mut mesh) = meshes.get_mut(&mesh3d.0) else {
+            continue;
+        };
+        write_kitty_plane_positions(&mut mesh, layout, warp.amount, elapsed_secs);
+    }
 }
 
 fn spawn_rgp_object(
@@ -723,6 +920,9 @@ fn spawn_rgp_object(
                 if *existing_key == depth_key {
                     existing_handles.clone()
                 } else {
+                    for handle in existing_handles {
+                        meshes.remove(handle);
+                    }
                     let mesh_handles = source_meshes
                         .iter()
                         .cloned()
@@ -793,8 +993,62 @@ fn spawn_rgp_object(
                 TerminalRgpObject { object_id },
                 Transform::default(),
                 Visibility::Visible,
-                SceneRoot(handle),
+                WorldAssetRoot(handle),
             ));
+        }
+        crate::inline::RgpInlineObject::Stl { mesh, handle } => {
+            let depth_key = (style.depth.max(0.0) * 100.0).round() as u32;
+            let mesh_handle = match handle.as_ref() {
+                Some((existing_key, existing_handle)) if *existing_key == depth_key => {
+                    existing_handle.clone()
+                }
+                Some((_, existing_handle)) => {
+                    meshes.remove(existing_handle);
+                    let mesh_handle = meshes.add(extrude_mesh(mesh.clone(), style.depth));
+                    *handle = Some((depth_key, mesh_handle.clone()));
+                    mesh_handle
+                }
+                None => {
+                    let mesh_handle = meshes.add(extrude_mesh(mesh.clone(), style.depth));
+                    *handle = Some((depth_key, mesh_handle.clone()));
+                    mesh_handle
+                }
+            };
+            let use_lighting = true;
+            let [r, g, b] = match style.color {
+                Some([r, g, b]) => [r, g, b],
+                None => [255, 255, 255],
+            };
+            let material = materials.add(StandardMaterial {
+                base_color: Color::srgb_u8(r, g, b),
+                emissive: if use_lighting {
+                    LinearRgba::rgb(0.02, 0.02, 0.02)
+                } else {
+                    LinearRgba::rgb(0.0, 0.0, 0.0)
+                },
+                metallic: 0.0,
+                perceptual_roughness: if use_lighting { 0.88 } else { 1.0 },
+                reflectance: if use_lighting { 0.18 } else { 0.0 },
+                cull_mode: None,
+                unlit: !use_lighting,
+                ..default()
+            });
+            let root = commands
+                .spawn((
+                    TerminalRgpObject { object_id },
+                    Transform::default(),
+                    Visibility::Visible,
+                ))
+                .id();
+
+            let child = commands
+                .spawn((
+                    Mesh3d(mesh_handle),
+                    MeshMaterial3d(material.clone()),
+                    Transform::default(),
+                ))
+                .id();
+            commands.entity(root).add_child(child);
         }
     }
 }
@@ -803,7 +1057,7 @@ fn spawn_rgp_object(
 #[derive(SystemParam)]
 pub(crate) struct RgpSyncParams<'w, 's> {
     app_config: Res<'w, AppConfig>,
-    terminal: NonSend<'w, TerminalSurface>,
+    terminal: Res<'w, TerminalSurface>,
     viewport: Res<'w, TerminalViewport>,
     presentation: Res<'w, TerminalPresentation>,
     mobius_transition: Res<'w, MobiusTransition>,
@@ -1233,14 +1487,14 @@ fn active_mobius_progress(
 }
 
 fn apply_plane_warp(
-    mesh: Option<&mut Mesh>,
+    mesh: Option<AssetMut<'_, Mesh>>,
     mode: TerminalPresentationMode,
     pulse: f32,
     elapsed_secs: f32,
     direction: f32,
     mobius_progress: f32,
 ) {
-    let Some(mesh) = mesh else {
+    let Some(mut mesh) = mesh else {
         return;
     };
     let Some(VertexAttributeValues::Float32x2(uvs)) = mesh.attribute(Mesh::ATTRIBUTE_UV_0) else {
@@ -1270,8 +1524,8 @@ fn apply_plane_warp(
 #[derive(SystemParam)]
 pub(crate) struct CursorSyncParams<'w, 's> {
     app_config: Res<'w, AppConfig>,
-    runtime: NonSend<'w, TerminalRuntime>,
-    terminal: NonSend<'w, TerminalSurface>,
+    runtime: Res<'w, TerminalRuntime>,
+    terminal: Res<'w, TerminalSurface>,
     viewport: Res<'w, TerminalViewport>,
     presentation: Res<'w, TerminalPresentation>,
     mobius_transition: Res<'w, MobiusTransition>,
@@ -1283,7 +1537,7 @@ pub(crate) struct CursorSyncParams<'w, 's> {
 
 /// Synchronizes the 3D cursor model with the terminal cursor.
 ///
-/// This runs after [`redraw_soft_terminal`], once the cursor model has been spawned and the latest
+/// This runs after [`render_terminal_widget`], once the cursor model has been spawned and the latest
 /// terminal cursor position is available from [`TerminalRuntime`]. It updates the [`CursorModel`]
 /// transform and visibility for both 2D and 3D presentation modes.
 ///
