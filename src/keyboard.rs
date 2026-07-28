@@ -18,6 +18,7 @@ use crate::scene::{
     sync_terminal_layout,
 };
 use crate::terminal::{TerminalRedrawState, TerminalSurface, render_scale_for_window};
+use crate::vtshim::MouseProtocolMode;
 
 /// Clipboard bridge for terminal copy and paste.
 pub struct TerminalClipboard {
@@ -406,7 +407,7 @@ pub fn handle_keyboard_input(
 
                     let mouse_mode = params.runtime.parser.screen().mouse_protocol_mode();
                     if params.presentation.mode == TerminalPresentationMode::Flat2d
-                        && mouse_mode != vt100::MouseProtocolMode::None
+                        && mouse_mode != MouseProtocolMode::None
                     {
                         let encoding = params.runtime.parser.screen().mouse_protocol_encoding();
                         let (row, col) = params.runtime.parser.screen().cursor_position();
@@ -419,7 +420,7 @@ pub fn handle_keyboard_input(
                             ));
                         }
                     } else {
-                        let screen = params.runtime.parser.screen_mut();
+                        let mut screen = params.runtime.parser.screen_mut();
                         let current = screen.scrollback();
                         let next = if direction.is_positive() {
                             current.saturating_add(amount)
@@ -445,7 +446,7 @@ pub fn handle_keyboard_input(
                 BindingAction::Copy => {
                     if let Some(text) = params
                         .selection
-                        .selected_text(params.runtime.parser.screen())
+                        .selected_text(&params.runtime.parser.screen())
                         && !text.is_empty()
                     {
                         params.clipboard.copy(&text);
@@ -521,7 +522,7 @@ pub fn handle_keyboard_input(
             params.runtime.kitty_keyboard_flags(),
             params.runtime.modify_other_keys(),
         ) {
-            let screen = params.runtime.parser.screen_mut();
+            let mut screen = params.runtime.parser.screen_mut();
             if screen.scrollback() != 0 {
                 screen.set_scrollback(0);
                 params.redraw.request();

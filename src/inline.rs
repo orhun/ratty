@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use bevy::prelude::*;
-use vt100::Callbacks;
 
 use crate::kitty::{KittyOperation, KittyParserState, refresh_kitty_placeholder_anchors};
 use crate::model::{
@@ -79,10 +78,10 @@ pub struct TerminalInlineObjects {
 
 impl TerminalInlineObjects {
     /// Consumes PTY output and extracts inline object control sequences.
-    pub fn consume_pty_output<CB: Callbacks>(
+    pub fn consume_pty_output(
         &mut self,
         chunk: &[u8],
-        parser: &mut vt100::Parser<CB>,
+        parser: &mut crate::vtshim::Parser,
     ) -> Vec<Vec<u8>> {
         self.pending_bytes.extend_from_slice(chunk);
         let mut replies = Vec::new();
@@ -180,7 +179,7 @@ impl TerminalInlineObjects {
     }
 
     /// Refreshes placeholder-derived Kitty anchors.
-    pub fn refresh_placeholder_anchors(&mut self, screen: &vt100::Screen) {
+    pub fn refresh_placeholder_anchors(&mut self, screen: &crate::vtshim::Screen) {
         if refresh_kitty_placeholder_anchors(&self.objects, &mut self.anchors, screen) {
             self.dirty = true;
         }

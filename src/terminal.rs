@@ -16,6 +16,7 @@ use crate::direct_render::{
     update_direct_terminal_frame,
 };
 use crate::mouse::TerminalSelection;
+use crate::vtshim::{Cell, Color, Screen};
 
 /// Terminal grid and presentation dimensions.
 #[derive(Clone, Copy, Debug)]
@@ -370,7 +371,7 @@ fn build_terminal_renderer(
 /// Ratatui widget backed by a VT100 screen.
 pub struct TerminalWidget<'a> {
     /// Screen to render.
-    pub screen: &'a vt100::Screen,
+    pub screen: &'a Screen<'a>,
     /// Active selection.
     pub selection: &'a TerminalSelection,
     /// Terminal theme.
@@ -401,7 +402,7 @@ impl Widget for TerminalWidget<'_> {
                 }
 
                 let mut style =
-                    vt100_cell_style(vt_cell, &theme_palette, theme_fg, self.font_style);
+                    vt100_cell_style(&vt_cell, &theme_palette, theme_fg, self.font_style);
                 let symbol = if vt_cell.has_contents() {
                     vt_cell.contents()
                 } else {
@@ -421,7 +422,7 @@ impl Widget for TerminalWidget<'_> {
 }
 
 fn vt100_cell_style(
-    cell: &vt100::Cell,
+    cell: &Cell,
     theme_palette: &[TuiColor; 16],
     theme_fg: TuiColor,
     font_style: FontStyleConfig,
@@ -459,11 +460,11 @@ fn vt100_cell_style(
     style
 }
 
-fn vt100_color_to_tui(color: vt100::Color, theme_palette: &[TuiColor; 16]) -> Option<TuiColor> {
+fn vt100_color_to_tui(color: Color, theme_palette: &[TuiColor; 16]) -> Option<TuiColor> {
     match color {
-        vt100::Color::Default => None,
-        vt100::Color::Idx(index) => Some(ansi_index_to_tui(index, theme_palette)),
-        vt100::Color::Rgb(r, g, b) => Some(TuiColor::Rgb(r, g, b)),
+        Color::Default => None,
+        Color::Idx(index) => Some(ansi_index_to_tui(index, theme_palette)),
+        Color::Rgb(r, g, b) => Some(TuiColor::Rgb(r, g, b)),
     }
 }
 

@@ -43,6 +43,7 @@ use crate::scene::{
 use crate::terminal::{
     TerminalRedrawState, TerminalSurface, TerminalWidget, render_scale_for_window,
 };
+use crate::vtshim::Screen;
 use bevy::app::AppExit;
 use bevy::asset::AssetMut;
 use bevy::ecs::message::{MessageReader, MessageWriter};
@@ -158,7 +159,7 @@ pub fn pump_pty_output(
     mut app_exit: MessageWriter<AppExit>,
     mut redraw: ResMut<TerminalRedrawState>,
 ) {
-    let screen_rows = |screen: &vt100::Screen| {
+    let screen_rows = |screen: &Screen| {
         let (_, cols) = screen.size();
         screen.rows(0, cols).collect::<Vec<_>>()
     };
@@ -175,16 +176,16 @@ pub fn pump_pty_output(
                     None
                 };
                 let mut replies = inline_objects.consume_pty_output(&chunk, &mut runtime.parser);
-                replies.extend(runtime.parser.callbacks_mut().take_replies());
+                replies.extend(runtime.parser.take_replies());
                 for reply in replies {
                     runtime.write_input(&reply);
                 }
                 if let Some(prev_rows) = prev_rows {
-                    let next_rows = screen_rows(runtime.parser.screen());
+                    let next_rows = screen_rows(&runtime.parser.screen());
                     let scrolled = infer_upward_scroll(&prev_rows, &next_rows);
                     inline_objects.apply_scroll(scrolled);
                 }
-                inline_objects.refresh_placeholder_anchors(runtime.parser.screen());
+                inline_objects.refresh_placeholder_anchors(&runtime.parser.screen());
                 processed_output = true;
             }
             Err(TryRecvError::Empty) => break,
@@ -387,7 +388,7 @@ pub(crate) fn render_terminal_widget(mut params: RenderWidgetParams) {
     let _ = terminal.tui.draw(|frame| {
         frame.render_widget(
             TerminalWidget {
-                screen,
+                screen: &screen,
                 selection,
                 theme: &app_config.theme,
                 font_style: app_config.font.style,
@@ -456,7 +457,7 @@ pub(crate) fn sync_terminal_materials(mut params: SyncMaterialsParams) {
         TerminalPresentationMode::Plane3d | TerminalPresentationMode::Mobius3d
     );
     if in_3d {
-        sync_terminal_debug_image(terminal, images, runtime.parser.screen());
+        sync_terminal_debug_image(terminal, images, &runtime.parser.screen());
     }
 
     sync_plane_texture(terminal.image_handle.as_ref(), plane_materials, materials);

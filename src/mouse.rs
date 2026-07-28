@@ -6,9 +6,8 @@ use bevy::input::ButtonState;
 use bevy::input::mouse::{MouseButton, MouseButtonInput, MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
 use bevy::window::{CursorMoved, PrimaryWindow, Window};
-use vt100::{MouseProtocolEncoding, MouseProtocolMode};
-
 use crate::config::AppConfig;
+use crate::vtshim::{MouseProtocolEncoding, MouseProtocolMode, Screen};
 use crate::runtime::TerminalRuntime;
 use crate::scene::{
     MobiusTransition, TerminalPlaneView, TerminalPresentation, TerminalPresentationMode,
@@ -187,7 +186,7 @@ impl TerminalSelection {
     }
 
     /// Returns the selected screen text.
-    pub fn selected_text(&self, screen: &vt100::Screen) -> Option<String> {
+    pub fn selected_text(&self, screen: &Screen) -> Option<String> {
         let bounds = self.normalized_bounds()?;
 
         let (_, cols) = screen.size();
@@ -524,7 +523,7 @@ pub(crate) fn handle_mouse_input(
             };
 
             if amount != 0 {
-                let screen = runtime.parser.screen_mut();
+                let mut screen = runtime.parser.screen_mut();
                 let current = screen.scrollback() as isize;
                 let next = (current + amount).max(0) as usize;
                 screen.set_scrollback(next);

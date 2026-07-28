@@ -4,6 +4,7 @@ use bevy::prelude::*;
 use bevy::render::render_resource::Extent3d;
 
 use crate::terminal::TerminalSurface;
+use crate::vtshim::{Color, Screen};
 
 type Rgba = [u8; 4];
 const DEBUG_BG: Rgba = [18, 20, 28, 255];
@@ -17,7 +18,7 @@ const DEBUG_BG_FALLBACK: Rgba = [31, 31, 40, 255];
 pub fn sync_terminal_debug_image(
     terminal: &TerminalSurface,
     images: &mut Assets<Image>,
-    screen: &vt100::Screen,
+    screen: &Screen,
 ) {
     let Some(handle) = terminal.back_image_handle.as_ref() else {
         return;
@@ -99,7 +100,7 @@ impl<'a> CellDebugImageRenderer<'a> {
         }
     }
 
-    fn render(&mut self, screen: &vt100::Screen) {
+    fn render(&mut self, screen: &Screen) {
         self.fill(DEBUG_BG);
 
         for row in 0..self.rows {
@@ -284,11 +285,11 @@ fn blend_rgba(top: Rgba, bottom: Rgba, top_mix: f32) -> Rgba {
     ]
 }
 
-fn vt100_debug_color(color: vt100::Color) -> Option<Rgba> {
+fn vt100_debug_color(color: Color) -> Option<Rgba> {
     match color {
-        vt100::Color::Default => None,
-        vt100::Color::Idx(index) => Some(ansi_index_to_rgba(index)),
-        vt100::Color::Rgb(r, g, b) => Some([r, g, b, 255]),
+        Color::Default => None,
+        Color::Idx(index) => Some(ansi_index_to_rgba(index)),
+        Color::Rgb(r, g, b) => Some([r, g, b, 255]),
     }
 }
 

@@ -1,6 +1,5 @@
 //! PTY runtime and parser state.
 
-use std::collections::HashSet;
 use std::env;
 use std::io::{ErrorKind, Read, Write};
 use std::path::PathBuf;
@@ -12,9 +11,9 @@ use anyhow::Context;
 use bevy::platform::cell::SyncCell;
 use bevy::prelude::Resource;
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
-use vt100::{Callbacks, Parser, Screen};
 
 use crate::config::AppConfig;
+use crate::vtshim::Parser;
 
 /// Command-line runtime overrides.
 #[derive(Debug, Clone, Default)]
@@ -23,151 +22,6 @@ pub struct RuntimeOptions {
     pub command: Option<Vec<String>>,
     /// Working directory used for the spawned PTY command.
     pub working_dir: Option<PathBuf>,
-}
-
-/// Callback state for unhandled parser sequences.
-#[derive(Default)]
-pub struct TerminalParserCallbacks {
-    seen_csi: HashSet<String>,
-    seen_escape: HashSet<String>,
-    pending_replies: Vec<Vec<u8>>,
-    kitty_keyboard_flags: u8,
-    modify_other_keys: Option<u8>,
-}
-
-impl TerminalParserCallbacks {
-    /// Drains any terminal replies queued by parser callbacks.
-    pub fn take_replies(&mut self) -> Vec<Vec<u8>> {
-        std::mem::take(&mut self.pending_replies)
-    }
-
-    /// Returns the active kitty keyboard enhancement flags.
-    pub fn kitty_keyboard_flags(&self) -> u8 {
-        self.kitty_keyboard_flags
-    }
-
-    /// Returns the active xterm `modifyOtherKeys` level.
-    pub fn modify_other_keys(&self) -> Option<u8> {
-        self.modify_other_keys
-    }
-}
-
-impl Callbacks for TerminalParserCallbacks {
-    fn unhandled_csi(
-        &mut self,
-        screen: &mut Screen,
-        i1: Option<u8>,
-        i2: Option<u8>,
-        params: &[&[u16]],
-        c: char,
-    ) {
-        // CSI 0 c = primary device attributes request.
-        if i1.is_none() && i2.is_none() && c == 'c' && params.len() == 1 && params[0] == [0] {
-            self.pending_replies.push(b"\x1b[?1;2c".to_vec());
-            return;
-        }
-
-        // CSI 5 n = device status report request.
-        if i1.is_none() && i2.is_none() && c == 'n' && params.len() == 1 && params[0] == [5] {
-            self.pending_replies.push(b"\x1b[0n".to_vec());
-            return;
-        }
-
-        // CSI 6 n = cursor position report request.
-        if i1.is_none() && i2.is_none() && c == 'n' && params.len() == 1 && params[0] == [6] {
-            let (row, col) = screen.cursor_position();
-            self.pending_replies
-                .push(format!("\x1b[{};{}R", row + 1, col + 1).into_bytes());
-            return;
-        }
-
-        // CSI ? u = kitty keyboard protocol flag query. Reply with the currently active flags so
-        // apps can detect whether enhanced key reporting is enabled.
-        if i1 == Some(b'?') && i2.is_none() && c == 'u' && params.is_empty() {
-            self.pending_replies
-                .push(format!("\x1b[?{}u", self.kitty_keyboard_flags).into_bytes());
-            return;
-        }
-
-        // CSI > flags u = enable kitty keyboard protocol flags for subsequent key reports.
-        if i1 == Some(b'>') && i2.is_none() && c == 'u' && params.len() == 1 && params[0].len() == 1
-        {
-            self.kitty_keyboard_flags = params[0][0].min(u8::MAX as u16) as u8;
-            return;
-        }
-
-        // CSI < 1 u = pop kitty keyboard enhancement state and fall back to legacy reporting.
-        if i1 == Some(b'<') && i2.is_none() && c == 'u' && params.len() == 1 && params[0] == [1] {
-            self.kitty_keyboard_flags = 0;
-            return;
-        }
-
-        // CSI > 4 ; level m = xterm modifyOtherKeys mode. We track the current level so keys like
-        // Ctrl+Enter can be encoded in the form the foreground app asked for.
-        if i1 == Some(b'>') && i2.is_none() && c == 'm' {
-            match params {
-                [resource, level] if *resource == [4] && level.len() == 1 => {
-                    self.modify_other_keys = Some(level[0].min(u8::MAX as u16) as u8);
-                    return;
-                }
-                [resource] if *resource == [4] => {
-                    self.modify_other_keys = None;
-                    return;
-                }
-                _ => {}
-            }
-        }
-
-        // CSI ? 7 h / CSI ? 7 l toggle line wrapping. Ratty does not model the mode yet, but
-        // treating it as known avoids noisy warnings for shells and TUIs that flip it frequently.
-        if i1 == Some(b'?')
-            && i2.is_none()
-            && params.len() == 1
-            && params[0] == [7]
-            && matches!(c, 'h' | 'l')
-        {
-            return;
-        }
-
-        let mut sequence = String::from("\u{1b}[");
-        if let Some(i1) = i1 {
-            sequence.push(i1 as char);
-        }
-        if let Some(i2) = i2 {
-            sequence.push(i2 as char);
-        }
-        for (idx, param) in params.iter().enumerate() {
-            if idx > 0 {
-                sequence.push(';');
-            }
-            for (j, value) in param.iter().enumerate() {
-                if j > 0 {
-                    sequence.push(':');
-                }
-                sequence.push_str(&value.to_string());
-            }
-        }
-        sequence.push(c);
-
-        if self.seen_csi.insert(sequence.clone()) {
-            bevy::log::warn!("unhandled terminal CSI sequence: {sequence}");
-        }
-    }
-
-    fn unhandled_escape(&mut self, _: &mut Screen, i1: Option<u8>, i2: Option<u8>, b: u8) {
-        let mut sequence = String::from("\u{1b}");
-        if let Some(i1) = i1 {
-            sequence.push(i1 as char);
-        }
-        if let Some(i2) = i2 {
-            sequence.push(i2 as char);
-        }
-        sequence.push(b as char);
-
-        if self.seen_escape.insert(sequence.clone()) {
-            bevy::log::warn!("unhandled terminal escape sequence: {sequence}");
-        }
-    }
 }
 
 /// Running PTY and parser state.
@@ -188,8 +42,7 @@ pub struct TerminalRuntime {
     /// PTY reader thread.
     reader_thread: Option<JoinHandle<()>>,
     /// Terminal parser.
-    pub parser: Parser<TerminalParserCallbacks>,
-    scrollback_len: usize,
+    pub parser: Parser,
     /// Indicates PTY shutdown.
     pub pty_disconnected: bool,
     shutdown_started: bool,
@@ -351,13 +204,7 @@ impl TerminalRuntime {
             master: SyncCell::new(Some(pair.master)),
             child: Some(child),
             reader_thread: Some(reader_thread),
-            parser: Parser::new_with_callbacks(
-                rows,
-                cols,
-                config.terminal.scrollback,
-                TerminalParserCallbacks::default(),
-            ),
-            scrollback_len: config.terminal.scrollback,
+            parser: Parser::new(rows, cols, config.terminal.scrollback),
             pty_disconnected: false,
             shutdown_started: false,
         })
@@ -397,26 +244,19 @@ impl TerminalRuntime {
             });
         }
 
-        let (_, old_cols) = self.parser.screen().size();
-        if old_cols == cols || self.parser.screen().alternate_screen() {
-            self.parser.screen_mut().set_size(rows, cols);
-            return;
-        }
-
-        let state = self.parser.screen().state_formatted();
-        let callbacks = std::mem::take(self.parser.callbacks_mut());
-        self.parser = Parser::new_with_callbacks(rows, cols, self.scrollback_len, callbacks);
-        self.parser.process(&state);
+        // rio-vt reflows content natively on resize, so a plain grid resize
+        // preserves scrollback and wrapping without a snapshot/replay dance.
+        self.parser.screen_mut().set_size(rows, cols);
     }
 
     /// Returns the active kitty keyboard enhancement flags.
     pub fn kitty_keyboard_flags(&self) -> u8 {
-        self.parser.callbacks().kitty_keyboard_flags()
+        self.parser.kitty_keyboard_flags()
     }
 
     /// Returns the active xterm `modifyOtherKeys` level.
     pub fn modify_other_keys(&self) -> Option<u8> {
-        self.parser.callbacks().modify_other_keys()
+        self.parser.modify_other_keys()
     }
 
     /// Shuts down the PTY runtime without blocking the Bevy main thread indefinitely.

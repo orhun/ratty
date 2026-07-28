@@ -45,13 +45,13 @@ image = { version = "0.25", default-features = false, features = ["png", "ico"] 
 parley_ratatui = "0.3.4"
 portable-pty = "0.8"
 ratatui = "0.30"
+rio-vt = "0.5.1"
 rust-embed = "8.5"
 serde = { version = "1.0", features = ["derive"] }
 shellexpand = "3.1"
 stl_io = "0.11.0"
 tobj = "4.0"
 toml = "0.8"
-vt100 = "0.16"
 winit = { version = "0.30", default-features = false }
 
 [build-dependencies]
