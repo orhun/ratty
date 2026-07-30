@@ -229,12 +229,46 @@ pub enum BindingAction {
     /// Disables a binding.
     #[serde(rename = "none")]
     None,
-    /// Toggles between the flat and warped terminal views.
-    #[serde(rename = "Toggle3DMode")]
-    Toggle3DMode,
+    /// Toggles between the flat and orthographic terminal views.
+    #[serde(rename = "ToggleOrtho3DMode")]
+    #[serde(alias = "Toggle3DMode")]
+    ToggleOrtho3DMode,
+    /// Toggles the perspective terminal view.
+    #[serde(rename = "TogglePersp3DMode")]
+    TogglePersp3DMode,
     /// Toggles the Mobius-strip terminal view.
     #[serde(rename = "ToggleMobiusMode")]
     ToggleMobiusMode,
+    /// Activates camera preset 0.
+    #[serde(rename = "ActivateCameraSlot0")]
+    ActivateCameraSlot0,
+    /// Activates camera preset 1.
+    #[serde(rename = "ActivateCameraSlot1")]
+    ActivateCameraSlot1,
+    /// Activates camera preset 2.
+    #[serde(rename = "ActivateCameraSlot2")]
+    ActivateCameraSlot2,
+    /// Activates camera preset 3.
+    #[serde(rename = "ActivateCameraSlot3")]
+    ActivateCameraSlot3,
+    /// Activates camera preset 4.
+    #[serde(rename = "ActivateCameraSlot4")]
+    ActivateCameraSlot4,
+    /// Activates camera preset 5.
+    #[serde(rename = "ActivateCameraSlot5")]
+    ActivateCameraSlot5,
+    /// Activates camera preset 6.
+    #[serde(rename = "ActivateCameraSlot6")]
+    ActivateCameraSlot6,
+    /// Activates camera preset 7.
+    #[serde(rename = "ActivateCameraSlot7")]
+    ActivateCameraSlot7,
+    /// Activates camera preset 8.
+    #[serde(rename = "ActivateCameraSlot8")]
+    ActivateCameraSlot8,
+    /// Activates camera preset 9.
+    #[serde(rename = "ActivateCameraSlot9")]
+    ActivateCameraSlot9,
     /// Scrolls one page up through scrollback.
     #[serde(rename = "ScrollPageUp")]
     ScrollPageUp,
@@ -268,6 +302,25 @@ pub enum BindingAction {
     /// Resets the font size.
     #[serde(rename = "ResetFontSize")]
     ResetFontSize,
+}
+
+impl BindingAction {
+    /// Returns the camera slot selected by this action, if any.
+    pub const fn camera_slot(self) -> Option<usize> {
+        match self {
+            Self::ActivateCameraSlot0 => Some(0),
+            Self::ActivateCameraSlot1 => Some(1),
+            Self::ActivateCameraSlot2 => Some(2),
+            Self::ActivateCameraSlot3 => Some(3),
+            Self::ActivateCameraSlot4 => Some(4),
+            Self::ActivateCameraSlot5 => Some(5),
+            Self::ActivateCameraSlot6 => Some(6),
+            Self::ActivateCameraSlot7 => Some(7),
+            Self::ActivateCameraSlot8 => Some(8),
+            Self::ActivateCameraSlot9 => Some(9),
+            _ => None,
+        }
+    }
 }
 
 /// Font configuration.
@@ -517,4 +570,48 @@ fn parse_hex_color(value: &str) -> anyhow::Result<[u8; 3]> {
     let b = u8::from_str_radix(&hex[4..6], 16)
         .with_context(|| format!("invalid blue component in {value}"))?;
     Ok([r, g, b])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_legacy_toggle_3d_mode_binding_action() {
+        let binding: KeyBindingConfig = toml::from_str(
+            r#"
+key = "Enter"
+with = "Control | alt"
+action = "Toggle3DMode"
+"#,
+        )
+        .expect("legacy Toggle3DMode action should deserialize");
+
+        assert_eq!(binding.action, BindingAction::ToggleOrtho3DMode);
+    }
+
+    #[test]
+    fn parses_every_camera_slot_binding_action() {
+        for slot in 0..10 {
+            let source = format!(
+                "key = \"Digit{slot}\"\nwith = \"Control | alt | shift\"\naction = \"ActivateCameraSlot{slot}\""
+            );
+            let binding: KeyBindingConfig = toml::from_str(&source).expect("camera slot binding");
+            assert_eq!(binding.action.camera_slot(), Some(slot));
+        }
+    }
+
+    #[test]
+    fn distributed_config_binds_every_camera_slot() {
+        let config: AppConfig =
+            toml::from_str(include_str!("../config/ratty.toml")).expect("distributed config");
+        let mut slots = config
+            .bindings
+            .keys
+            .iter()
+            .filter_map(|binding| binding.action.camera_slot())
+            .collect::<Vec<_>>();
+        slots.sort_unstable();
+        assert_eq!(slots, (0..10).collect::<Vec<_>>());
+    }
 }

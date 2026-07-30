@@ -51,6 +51,7 @@ Each object has:
 - `p` [place object](#3-place-object)
 - `u` [update object](#4-update-object)
 - `d` [delete object](#5-delete-object)
+- `c` [camera control](#6-camera-control)
 
 ### 1. Support Query
 
@@ -65,7 +66,7 @@ ESC _ ratty;g;s ESC \
 Ratty replies:
 
 ```text
-ESC _ ratty;g;s;v=1;fmt=obj|glb|stl;path=1;payload=1;chunk=1;anim=1;depth=1;color=1;brightness=1;transform=1;update=1;normalize=1 ESC \
+ESC _ ratty;g;s;v=1;fmt=obj|glb|stl;path=1;payload=1;chunk=1;anim=1;depth=1;color=1;brightness=1;transform=1;update=1;normalize=1;camera=1 ESC \
 ```
 
 Fields:
@@ -79,6 +80,7 @@ Fields:
 - `depth=1`: `depth=<f32>` placement is supported
 - `color=1`: `color=<RRGGBB>` placement is supported
 - `brightness=1`: `brightness=<f32>` placement is supported
+- `camera=1`: `c` camera updates are supported
 - `transform=1`: transform fields such as rotation and offsets are supported
 - `update=1`: `u` object updates are supported
 - `normalize=1`: `normalize=<0|1>` registration is supported for OBJ assets
@@ -219,6 +221,46 @@ Delete all Ratty graphics objects:
 ESC _ ratty;g;d ESC \
 ```
 
+### 6. Camera control
+
+Partially updates one of ten persistent camera presets. `id` is required and
+must be a decimal slot number from `0` through `9`.
+
+```text
+ESC _ ratty;g;c;id=0;set=0;type=Ortho;px=0.25;scale=1.0 ESC \
+ESC _ ratty;g;c;id=1;set=1;type=Persp;fov=50;rx=10;ry=20 ESC \
+```
+
+- `set`: `0` or `1`; when `1`, activates the slot after applying this update.
+  Defaults to `0`.
+
+Optional fields retain their previous values when omitted:
+
+- `type`: one of `Flat`, `Ortho`, `Persp`, `Mobius`.
+- `scale`: orthographic projection scale of at least `0.01`. The value is used
+  when the slot presents in `Ortho` or `Mobius`.
+- `fov`: vertical perspective field of view in degrees, used when the slot
+  presents in `Persp`. The value must be strictly inside the range equivalent
+  to `0.05` through `pi - 0.05` radians (about `2.87` through `177.13`
+  degrees).
+- `px`, `py`, `pz`: horizontal pan, vertical pan, and camera dolly relative to
+  the default camera position.
+- `rx`, `ry`, `rz`: pitch (X), yaw (Y), and roll (Z), in degrees.
+
+Every angle on the wire (`rx`, `ry`, `rz`, and `fov`) is expressed in degrees.
+
+Orthographic scale and perspective FOV are stored independently per slot, so
+one command may set both `scale` and `fov` regardless of the current or
+requested `type`, and changing `type` never reinterprets the other mode's
+projection value.
+
+Malformed or non-finite numeric values, fields without a value, invalid `id`,
+invalid `set`, and unknown `type` values cause the camera command to be
+ignored. A valid partial command still applies its other fields when `scale`
+or `fov` is numeric but outside its valid range; such an out-of-range value
+also does not block `set=1` activation — the slot activates with its previous
+projection value.
+
 ## Example Session
 
 Register an embedded object path:
@@ -237,6 +279,18 @@ Rotate it later:
 
 ```text
 ESC _ ratty;g;u;id=7;ry=180 ESC \
+```
+
+View the terminal in perspective with a 50-degree field of view:
+
+```text
+ESC _ ratty;g;c;id=0;set=1;type=Persp;fov=50;rx=10;ry=20 ESC \
+```
+
+Return to the flat terminal:
+
+```text
+ESC _ ratty;g;c;id=0;set=1;type=Flat ESC \
 ```
 
 Delete it:

@@ -9,13 +9,16 @@ use bevy::window::{PrimaryWindow, Window};
 
 use arboard::Clipboard;
 
+use crate::camera::{
+    ActivateTerminalCameraPreset, TerminalCameraInteraction, TerminalCameraSlots,
+    TerminalMobiusSource,
+};
 use crate::config::{AppConfig, BindingAction, FontConfig, KeyBindingConfig};
 use crate::mouse::{TerminalSelection, encode_mouse_wheel};
 use crate::runtime::TerminalRuntime;
 use crate::scene::{
-    MobiusTransition, TerminalPlaneBackLayoutQuery, TerminalPlaneLayoutQuery, TerminalPlaneView,
-    TerminalPlaneWarp, TerminalPresentation, TerminalPresentationMode, TerminalViewport,
-    sync_terminal_layout,
+    MobiusEnterZoomFloor, MobiusTransition, TerminalPlaneBackLayoutQuery, TerminalPlaneLayoutQuery,
+    TerminalPlaneWarp, TerminalPresentationMode, TerminalViewport, sync_terminal_layout,
 };
 use crate::terminal::{TerminalRedrawState, TerminalSurface, render_scale_for_window};
 use crate::vtshim::MouseProtocolMode;
@@ -60,144 +63,7 @@ pub struct TerminalKeyBindings {
 impl FromWorld for TerminalKeyBindings {
     fn from_world(world: &mut World) -> Self {
         let app_config = world.resource::<AppConfig>();
-        let mut bindings = vec![
-            KeyBinding::new(
-                KeyCode::Enter,
-                BindingModifiers {
-                    control: true,
-                    alt: true,
-                    ..default()
-                },
-                BindingAction::Toggle3DMode,
-            ),
-            KeyBinding::new(
-                KeyCode::KeyM,
-                BindingModifiers {
-                    control: true,
-                    alt: true,
-                    ..default()
-                },
-                BindingAction::ToggleMobiusMode,
-            ),
-            KeyBinding::new(
-                KeyCode::PageUp,
-                BindingModifiers {
-                    alt: true,
-                    ..default()
-                },
-                BindingAction::ScrollPageUp,
-            ),
-            KeyBinding::new(
-                KeyCode::PageDown,
-                BindingModifiers {
-                    alt: true,
-                    ..default()
-                },
-                BindingAction::ScrollPageDown,
-            ),
-            KeyBinding::new(
-                KeyCode::ArrowUp,
-                BindingModifiers {
-                    alt: true,
-                    ..default()
-                },
-                BindingAction::ScrollUp,
-            ),
-            KeyBinding::new(
-                KeyCode::ArrowDown,
-                BindingModifiers {
-                    alt: true,
-                    ..default()
-                },
-                BindingAction::ScrollDown,
-            ),
-            KeyBinding::new(
-                KeyCode::ArrowUp,
-                BindingModifiers {
-                    control: true,
-                    alt: true,
-                    ..default()
-                },
-                BindingAction::IncreaseWarp,
-            ),
-            KeyBinding::new(
-                KeyCode::ArrowDown,
-                BindingModifiers {
-                    control: true,
-                    alt: true,
-                    ..default()
-                },
-                BindingAction::DecreaseWarp,
-            ),
-            KeyBinding::new(
-                KeyCode::KeyC,
-                BindingModifiers {
-                    control: true,
-                    alt: true,
-                    ..default()
-                },
-                BindingAction::Copy,
-            ),
-            KeyBinding::new(
-                KeyCode::KeyV,
-                BindingModifiers {
-                    control: true,
-                    alt: true,
-                    ..default()
-                },
-                BindingAction::Paste,
-            ),
-            KeyBinding::new(
-                KeyCode::Equal,
-                BindingModifiers {
-                    control: true,
-                    ..default()
-                },
-                BindingAction::IncreaseFontSize,
-            ),
-            KeyBinding::new(
-                KeyCode::NumpadAdd,
-                BindingModifiers {
-                    control: true,
-                    ..default()
-                },
-                BindingAction::IncreaseFontSize,
-            ),
-            KeyBinding::new(
-                KeyCode::Minus,
-                BindingModifiers {
-                    control: true,
-                    ..default()
-                },
-                BindingAction::DecreaseFontSize,
-            ),
-            KeyBinding::new(
-                KeyCode::NumpadSubtract,
-                BindingModifiers {
-                    control: true,
-                    ..default()
-                },
-                BindingAction::DecreaseFontSize,
-            ),
-            KeyBinding::new(
-                KeyCode::Digit0,
-                BindingModifiers {
-                    control: true,
-                    alt: true,
-                    ..default()
-                },
-                BindingAction::ResetFontSize,
-            ),
-            KeyBinding::new(
-                KeyCode::Numpad0,
-                BindingModifiers {
-                    control: true,
-                    alt: true,
-                    ..default()
-                },
-                BindingAction::ResetFontSize,
-            ),
-        ];
+        let mut bindings = default_bindings();
 
         for binding in &app_config.bindings.keys {
             let Some(binding) = KeyBinding::from_config(binding) else {
@@ -222,6 +88,201 @@ impl FromWorld for TerminalKeyBindings {
 
         Self { bindings }
     }
+}
+
+fn default_bindings() -> Vec<KeyBinding> {
+    let mut bindings = vec![
+        KeyBinding::new(
+            KeyCode::Enter,
+            BindingModifiers {
+                control: true,
+                alt: true,
+                ..default()
+            },
+            BindingAction::ToggleOrtho3DMode,
+        ),
+        KeyBinding::new(
+            KeyCode::KeyP,
+            BindingModifiers {
+                control: true,
+                alt: true,
+                ..default()
+            },
+            BindingAction::TogglePersp3DMode,
+        ),
+        KeyBinding::new(
+            KeyCode::KeyM,
+            BindingModifiers {
+                control: true,
+                alt: true,
+                ..default()
+            },
+            BindingAction::ToggleMobiusMode,
+        ),
+        KeyBinding::new(
+            KeyCode::PageUp,
+            BindingModifiers {
+                alt: true,
+                ..default()
+            },
+            BindingAction::ScrollPageUp,
+        ),
+        KeyBinding::new(
+            KeyCode::PageDown,
+            BindingModifiers {
+                alt: true,
+                ..default()
+            },
+            BindingAction::ScrollPageDown,
+        ),
+        KeyBinding::new(
+            KeyCode::ArrowUp,
+            BindingModifiers {
+                alt: true,
+                ..default()
+            },
+            BindingAction::ScrollUp,
+        ),
+        KeyBinding::new(
+            KeyCode::ArrowDown,
+            BindingModifiers {
+                alt: true,
+                ..default()
+            },
+            BindingAction::ScrollDown,
+        ),
+        KeyBinding::new(
+            KeyCode::ArrowUp,
+            BindingModifiers {
+                control: true,
+                alt: true,
+                ..default()
+            },
+            BindingAction::IncreaseWarp,
+        ),
+        KeyBinding::new(
+            KeyCode::ArrowDown,
+            BindingModifiers {
+                control: true,
+                alt: true,
+                ..default()
+            },
+            BindingAction::DecreaseWarp,
+        ),
+        KeyBinding::new(
+            KeyCode::KeyC,
+            BindingModifiers {
+                control: true,
+                alt: true,
+                ..default()
+            },
+            BindingAction::Copy,
+        ),
+        KeyBinding::new(
+            KeyCode::KeyV,
+            BindingModifiers {
+                control: true,
+                alt: true,
+                ..default()
+            },
+            BindingAction::Paste,
+        ),
+        KeyBinding::new(
+            KeyCode::Equal,
+            BindingModifiers {
+                control: true,
+                ..default()
+            },
+            BindingAction::IncreaseFontSize,
+        ),
+        KeyBinding::new(
+            KeyCode::NumpadAdd,
+            BindingModifiers {
+                control: true,
+                ..default()
+            },
+            BindingAction::IncreaseFontSize,
+        ),
+        KeyBinding::new(
+            KeyCode::Minus,
+            BindingModifiers {
+                control: true,
+                ..default()
+            },
+            BindingAction::DecreaseFontSize,
+        ),
+        KeyBinding::new(
+            KeyCode::NumpadSubtract,
+            BindingModifiers {
+                control: true,
+                ..default()
+            },
+            BindingAction::DecreaseFontSize,
+        ),
+        KeyBinding::new(
+            KeyCode::Digit0,
+            BindingModifiers {
+                control: true,
+                alt: true,
+                ..default()
+            },
+            BindingAction::ResetFontSize,
+        ),
+        KeyBinding::new(
+            KeyCode::Numpad0,
+            BindingModifiers {
+                control: true,
+                alt: true,
+                ..default()
+            },
+            BindingAction::ResetFontSize,
+        ),
+    ];
+    let slot_keys = [
+        KeyCode::Digit0,
+        KeyCode::Digit1,
+        KeyCode::Digit2,
+        KeyCode::Digit3,
+        KeyCode::Digit4,
+        KeyCode::Digit5,
+        KeyCode::Digit6,
+        KeyCode::Digit7,
+        KeyCode::Digit8,
+        KeyCode::Digit9,
+    ];
+    let slot_actions = [
+        BindingAction::ActivateCameraSlot0,
+        BindingAction::ActivateCameraSlot1,
+        BindingAction::ActivateCameraSlot2,
+        BindingAction::ActivateCameraSlot3,
+        BindingAction::ActivateCameraSlot4,
+        BindingAction::ActivateCameraSlot5,
+        BindingAction::ActivateCameraSlot6,
+        BindingAction::ActivateCameraSlot7,
+        BindingAction::ActivateCameraSlot8,
+        BindingAction::ActivateCameraSlot9,
+    ];
+    // No numpad variants: with Num Lock on Windows/X11, Shift+numpad delivers
+    // navigation logical keys, which would misroute these chords to the
+    // warp/scroll bindings instead of slot activation.
+    bindings.extend(
+        slot_keys
+            .into_iter()
+            .zip(slot_actions)
+            .map(|(key, action)| {
+                KeyBinding::new(
+                    key,
+                    BindingModifiers {
+                        control: true,
+                        alt: true,
+                        shift: true,
+                        ..default()
+                    },
+                    action,
+                )
+            }),
+    );
+    bindings
 }
 
 impl TerminalKeyBindings {
@@ -313,8 +374,9 @@ pub struct KeyboardSystemParams<'w, 's> {
     keys: Res<'w, ButtonInput<KeyCode>>,
     selection: ResMut<'w, TerminalSelection>,
     plane_warp: ResMut<'w, TerminalPlaneWarp>,
-    plane_view: ResMut<'w, TerminalPlaneView>,
-    presentation: ResMut<'w, TerminalPresentation>,
+    camera_slots: ResMut<'w, TerminalCameraSlots>,
+    camera_interaction: ResMut<'w, TerminalCameraInteraction>,
+    camera_activations: MessageWriter<'w, ActivateTerminalCameraPreset>,
     mobius_transition: ResMut<'w, MobiusTransition>,
     clipboard: NonSendMut<'w, TerminalClipboard>,
     runtime: ResMut<'w, TerminalRuntime>,
@@ -358,34 +420,49 @@ pub fn handle_keyboard_input(
                 continue;
             }
 
+            if let Some(slot) = action.camera_slot() {
+                params
+                    .camera_activations
+                    .write(ActivateTerminalCameraPreset { slot });
+                params.selection.clear();
+                continue;
+            }
+
             match action {
                 BindingAction::None => {}
-                BindingAction::Toggle3DMode => {
-                    params.presentation.toggle_plane_mode();
+                BindingAction::ToggleOrtho3DMode => {
+                    let preset = params.camera_slots.active_mut();
+                    preset.mode = if preset.mode == TerminalPresentationMode::Plane3d {
+                        TerminalPresentationMode::Flat2d
+                    } else {
+                        TerminalPresentationMode::Plane3d
+                    };
+                    preset.mobius_source = None;
+                    params.camera_interaction.reset();
                     params.mobius_transition.stop();
                     params.selection.clear();
-                    params.redraw.request();
+                    continue;
+                }
+                BindingAction::TogglePersp3DMode => {
+                    let preset = params.camera_slots.active_mut();
+                    preset.mode = if preset.mode == TerminalPresentationMode::Perspective3d {
+                        TerminalPresentationMode::Flat2d
+                    } else {
+                        TerminalPresentationMode::Perspective3d
+                    };
+                    preset.mobius_source = None;
+                    params.camera_interaction.reset();
+                    params.mobius_transition.stop();
+                    params.selection.clear();
                     continue;
                 }
                 BindingAction::ToggleMobiusMode => {
-                    if params.presentation.mode == TerminalPresentationMode::Mobius3d {
-                        let current_zoom = if params.mobius_transition.active {
-                            params.mobius_transition.current_zoom()
-                        } else {
-                            params.plane_view.zoom
-                        };
-                        params
-                            .mobius_transition
-                            .begin_exit(&params.plane_view, current_zoom);
-                    } else {
-                        let previous_mode = params.presentation.mode;
-                        params.presentation.toggle_mobius_mode();
-                        params
-                            .mobius_transition
-                            .begin_enter(previous_mode, &params.plane_view);
-                    }
+                    toggle_mobius_presentation(
+                        &mut params.camera_slots,
+                        &mut params.camera_interaction,
+                        &mut params.mobius_transition,
+                    );
                     params.selection.clear();
-                    params.redraw.request();
                     continue;
                 }
                 BindingAction::ScrollPageUp
@@ -406,7 +483,7 @@ pub fn handle_keyboard_input(
                     };
 
                     let mouse_mode = params.runtime.parser.screen().mouse_protocol_mode();
-                    if params.presentation.mode == TerminalPresentationMode::Flat2d
+                    if params.camera_slots.active().mode == TerminalPresentationMode::Flat2d
                         && mouse_mode != MouseProtocolMode::None
                     {
                         let encoding = params.runtime.parser.screen().mouse_protocol_encoding();
@@ -506,6 +583,16 @@ pub fn handle_keyboard_input(
                     }
                     continue;
                 }
+                BindingAction::ActivateCameraSlot0
+                | BindingAction::ActivateCameraSlot1
+                | BindingAction::ActivateCameraSlot2
+                | BindingAction::ActivateCameraSlot3
+                | BindingAction::ActivateCameraSlot4
+                | BindingAction::ActivateCameraSlot5
+                | BindingAction::ActivateCameraSlot6
+                | BindingAction::ActivateCameraSlot7
+                | BindingAction::ActivateCameraSlot8
+                | BindingAction::ActivateCameraSlot9 => unreachable!("handled above"),
             }
         }
 
@@ -530,6 +617,57 @@ pub fn handle_keyboard_input(
             params.runtime.write_input(&input);
         }
     }
+}
+
+fn toggle_mobius_presentation(
+    camera_slots: &mut TerminalCameraSlots,
+    interaction: &mut TerminalCameraInteraction,
+    mobius_transition: &mut MobiusTransition,
+) {
+    let slot = camera_slots.active_slot();
+    let preset = *camera_slots.active();
+    if preset.mode == TerminalPresentationMode::Mobius3d {
+        let source = preset.mobius_source.unwrap_or(TerminalMobiusSource {
+            mode: TerminalPresentationMode::Plane3d,
+            pose: preset.pose,
+        });
+        if mobius_transition.active
+            && mobius_transition.direction == crate::scene::MobiusTransitionDirection::Exiting
+        {
+            // Toggling during an exit turns the animation back around; the
+            // preset is still Mobius, so restarting the exit here would lock
+            // out re-entry until the exit finished.
+            mobius_transition.begin_enter(
+                slot,
+                &source,
+                &preset.pose,
+                MobiusEnterZoomFloor::KeyboardTarget,
+            );
+        } else {
+            mobius_transition.prepare_source(slot, source.mode, &source.pose);
+            let current_zoom = if mobius_transition.active {
+                mobius_transition.current_zoom()
+            } else {
+                preset.pose.orthographic_scale
+            };
+            mobius_transition.begin_exit(slot, &preset.pose, current_zoom);
+        }
+    } else {
+        let source = TerminalMobiusSource {
+            mode: preset.mode,
+            pose: preset.pose,
+        };
+        mobius_transition.begin_enter(
+            slot,
+            &source,
+            &preset.pose,
+            MobiusEnterZoomFloor::KeyboardTarget,
+        );
+        let preset = camera_slots.active_mut();
+        preset.mobius_source = Some(source);
+        preset.mode = TerminalPresentationMode::Mobius3d;
+    }
+    interaction.reset();
 }
 
 fn is_scroll_action(action: BindingAction) -> bool {
@@ -977,42 +1115,42 @@ fn is_modifier_key(key: KeyCode) -> bool {
 
 fn parse_key_code(key: &str) -> Option<KeyCode> {
     match key.trim().to_ascii_lowercase().as_str() {
-        "a" => Some(KeyCode::KeyA),
-        "b" => Some(KeyCode::KeyB),
-        "c" => Some(KeyCode::KeyC),
-        "d" => Some(KeyCode::KeyD),
-        "e" => Some(KeyCode::KeyE),
-        "f" => Some(KeyCode::KeyF),
-        "g" => Some(KeyCode::KeyG),
-        "h" => Some(KeyCode::KeyH),
-        "i" => Some(KeyCode::KeyI),
-        "j" => Some(KeyCode::KeyJ),
-        "k" => Some(KeyCode::KeyK),
-        "l" => Some(KeyCode::KeyL),
-        "m" => Some(KeyCode::KeyM),
-        "n" => Some(KeyCode::KeyN),
-        "o" => Some(KeyCode::KeyO),
-        "p" => Some(KeyCode::KeyP),
-        "q" => Some(KeyCode::KeyQ),
-        "r" => Some(KeyCode::KeyR),
-        "s" => Some(KeyCode::KeyS),
-        "t" => Some(KeyCode::KeyT),
-        "u" => Some(KeyCode::KeyU),
-        "v" => Some(KeyCode::KeyV),
-        "w" => Some(KeyCode::KeyW),
-        "x" => Some(KeyCode::KeyX),
-        "y" => Some(KeyCode::KeyY),
-        "z" => Some(KeyCode::KeyZ),
-        "0" => Some(KeyCode::Digit0),
-        "1" => Some(KeyCode::Digit1),
-        "2" => Some(KeyCode::Digit2),
-        "3" => Some(KeyCode::Digit3),
-        "4" => Some(KeyCode::Digit4),
-        "5" => Some(KeyCode::Digit5),
-        "6" => Some(KeyCode::Digit6),
-        "7" => Some(KeyCode::Digit7),
-        "8" => Some(KeyCode::Digit8),
-        "9" => Some(KeyCode::Digit9),
+        "a" | "keya" => Some(KeyCode::KeyA),
+        "b" | "keyb" => Some(KeyCode::KeyB),
+        "c" | "keyc" => Some(KeyCode::KeyC),
+        "d" | "keyd" => Some(KeyCode::KeyD),
+        "e" | "keye" => Some(KeyCode::KeyE),
+        "f" | "keyf" => Some(KeyCode::KeyF),
+        "g" | "keyg" => Some(KeyCode::KeyG),
+        "h" | "keyh" => Some(KeyCode::KeyH),
+        "i" | "keyi" => Some(KeyCode::KeyI),
+        "j" | "keyj" => Some(KeyCode::KeyJ),
+        "k" | "keyk" => Some(KeyCode::KeyK),
+        "l" | "keyl" => Some(KeyCode::KeyL),
+        "m" | "keym" => Some(KeyCode::KeyM),
+        "n" | "keyn" => Some(KeyCode::KeyN),
+        "o" | "keyo" => Some(KeyCode::KeyO),
+        "p" | "keyp" => Some(KeyCode::KeyP),
+        "q" | "keyq" => Some(KeyCode::KeyQ),
+        "r" | "keyr" => Some(KeyCode::KeyR),
+        "s" | "keys" => Some(KeyCode::KeyS),
+        "t" | "keyt" => Some(KeyCode::KeyT),
+        "u" | "keyu" => Some(KeyCode::KeyU),
+        "v" | "keyv" => Some(KeyCode::KeyV),
+        "w" | "keyw" => Some(KeyCode::KeyW),
+        "x" | "keyx" => Some(KeyCode::KeyX),
+        "y" | "keyy" => Some(KeyCode::KeyY),
+        "z" | "keyz" => Some(KeyCode::KeyZ),
+        "0" | "digit0" => Some(KeyCode::Digit0),
+        "1" | "digit1" => Some(KeyCode::Digit1),
+        "2" | "digit2" => Some(KeyCode::Digit2),
+        "3" | "digit3" => Some(KeyCode::Digit3),
+        "4" | "digit4" => Some(KeyCode::Digit4),
+        "5" | "digit5" => Some(KeyCode::Digit5),
+        "6" | "digit6" => Some(KeyCode::Digit6),
+        "7" | "digit7" => Some(KeyCode::Digit7),
+        "8" | "digit8" => Some(KeyCode::Digit8),
+        "9" | "digit9" => Some(KeyCode::Digit9),
         "f1" => Some(KeyCode::F1),
         "f2" => Some(KeyCode::F2),
         "f3" => Some(KeyCode::F3),
@@ -1025,10 +1163,10 @@ fn parse_key_code(key: &str) -> Option<KeyCode> {
         "f10" => Some(KeyCode::F10),
         "f11" => Some(KeyCode::F11),
         "f12" => Some(KeyCode::F12),
-        "up" => Some(KeyCode::ArrowUp),
-        "down" => Some(KeyCode::ArrowDown),
-        "left" => Some(KeyCode::ArrowLeft),
-        "right" => Some(KeyCode::ArrowRight),
+        "up" | "arrowup" => Some(KeyCode::ArrowUp),
+        "down" | "arrowdown" => Some(KeyCode::ArrowDown),
+        "left" | "arrowleft" => Some(KeyCode::ArrowLeft),
+        "right" | "arrowright" => Some(KeyCode::ArrowRight),
         "enter" => Some(KeyCode::Enter),
         "tab" => Some(KeyCode::Tab),
         "space" => Some(KeyCode::Space),
@@ -1086,6 +1224,209 @@ fn ctrl_keycode_byte(key: KeyCode) -> Option<u8> {
         KeyCode::KeyY => Some(0x19),
         KeyCode::KeyZ => Some(0x1a),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod key_code_tests {
+    use super::*;
+
+    #[test]
+    fn parses_physical_key_names_from_default_config() {
+        assert_eq!(parse_key_code("Digit0"), Some(KeyCode::Digit0));
+        assert_eq!(parse_key_code("KeyP"), Some(KeyCode::KeyP));
+        assert_eq!(parse_key_code("ArrowUp"), Some(KeyCode::ArrowUp));
+    }
+
+    #[test]
+    fn default_camera_slot_bindings_cover_all_slots() {
+        let mut slots = default_bindings()
+            .into_iter()
+            .filter_map(|binding| binding.action.camera_slot())
+            .collect::<Vec<_>>();
+        slots.sort_unstable();
+        assert_eq!(slots, (0..10).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn default_bindings_have_no_duplicate_triggers() {
+        let bindings = default_bindings();
+        for (index, binding) in bindings.iter().enumerate() {
+            assert!(
+                bindings[index + 1..]
+                    .iter()
+                    .all(|other| !binding.same_trigger(other)),
+                "duplicate default trigger for {:?}",
+                binding.action
+            );
+        }
+    }
+
+    #[test]
+    fn camera_slot_zero_does_not_replace_font_reset() {
+        let bindings = TerminalKeyBindings {
+            bindings: default_bindings(),
+        };
+        let control_alt = BindingModifiers {
+            control: true,
+            alt: true,
+            ..default()
+        };
+        let control_alt_shift = BindingModifiers {
+            shift: true,
+            ..control_alt
+        };
+
+        assert_eq!(
+            bindings.action_for(KeyCode::Digit0, control_alt),
+            Some(BindingAction::ResetFontSize)
+        );
+        assert_eq!(
+            bindings.action_for(KeyCode::Digit0, control_alt_shift),
+            Some(BindingAction::ActivateCameraSlot0)
+        );
+    }
+
+    #[test]
+    fn distributed_camera_bindings_parse_without_trigger_collisions() {
+        let config: AppConfig =
+            toml::from_str(include_str!("../config/ratty.toml")).expect("distributed config");
+        let bindings = config
+            .bindings
+            .keys
+            .iter()
+            .map(|binding| KeyBinding::from_config(binding).expect("valid distributed binding"))
+            .collect::<Vec<_>>();
+
+        for (index, binding) in bindings.iter().enumerate() {
+            assert!(
+                bindings[index + 1..]
+                    .iter()
+                    .all(|other| !binding.same_trigger(other)),
+                "duplicate distributed trigger for {:?}",
+                binding.action
+            );
+        }
+        let mut slots = bindings
+            .iter()
+            .filter_map(|binding| binding.action.camera_slot())
+            .collect::<Vec<_>>();
+        slots.sort_unstable();
+        assert_eq!(slots, (0..10).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn mobius_exit_uses_the_active_slots_protocol_pose() {
+        use crate::camera::{
+            OptionalVec3, TerminalCameraUpdate, activate_terminal_camera_presets,
+            apply_terminal_camera_updates,
+        };
+
+        let mut app = App::new();
+        app.init_resource::<TerminalCameraSlots>()
+            .init_resource::<TerminalCameraInteraction>()
+            .init_resource::<MobiusTransition>()
+            .add_message::<TerminalCameraUpdate>()
+            .add_message::<ActivateTerminalCameraPreset>()
+            .add_systems(
+                Update,
+                (
+                    apply_terminal_camera_updates,
+                    activate_terminal_camera_presets,
+                )
+                    .chain(),
+            );
+        app.world_mut().write_message(TerminalCameraUpdate {
+            slot: 2,
+            activate: true,
+            mode: Some(TerminalPresentationMode::Mobius3d),
+            scale: Some(2.5),
+            fov: None,
+            translation: OptionalVec3 {
+                x: Some(12.0),
+                y: Some(-8.0),
+                z: Some(30.0),
+            },
+            rotation_degrees: OptionalVec3 {
+                x: Some(15.0),
+                y: Some(35.0),
+                z: None,
+            },
+        });
+        app.update();
+        app.world_mut()
+            .write_message(ActivateTerminalCameraPreset { slot: 1 });
+        app.update();
+        app.world_mut()
+            .write_message(ActivateTerminalCameraPreset { slot: 2 });
+        app.update();
+
+        let expected = *app.world().resource::<TerminalCameraSlots>().active();
+        let mut slots = app
+            .world_mut()
+            .remove_resource::<TerminalCameraSlots>()
+            .expect("camera slots");
+        let mut interaction = app
+            .world_mut()
+            .remove_resource::<TerminalCameraInteraction>()
+            .expect("camera interaction");
+        interaction.rotating = true;
+        let mut transition = app
+            .world_mut()
+            .remove_resource::<MobiusTransition>()
+            .expect("mobius transition");
+
+        toggle_mobius_presentation(&mut slots, &mut interaction, &mut transition);
+
+        assert!(transition.active);
+        assert!(matches!(
+            transition.direction,
+            crate::scene::MobiusTransitionDirection::Exiting
+        ));
+        assert!(transition.source_is_for(2));
+        assert_eq!(transition.source_mode, TerminalPresentationMode::Flat2d);
+        assert_eq!(transition.end_zoom, expected.pose.orthographic_scale);
+        assert_eq!(transition.end_translation, expected.pose.translation);
+        assert_eq!(transition.end_yaw, expected.pose.yaw);
+        assert_eq!(transition.end_pitch, expected.pose.pitch);
+        assert!(!interaction.rotating);
+    }
+
+    #[test]
+    fn mobius_toggle_during_exit_turns_back_into_mobius() {
+        use crate::scene::MobiusTransitionDirection;
+
+        let mut slots = TerminalCameraSlots::default();
+        let mut interaction = TerminalCameraInteraction::default();
+        let mut transition = MobiusTransition::default();
+
+        toggle_mobius_presentation(&mut slots, &mut interaction, &mut transition);
+        assert_eq!(slots.active().mode, TerminalPresentationMode::Mobius3d);
+        transition.stop();
+
+        toggle_mobius_presentation(&mut slots, &mut interaction, &mut transition);
+        assert!(matches!(
+            transition.direction,
+            MobiusTransitionDirection::Exiting
+        ));
+        transition.elapsed_secs =
+            MobiusTransition::VIEW_RESET_SECS + MobiusTransition::MORPH_SECS * 0.5;
+        let morph_before = transition.morph_progress();
+
+        toggle_mobius_presentation(&mut slots, &mut interaction, &mut transition);
+
+        assert!(transition.active);
+        assert!(matches!(
+            transition.direction,
+            MobiusTransitionDirection::Entering
+        ));
+        assert!((transition.morph_progress() - morph_before).abs() < 1e-6);
+        assert_eq!(slots.active().mode, TerminalPresentationMode::Mobius3d);
+        assert_eq!(
+            slots.active().mobius_source.expect("Mobius source").mode,
+            TerminalPresentationMode::Flat2d
+        );
+        assert_eq!(transition.source_mode, TerminalPresentationMode::Flat2d);
     }
 }
 

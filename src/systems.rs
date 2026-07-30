@@ -2,19 +2,19 @@
 //!
 //! These systems are scheduled from [`crate::plugin::TerminalPlugin`] in a mostly linear flow:
 //!
-//! - [`pump_pty_output`]
-//! - [`crate::keyboard::handle_keyboard_input`]
-//! - [`crate::mouse::handle_mouse_input`]
-//! - [`handle_window_resize`]
-//! - [`crate::scene::apply_terminal_presentation`]
-//! - [`apply_inline_objects`]
-//! - [`render_terminal_widget`]
-//! - [`sync_inline_objects`]
-//! - [`animate_inline_kitty_planes`]
-//! - [`sync_rgp_objects`]
-//! - [`apply_instance_brightness`]
-//! - [`animate_terminal_plane_warp`]
-//! - [`sync_asset_to_terminal_cursor`]
+//! - `pump_pty_output`
+//! - `keyboard::handle_keyboard_input`
+//! - `mouse::handle_mouse_input`
+//! - `handle_window_resize`
+//! - `scene::apply_terminal_presentation`
+//! - `apply_inline_objects`
+//! - `render_terminal_widget`
+//! - `sync_inline_objects`
+//! - `animate_inline_kitty_planes`
+//! - `sync_rgp_objects`
+//! - `apply_instance_brightness`
+//! - `animate_terminal_plane_warp`
+//! - `sync_asset_to_terminal_cursor`
 //!
 //! The redraw path updates the terminal texture and presentation state first, then the inline
 //! object systems rebuild or reposition scene entities that depend on the terminal grid.
@@ -22,6 +22,9 @@
 use std::collections::HashMap;
 use std::sync::mpsc::TryRecvError;
 
+use crate::camera::{
+    MIN_ORTHOGRAPHIC_SCALE, TerminalCameraSlots, TerminalCameraUpdate, TerminalMobiusSource,
+};
 use crate::config::{AppConfig, CURSOR_DEPTH};
 use crate::direct_render::DirectTerminalSceneExchange;
 use crate::inline::{
@@ -36,9 +39,8 @@ use crate::rendering::{sync_plane_texture, sync_terminal_debug_image};
 use crate::runtime::TerminalRuntime;
 use crate::scene::{
     MobiusTransition, ModelLoadState, TerminalPlane, TerminalPlaneBack,
-    TerminalPlaneBackLayoutQuery, TerminalPlaneLayoutQuery, TerminalPlaneMeshes, TerminalPlaneView,
-    TerminalPlaneWarp, TerminalPresentation, TerminalPresentationMode, TerminalViewport,
-    sync_terminal_layout,
+    TerminalPlaneBackLayoutQuery, TerminalPlaneLayoutQuery, TerminalPlaneMeshes, TerminalPlaneWarp,
+    TerminalPresentationMode, TerminalViewport, sync_terminal_layout,
 };
 use crate::terminal::{
     TerminalRedrawState, TerminalSurface, TerminalWidget, render_scale_for_window,
@@ -46,6 +48,7 @@ use crate::terminal::{
 use crate::vtshim::Screen;
 use bevy::app::AppExit;
 use bevy::asset::AssetMut;
+use bevy::camera::visibility::NoFrustumCulling;
 use bevy::ecs::message::{MessageReader, MessageWriter};
 use bevy::ecs::system::SystemParam;
 use bevy::gltf::GltfAssetLabel;
@@ -71,6 +74,7 @@ struct InlineLayout {
 
 struct KittyRenderContext<'a> {
     mode: TerminalPresentationMode,
+    mobius_progress: f32,
     warp_amount: f32,
     elapsed_secs: f32,
     materials: &'a mut Assets<StandardMaterial>,
@@ -147,7 +151,7 @@ pub(crate) fn shutdown_terminal_runtime_on_exit(
 
 /// Pumps PTY output into the terminal parser.
 ///
-/// This runs early in the update schedule, before [`render_terminal_widget`]. It drains PTY output
+/// This runs early in the update schedule, before `render_terminal_widget`. It drains PTY output
 /// from [`TerminalRuntime`], feeds it through [`TerminalInlineObjects::consume_pty_output`] and
 /// requests a redraw through [`TerminalRedrawState`] when terminal state changed.
 ///
@@ -156,6 +160,7 @@ pub(crate) fn shutdown_terminal_runtime_on_exit(
 pub fn pump_pty_output(
     mut runtime: ResMut<TerminalRuntime>,
     mut inline_objects: ResMut<TerminalInlineObjects>,
+    mut camera_update_writer: MessageWriter<TerminalCameraUpdate>,
     mut app_exit: MessageWriter<AppExit>,
     mut redraw: ResMut<TerminalRedrawState>,
 ) {
@@ -165,6 +170,7 @@ pub fn pump_pty_output(
     };
 
     let mut processed_output = false;
+    let mut camera_updates = Vec::new();
     loop {
         match runtime.try_recv() {
             Ok(chunk) => {
@@ -175,7 +181,15 @@ pub fn pump_pty_output(
                 } else {
                     None
                 };
-                let mut replies = inline_objects.consume_pty_output(&chunk, &mut runtime.parser);
+                let mut replies = inline_objects.consume_pty_output(
+                    &chunk,
+                    &mut runtime.parser,
+                    &mut camera_updates,
+                    &mut processed_output,
+                );
+                for update in camera_updates.drain(..) {
+                    camera_update_writer.write(update);
+                }
                 replies.extend(runtime.parser.take_replies());
                 for reply in replies {
                     runtime.write_input(&reply);
@@ -186,7 +200,6 @@ pub fn pump_pty_output(
                     inline_objects.apply_scroll(scrolled);
                 }
                 inline_objects.refresh_placeholder_anchors(&runtime.parser.screen());
-                processed_output = true;
             }
             Err(TryRecvError::Empty) => break,
             Err(TryRecvError::Disconnected) => {
@@ -288,11 +301,11 @@ pub(crate) fn handle_window_resize(
 
 /// Applies inline object visibility for the current presentation mode.
 ///
-/// This runs after [`crate::scene::apply_terminal_presentation`] and only flips scene visibility.
+/// This runs after `scene::apply_terminal_presentation` and only flips scene visibility.
 /// [`TerminalInlineObjectSprite`] entities are shown in [`TerminalPresentationMode::Flat2d`], while
 /// [`TerminalInlineObjectPlane`] entities are shown in the 3D presentation modes.
 pub fn apply_inline_objects(
-    presentation: Res<TerminalPresentation>,
+    camera_slots: Res<TerminalCameraSlots>,
     mut sprite_query: Query<&mut Visibility, With<TerminalInlineObjectSprite>>,
     mut plane_query: Query<
         &mut Visibility,
@@ -302,24 +315,26 @@ pub fn apply_inline_objects(
         ),
     >,
 ) {
-    let sprite_visibility = match presentation.mode {
-        TerminalPresentationMode::Flat2d => Visibility::Visible,
-        TerminalPresentationMode::Plane3d | TerminalPresentationMode::Mobius3d => {
-            Visibility::Hidden
-        }
+    let sprite_visibility = if camera_slots.active().mode.is_3d() {
+        Visibility::Hidden
+    } else {
+        Visibility::Visible
     };
-    let plane_visibility = match presentation.mode {
-        TerminalPresentationMode::Flat2d => Visibility::Hidden,
-        TerminalPresentationMode::Plane3d | TerminalPresentationMode::Mobius3d => {
-            Visibility::Visible
-        }
+    let plane_visibility = if camera_slots.active().mode.is_3d() {
+        Visibility::Visible
+    } else {
+        Visibility::Hidden
     };
 
     for mut visibility in &mut sprite_query {
-        *visibility = sprite_visibility;
+        if *visibility != sprite_visibility {
+            *visibility = sprite_visibility;
+        }
     }
     for mut visibility in &mut plane_query {
-        *visibility = plane_visibility;
+        if *visibility != plane_visibility {
+            *visibility = plane_visibility;
+        }
     }
 }
 
@@ -409,7 +424,7 @@ pub(crate) fn render_terminal_widget(mut params: RenderWidgetParams) {
 pub(crate) struct SyncMaterialsParams<'w, 's> {
     runtime: Res<'w, TerminalRuntime>,
     terminal: Res<'w, TerminalSurface>,
-    presentation: Res<'w, TerminalPresentation>,
+    camera_slots: Res<'w, TerminalCameraSlots>,
     images: ResMut<'w, Assets<Image>>,
     materials: ResMut<'w, Assets<StandardMaterial>>,
     plane_materials: Query<'w, 's, &'static MeshMaterial3d<StandardMaterial>, With<TerminalPlane>>,
@@ -425,7 +440,7 @@ pub(crate) fn sync_terminal_materials(mut params: SyncMaterialsParams) {
     let SyncMaterialsParams {
         runtime,
         terminal,
-        presentation,
+        camera_slots,
         images,
         materials,
         plane_materials,
@@ -452,10 +467,7 @@ pub(crate) fn sync_terminal_materials(mut params: SyncMaterialsParams) {
         }
     }
 
-    let in_3d = matches!(
-        presentation.mode,
-        TerminalPresentationMode::Plane3d | TerminalPresentationMode::Mobius3d
-    );
+    let in_3d = camera_slots.active().mode.is_3d();
     if in_3d {
         sync_terminal_debug_image(terminal, images, &runtime.parser.screen());
     }
@@ -531,7 +543,8 @@ pub(crate) struct SyncInlineParams<'w, 's> {
     inline_objects: ResMut<'w, TerminalInlineObjects>,
     terminal: Res<'w, TerminalSurface>,
     viewport: Res<'w, TerminalViewport>,
-    presentation: Res<'w, TerminalPresentation>,
+    camera_slots: Res<'w, TerminalCameraSlots>,
+    mobius_transition: Res<'w, MobiusTransition>,
     plane_warp: Res<'w, TerminalPlaneWarp>,
     time: Res<'w, Time>,
     plane_query: Query<'w, 's, (Entity, &'static Transform), With<TerminalPlane>>,
@@ -559,7 +572,8 @@ pub(crate) fn sync_inline_objects(mut params: SyncInlineParams) {
         inline_objects,
         terminal,
         viewport,
-        presentation,
+        camera_slots,
+        mobius_transition,
         plane_warp,
         time,
         plane_query,
@@ -616,7 +630,11 @@ pub(crate) fn sync_inline_objects(mut params: SyncInlineParams) {
         match object {
             InlineObject::KittyImage(object) => {
                 let mut ctx = KittyRenderContext {
-                    mode: presentation.mode,
+                    mode: camera_slots.active().mode,
+                    mobius_progress: active_mobius_progress(
+                        camera_slots.active().mode,
+                        mobius_transition,
+                    ),
                     warp_amount: plane_warp.amount,
                     elapsed_secs,
                     materials,
@@ -708,24 +726,16 @@ fn sync_kitty_inline_image(
         TerminalInlineObjectSprite,
         sprite,
         Transform::from_translation(Vec3::new(layout.center_x, layout.center_y, 5.0)),
-        match ctx.mode {
-            TerminalPresentationMode::Flat2d => Visibility::Visible,
-            TerminalPresentationMode::Plane3d | TerminalPresentationMode::Mobius3d => {
-                Visibility::Hidden
-            }
+        if ctx.mode.is_3d() {
+            Visibility::Hidden
+        } else {
+            Visibility::Visible
         },
     ));
 
     let plane_layout = inline_kitty_plane_layout(layout);
-    let (mesh_handle, material_handle) = ensure_kitty_plane_assets(
-        object,
-        &plane_layout,
-        &image_handle,
-        ctx.warp_amount,
-        ctx.elapsed_secs,
-        ctx.materials,
-        ctx.meshes,
-    );
+    let (mesh_handle, material_handle) =
+        ensure_kitty_plane_assets(object, &plane_layout, &image_handle, ctx);
     ctx.plane_children.push(
         commands
             .spawn((
@@ -734,6 +744,9 @@ fn sync_kitty_inline_image(
                 Mesh3d(mesh_handle),
                 MeshMaterial3d(material_handle),
                 Transform::default(),
+                // Warp and Mobius morphing move the vertices far outside the
+                // AABB cached at spawn, like the terminal planes.
+                NoFrustumCulling,
             ))
             .id(),
     );
@@ -754,28 +767,25 @@ fn ensure_kitty_plane_assets(
     object: &mut crate::inline::KittyInlineObject,
     layout: &InlineKittyPlaneLayout,
     image_handle: &Handle<Image>,
-    warp_amount: f32,
-    elapsed_secs: f32,
-    materials: &mut Assets<StandardMaterial>,
-    meshes: &mut Assets<Mesh>,
+    ctx: &mut KittyRenderContext<'_>,
 ) -> (Handle<Mesh>, Handle<StandardMaterial>) {
     let needs_rebuild = object.plane.as_ref().is_none_or(|cache| {
         cache.x_segments != layout.x_segments || cache.y_segments != layout.y_segments
     });
     if needs_rebuild {
         if let Some(cache) = object.plane.take() {
-            meshes.remove(&cache.mesh);
-            materials.remove(&cache.material);
+            ctx.meshes.remove(&cache.mesh);
+            ctx.materials.remove(&cache.material);
         }
-        let mesh = build_kitty_plane_mesh(layout, warp_amount, elapsed_secs);
-        let mesh_handle = meshes.add(mesh);
-        let material_handle = materials.add(StandardMaterial {
-            base_color: Color::WHITE,
-            base_color_texture: Some(image_handle.clone()),
-            alpha_mode: AlphaMode::Blend,
-            unlit: true,
-            ..default()
-        });
+        let mesh = build_kitty_plane_mesh(
+            layout,
+            ctx.mode,
+            ctx.warp_amount,
+            ctx.elapsed_secs,
+            ctx.mobius_progress,
+        );
+        let mesh_handle = ctx.meshes.add(mesh);
+        let material_handle = ctx.materials.add(kitty_plane_material(image_handle));
         object.plane = Some(crate::inline::KittyPlaneCache {
             x_segments: layout.x_segments,
             y_segments: layout.y_segments,
@@ -786,19 +796,39 @@ fn ensure_kitty_plane_assets(
     }
 
     let cache = object.plane.as_mut().expect("plane cache should exist");
-    if let Some(mut mesh) = meshes.get_mut(&cache.mesh) {
-        write_kitty_plane_positions(&mut mesh, layout, warp_amount, elapsed_secs);
+    if let Some(mut mesh) = ctx.meshes.get_mut(&cache.mesh) {
+        write_kitty_plane_positions(
+            &mut mesh,
+            layout,
+            ctx.mode,
+            ctx.warp_amount,
+            ctx.elapsed_secs,
+            ctx.mobius_progress,
+        );
     }
-    if let Some(mut material) = materials.get_mut(&cache.material) {
+    if let Some(mut material) = ctx.materials.get_mut(&cache.material) {
         material.base_color_texture = Some(image_handle.clone());
     }
     (cache.mesh.clone(), cache.material.clone())
 }
 
+fn kitty_plane_material(image_handle: &Handle<Image>) -> StandardMaterial {
+    StandardMaterial {
+        base_color: Color::WHITE,
+        base_color_texture: Some(image_handle.clone()),
+        alpha_mode: AlphaMode::Blend,
+        cull_mode: None,
+        unlit: true,
+        ..default()
+    }
+}
+
 fn build_kitty_plane_mesh(
     layout: &InlineKittyPlaneLayout,
+    mode: TerminalPresentationMode,
     warp_amount: f32,
     elapsed_secs: f32,
+    mobius_progress: f32,
 ) -> Mesh {
     let vertex_count = ((layout.x_segments + 1) * (layout.y_segments + 1)) as usize;
     let mut positions = Vec::with_capacity(vertex_count);
@@ -812,11 +842,7 @@ fn build_kitty_plane_mesh(
         for x in 0..=layout.x_segments {
             let u = x as f32 / layout.x_segments as f32;
             let px = layout.local_x + (u - 0.5) * layout.local_width;
-            positions.push([
-                px,
-                py,
-                plane_surface_z(px, py, warp_amount, elapsed_secs) + 1.5,
-            ]);
+            positions.push([px, py, 0.0]);
             uvs.push([u, v]);
         }
     }
@@ -833,21 +859,32 @@ fn build_kitty_plane_mesh(
         }
     }
 
-    Mesh::new(
+    let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
         bevy::asset::RenderAssetUsages::default(),
     )
     .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
     .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
     .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
-    .with_inserted_indices(Indices::U32(indices))
+    .with_inserted_indices(Indices::U32(indices));
+    write_kitty_plane_positions(
+        &mut mesh,
+        layout,
+        mode,
+        warp_amount,
+        elapsed_secs,
+        mobius_progress,
+    );
+    mesh
 }
 
 fn write_kitty_plane_positions(
     mesh: &mut Mesh,
     layout: &InlineKittyPlaneLayout,
+    mode: TerminalPresentationMode,
     warp_amount: f32,
     elapsed_secs: f32,
+    mobius_progress: f32,
 ) {
     let Some(VertexAttributeValues::Float32x3(positions)) =
         mesh.attribute_mut(Mesh::ATTRIBUTE_POSITION)
@@ -863,11 +900,16 @@ fn write_kitty_plane_positions(
             let u = x as f32 / layout.x_segments as f32;
             let px = layout.local_x + (u - 0.5) * layout.local_width;
             if index < positions.len() {
-                positions[index] = [
+                let point = plane_surface_point(
+                    mode,
                     px,
                     py,
-                    plane_surface_z(px, py, warp_amount, elapsed_secs) + 1.5,
-                ];
+                    warp_amount,
+                    elapsed_secs,
+                    1.5,
+                    mobius_progress,
+                );
+                positions[index] = point.to_array();
             }
             index += 1;
         }
@@ -879,26 +921,65 @@ fn write_kitty_plane_positions(
 /// This runs after [`sync_inline_objects`] and updates cached plane mesh positions in place when
 /// warp is active, instead of rebuilding inline entities every frame.
 pub(crate) fn animate_inline_kitty_planes(
-    presentation: Res<TerminalPresentation>,
+    camera_slots: Res<TerminalCameraSlots>,
+    mobius_transition: Res<MobiusTransition>,
     warp: Res<TerminalPlaneWarp>,
     time: Res<Time>,
+    mut previous_mode: Local<Option<TerminalPresentationMode>>,
     query: Query<(&InlineKittyPlaneLayout, &Mesh3d), With<TerminalInlineObjectPlane>>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
-    if !matches!(
-        presentation.mode,
-        TerminalPresentationMode::Plane3d | TerminalPresentationMode::Mobius3d
-    ) || warp.amount <= 0.0
-    {
+    let mode = camera_slots.active().mode;
+    let mode_changed = previous_mode.as_ref() != Some(&mode);
+    *previous_mode = Some(mode);
+    if !should_animate_inline_kitty_planes(
+        mode,
+        warp.amount,
+        warp.is_changed(),
+        mode_changed,
+        mobius_transition.active,
+        mobius_transition.is_changed(),
+    ) {
         return;
     }
 
     let elapsed_secs = time.elapsed_secs();
+    let mobius_progress = active_mobius_progress(mode, &mobius_transition);
     for (layout, mesh3d) in query.iter() {
         let Some(mut mesh) = meshes.get_mut(&mesh3d.0) else {
             continue;
         };
-        write_kitty_plane_positions(&mut mesh, layout, warp.amount, elapsed_secs);
+        write_kitty_plane_positions(
+            &mut mesh,
+            layout,
+            mode,
+            warp.amount,
+            elapsed_secs,
+            mobius_progress,
+        );
+    }
+}
+
+fn should_animate_inline_kitty_planes(
+    mode: TerminalPresentationMode,
+    warp_amount: f32,
+    warp_changed: bool,
+    mode_changed: bool,
+    mobius_transition_active: bool,
+    mobius_transition_changed: bool,
+) -> bool {
+    match mode {
+        TerminalPresentationMode::Flat2d => false,
+        TerminalPresentationMode::Plane3d | TerminalPresentationMode::Perspective3d => {
+            mode_changed || warp_changed || warp_amount > 0.0
+        }
+        TerminalPresentationMode::Mobius3d => {
+            mode_changed
+                || mobius_transition_active
+                || mobius_transition_changed
+                || warp_changed
+                || warp_amount > 0.0
+        }
     }
 }
 
@@ -1060,7 +1141,7 @@ pub(crate) struct RgpSyncParams<'w, 's> {
     app_config: Res<'w, AppConfig>,
     terminal: Res<'w, TerminalSurface>,
     viewport: Res<'w, TerminalViewport>,
-    presentation: Res<'w, TerminalPresentation>,
+    camera_slots: Res<'w, TerminalCameraSlots>,
     mobius_transition: Res<'w, MobiusTransition>,
     plane_warp: Res<'w, TerminalPlaneWarp>,
     time: Res<'w, Time>,
@@ -1090,7 +1171,7 @@ pub(crate) fn sync_rgp_objects(mut params: RgpSyncParams) {
         app_config,
         terminal,
         viewport,
-        presentation,
+        camera_slots,
         mobius_transition,
         plane_warp,
         time,
@@ -1101,7 +1182,8 @@ pub(crate) fn sync_rgp_objects(mut params: RgpSyncParams) {
     let cell_width = viewport.size.x / terminal.cols.max(1) as f32;
     let cell_height = viewport.size.y / terminal.rows.max(1) as f32;
     let elapsed_secs = time.elapsed_secs();
-    let mobius_progress = active_mobius_progress(presentation.mode, mobius_transition);
+    let mode = camera_slots.active().mode;
+    let mobius_progress = active_mobius_progress(mode, mobius_transition);
 
     for (object, mut transform, mut visibility) in query.iter_mut() {
         let Some(anchor) = inline_objects.anchors.get(&object.object_id) else {
@@ -1142,39 +1224,35 @@ pub(crate) fn sync_rgp_objects(mut params: RgpSyncParams) {
         let object_rotation = base_oblique * explicit_rotation * animated_rotation;
         let object_scale = Vec3::splat(scale) * scale3;
 
-        match presentation.mode {
-            TerminalPresentationMode::Flat2d => {
-                transform.translation = Vec3::new(
-                    layout.center_x
-                        + anchor.style.offset.x * (terminal.pixmap_dimensions().x as f32),
-                    layout.center_y
-                        + bob
-                        + anchor.style.offset.y * (terminal.pixmap_dimensions().y as f32),
-                    CURSOR_DEPTH + anchor.style.depth * 4.0 + anchor.style.offset.z,
-                );
-                transform.rotation = object_rotation;
-                transform.scale = object_scale;
-                *visibility = Visibility::Visible;
-            }
-            TerminalPresentationMode::Plane3d | TerminalPresentationMode::Mobius3d => {
-                let Ok(plane_transform) = plane_query.single() else {
-                    *visibility = Visibility::Hidden;
-                    continue;
-                };
-                let local_position = plane_surface_point(
-                    presentation.mode,
-                    layout.local_x,
-                    layout.local_y,
-                    plane_warp.amount,
-                    elapsed_secs,
-                    8.0 + anchor.style.depth * 1.5,
-                    mobius_progress,
-                ) + anchor.style.offset;
-                transform.translation = plane_transform.transform_point(local_position);
-                transform.rotation = plane_transform.rotation * object_rotation;
-                transform.scale = object_scale;
-                *visibility = Visibility::Visible;
-            }
+        if mode.is_3d() {
+            let Ok(plane_transform) = plane_query.single() else {
+                *visibility = Visibility::Hidden;
+                continue;
+            };
+            let local_position = plane_surface_point(
+                mode,
+                layout.local_x,
+                layout.local_y,
+                plane_warp.amount,
+                elapsed_secs,
+                8.0 + anchor.style.depth * 1.5,
+                mobius_progress,
+            ) + anchor.style.offset;
+            transform.translation = plane_transform.transform_point(local_position);
+            transform.rotation = plane_transform.rotation * object_rotation;
+            transform.scale = object_scale;
+            *visibility = Visibility::Visible;
+        } else {
+            transform.translation = Vec3::new(
+                layout.center_x + anchor.style.offset.x * (terminal.pixmap_dimensions().x as f32),
+                layout.center_y
+                    + bob
+                    + anchor.style.offset.y * (terminal.pixmap_dimensions().y as f32),
+                CURSOR_DEPTH + anchor.style.depth * 4.0 + anchor.style.offset.z,
+            );
+            transform.rotation = object_rotation;
+            transform.scale = object_scale;
+            *visibility = Visibility::Visible;
         }
     }
 }
@@ -1221,6 +1299,7 @@ pub(crate) fn apply_instance_brightness(mut params: BrightnessParams) {
         materials,
         commands,
     } = &mut params;
+
     if material_query.is_empty() {
         return;
     }
@@ -1397,57 +1476,82 @@ fn extrude_mesh(mesh: Mesh, depth: f32) -> Mesh {
 /// even when the terminal contents are otherwise static.
 pub fn animate_terminal_plane_warp(
     time: Res<Time>,
-    presentation: Res<TerminalPresentation>,
+    camera_slots: Res<TerminalCameraSlots>,
     mobius_transition: Res<MobiusTransition>,
     warp: Res<TerminalPlaneWarp>,
     plane_meshes: Res<TerminalPlaneMeshes>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
-    if presentation.mode == TerminalPresentationMode::Flat2d {
+    let mode = camera_slots.active().mode;
+    if mode == TerminalPresentationMode::Flat2d {
         return;
     }
 
-    let needs_update = match presentation.mode {
-        TerminalPresentationMode::Flat2d => false,
-        TerminalPresentationMode::Plane3d => {
-            presentation.is_changed() || warp.is_changed() || warp.amount > 0.0
-        }
-        // Reapply the strip every frame so mode switches and time-based motion are visible.
-        TerminalPresentationMode::Mobius3d => true,
-    };
+    let needs_update = should_animate_terminal_plane_warp(
+        mode,
+        warp.amount,
+        camera_slots.is_changed() || warp.is_changed(),
+        mobius_transition.active,
+        mobius_transition.is_changed(),
+    );
     if !needs_update {
         return;
     }
 
-    let pulse = warp.amount * (0.96 + 0.04 * (time.elapsed_secs() * 2.2).sin());
-    let mobius_progress = active_mobius_progress(presentation.mode, &mobius_transition);
+    let mobius_progress = active_mobius_progress(mode, &mobius_transition);
     apply_plane_warp(
         meshes.get_mut(&plane_meshes.front),
-        presentation.mode,
-        pulse,
-        time.elapsed_secs(),
-        -1.0,
-        mobius_progress,
-    );
-    apply_plane_warp(
-        meshes.get_mut(&plane_meshes.back),
-        presentation.mode,
-        pulse,
+        mode,
+        warp.amount,
         time.elapsed_secs(),
         1.0,
         mobius_progress,
     );
+    // The back sheet is hidden in Mobius mode; skipping it avoids uploading a
+    // mesh nothing renders.
+    if !mode.is_mobius() {
+        apply_plane_warp(
+            meshes.get_mut(&plane_meshes.back),
+            mode,
+            warp.amount,
+            time.elapsed_secs(),
+            -1.0,
+            mobius_progress,
+        );
+    }
+}
+
+fn should_animate_terminal_plane_warp(
+    mode: TerminalPresentationMode,
+    warp_amount: f32,
+    state_changed: bool,
+    mobius_transition_active: bool,
+    mobius_transition_changed: bool,
+) -> bool {
+    match mode {
+        TerminalPresentationMode::Flat2d => false,
+        TerminalPresentationMode::Plane3d | TerminalPresentationMode::Perspective3d => {
+            state_changed || warp_amount > 0.0
+        }
+        // A settled strip with no warp is time-invariant; transition frames
+        // (including the finish frame, via change detection) and mode or pose
+        // changes still reapply it.
+        TerminalPresentationMode::Mobius3d => {
+            state_changed
+                || warp_amount > 0.0
+                || mobius_transition_active
+                || mobius_transition_changed
+        }
+    }
 }
 
 /// Advances the Mobius transition and restores normal 3D interaction when it completes.
 pub fn animate_mobius_transition(
     time: Res<Time>,
-    mut presentation: ResMut<TerminalPresentation>,
+    mut camera_slots: ResMut<TerminalCameraSlots>,
     mut mobius_transition: ResMut<MobiusTransition>,
-    mut plane_view: ResMut<TerminalPlaneView>,
-    mut redraw: ResMut<TerminalRedrawState>,
 ) {
-    if presentation.mode != TerminalPresentationMode::Mobius3d {
+    if camera_slots.active().mode != TerminalPresentationMode::Mobius3d {
         mobius_transition.stop();
         return;
     }
@@ -1457,18 +1561,28 @@ pub fn animate_mobius_transition(
     }
 
     mobius_transition.elapsed_secs += time.delta_secs();
-    redraw.request();
 
     if mobius_transition.finished() {
-        plane_view.zoom = mobius_transition.end_zoom.max(0.1);
         if mobius_transition.direction == crate::scene::MobiusTransitionDirection::Exiting {
-            plane_view.yaw = mobius_transition.source_yaw;
-            plane_view.pitch = mobius_transition.source_pitch;
-            plane_view.camera_offset = mobius_transition.source_camera_offset;
-            presentation.mode = mobius_transition.source_mode;
+            let preset = camera_slots.active_mut();
+            let mut fallback_pose = preset.pose;
+            fallback_pose.orthographic_scale = mobius_transition.source_zoom;
+            fallback_pose.yaw = mobius_transition.source_yaw;
+            fallback_pose.pitch = mobius_transition.source_pitch;
+            fallback_pose.roll = mobius_transition.source_roll;
+            fallback_pose.translation = mobius_transition.source_translation;
+            let source = preset.mobius_source.unwrap_or(TerminalMobiusSource {
+                mode: mobius_transition.source_mode,
+                pose: fallback_pose,
+            });
+            preset.mode = source.mode;
+            preset.pose = source.pose;
+            preset.mobius_source = None;
+        } else {
+            camera_slots.active_mut().pose.orthographic_scale =
+                mobius_transition.end_zoom.max(MIN_ORTHOGRAPHIC_SCALE);
         }
         mobius_transition.stop();
-        redraw.request();
     }
 }
 
@@ -1490,7 +1604,7 @@ fn active_mobius_progress(
 fn apply_plane_warp(
     mesh: Option<AssetMut<'_, Mesh>>,
     mode: TerminalPresentationMode,
-    pulse: f32,
+    warp_amount: f32,
     elapsed_secs: f32,
     direction: f32,
     mobius_progress: f32,
@@ -1511,13 +1625,20 @@ fn apply_plane_warp(
     for (position, uv) in positions.iter_mut().zip(uvs.iter()) {
         let x = uv[0] - 0.5;
         let y = 0.5 - uv[1];
-        let point = plane_surface_point(mode, x, y, pulse, elapsed_secs, 0.0, mobius_progress);
+        let point =
+            plane_surface_point(mode, x, y, warp_amount, elapsed_secs, 0.0, mobius_progress);
         position[0] = point.x;
         position[1] = point.y;
-        position[2] = match mode {
-            TerminalPresentationMode::Plane3d => point.z * direction,
-            TerminalPresentationMode::Flat2d | TerminalPresentationMode::Mobius3d => point.z,
-        };
+        position[2] = oriented_plane_depth(mode, point.z, direction);
+    }
+}
+
+fn oriented_plane_depth(mode: TerminalPresentationMode, depth: f32, direction: f32) -> f32 {
+    match mode {
+        TerminalPresentationMode::Plane3d | TerminalPresentationMode::Perspective3d => {
+            depth * direction
+        }
+        TerminalPresentationMode::Flat2d | TerminalPresentationMode::Mobius3d => depth,
     }
 }
 
@@ -1528,7 +1649,7 @@ pub(crate) struct CursorSyncParams<'w, 's> {
     runtime: Res<'w, TerminalRuntime>,
     terminal: Res<'w, TerminalSurface>,
     viewport: Res<'w, TerminalViewport>,
-    presentation: Res<'w, TerminalPresentation>,
+    camera_slots: Res<'w, TerminalCameraSlots>,
     mobius_transition: Res<'w, MobiusTransition>,
     plane_warp: Res<'w, TerminalPlaneWarp>,
     time: Res<'w, Time>,
@@ -1550,7 +1671,7 @@ pub(crate) fn sync_asset_to_terminal_cursor(mut params: CursorSyncParams) {
         runtime,
         terminal,
         viewport,
-        presentation,
+        camera_slots,
         mobius_transition,
         plane_warp,
         time,
@@ -1565,9 +1686,9 @@ pub(crate) fn sync_asset_to_terminal_cursor(mut params: CursorSyncParams) {
         runtime,
         terminal,
         viewport,
-        mode: presentation.mode,
+        mode: camera_slots.active().mode,
         plane_warp_amount: plane_warp.amount,
-        mobius_progress: active_mobius_progress(presentation.mode, mobius_transition),
+        mobius_progress: active_mobius_progress(camera_slots.active().mode, mobius_transition),
         elapsed_secs: time.elapsed_secs(),
         plane_query,
     };
@@ -1609,8 +1730,8 @@ fn cursor_pose(
         0.0
     };
 
-    let (translation, rotation, visibility) = match ctx.mode {
-        TerminalPresentationMode::Flat2d => (
+    let (translation, rotation, visibility) = if !ctx.mode.is_3d() {
+        (
             Vec3::new(local_x, local_y + bob, CURSOR_DEPTH),
             Quat::from_rotation_y(spin) * Quat::from_rotation_x(-0.25),
             if !app_config.cursor.model.visible || screen.hide_cursor() {
@@ -1618,33 +1739,31 @@ fn cursor_pose(
             } else {
                 Visibility::Visible
             },
-        ),
-        TerminalPresentationMode::Plane3d | TerminalPresentationMode::Mobius3d => {
-            let Ok(plane_transform) = ctx.plane_query.single() else {
-                return (Vec3::ZERO, Quat::IDENTITY, scale, Visibility::Hidden);
-            };
-            let plane_local_x = cursor_x / cols - 0.5;
-            let plane_local_y = 0.5 - (cursor_row + 0.5) / rows + plane_bob;
-            let local_position = plane_surface_point(
-                ctx.mode,
-                plane_local_x,
-                plane_local_y,
-                ctx.plane_warp_amount,
-                ctx.elapsed_secs,
-                app_config.cursor.model.plane_offset,
-                ctx.mobius_progress,
-            );
-            (
-                plane_transform.transform_point(local_position),
-                plane_transform.rotation
-                    * (Quat::from_rotation_y(spin) * Quat::from_rotation_x(-0.25)),
-                if app_config.cursor.model.visible {
-                    Visibility::Visible
-                } else {
-                    Visibility::Hidden
-                },
-            )
-        }
+        )
+    } else {
+        let Ok(plane_transform) = ctx.plane_query.single() else {
+            return (Vec3::ZERO, Quat::IDENTITY, scale, Visibility::Hidden);
+        };
+        let plane_local_x = cursor_x / cols - 0.5;
+        let plane_local_y = 0.5 - (cursor_row + 0.5) / rows + plane_bob;
+        let local_position = plane_surface_point(
+            ctx.mode,
+            plane_local_x,
+            plane_local_y,
+            ctx.plane_warp_amount,
+            ctx.elapsed_secs,
+            app_config.cursor.model.plane_offset,
+            ctx.mobius_progress,
+        );
+        (
+            plane_transform.transform_point(local_position),
+            plane_transform.rotation * (Quat::from_rotation_y(spin) * Quat::from_rotation_x(-0.25)),
+            if app_config.cursor.model.visible {
+                Visibility::Visible
+            } else {
+                Visibility::Hidden
+            },
+        )
     };
 
     (translation, rotation, scale, visibility)
@@ -1673,10 +1792,10 @@ fn plane_surface_point(
 ) -> Vec3 {
     match mode {
         TerminalPresentationMode::Flat2d => Vec3::new(local_x, local_y, depth_offset),
-        TerminalPresentationMode::Plane3d => Vec3::new(
+        TerminalPresentationMode::Plane3d | TerminalPresentationMode::Perspective3d => Vec3::new(
             local_x,
             local_y,
-            plane_surface_z(local_x, local_y, warp_amount, elapsed_secs) + depth_offset,
+            -plane_surface_z(local_x, local_y, warp_amount, elapsed_secs) + depth_offset,
         ),
         TerminalPresentationMode::Mobius3d => {
             let source_point = Vec3::new(local_x, local_y, depth_offset);
@@ -1708,4 +1827,427 @@ fn mobius_surface_point(
         ring * angle.sin(),
         width * sin_half * 320.0 + depth_offset,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scene::MobiusEnterZoomFloor;
+
+    #[derive(Resource, Default)]
+    struct CameraChangedProbe(bool);
+
+    #[derive(Resource, Default)]
+    struct VisibilityChangedProbe(usize);
+
+    fn record_camera_change(
+        camera_slots: Res<TerminalCameraSlots>,
+        mut probe: ResMut<CameraChangedProbe>,
+    ) {
+        probe.0 = camera_slots.is_changed();
+    }
+
+    fn record_visibility_changes(
+        visibility: Query<(), Changed<Visibility>>,
+        mut probe: ResMut<VisibilityChangedProbe>,
+    ) {
+        probe.0 = visibility.iter().count();
+    }
+
+    #[test]
+    fn brightness_system_does_not_mutate_camera_state() {
+        let mut app = App::new();
+        app.init_resource::<AppConfig>()
+            .init_resource::<TerminalInlineObjects>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<TerminalCameraSlots>()
+            .init_resource::<CameraChangedProbe>()
+            .add_systems(
+                Update,
+                (
+                    apply_instance_brightness,
+                    record_camera_change.after(apply_instance_brightness),
+                ),
+            );
+
+        app.update();
+        app.world_mut().resource_mut::<CameraChangedProbe>().0 = false;
+        app.update();
+
+        assert!(!app.world().resource::<CameraChangedProbe>().0);
+    }
+
+    #[test]
+    fn pose_updates_do_not_mark_inline_visibility_changed() {
+        let mut app = App::new();
+        app.init_resource::<TerminalCameraSlots>()
+            .init_resource::<VisibilityChangedProbe>()
+            .add_systems(
+                Update,
+                (apply_inline_objects, record_visibility_changes).chain(),
+            );
+        app.world_mut()
+            .spawn((TerminalInlineObjectSprite, Visibility::Visible));
+        app.world_mut()
+            .spawn((TerminalInlineObjectPlane, Visibility::Hidden));
+        app.update();
+        app.world_mut().clear_trackers();
+        app.world_mut()
+            .resource_mut::<TerminalCameraSlots>()
+            .active_mut()
+            .pose
+            .yaw += 0.25;
+
+        app.update();
+
+        assert_eq!(app.world().resource::<VisibilityChangedProbe>().0, 0);
+    }
+
+    #[test]
+    fn perspective_uses_the_same_oriented_warp_as_orthographic_3d() {
+        for mode in [
+            TerminalPresentationMode::Plane3d,
+            TerminalPresentationMode::Perspective3d,
+        ] {
+            let surface = plane_surface_point(mode, 0.0, 0.0, 0.75, 1.0, 0.0, 0.0);
+            let object = plane_surface_point(mode, 0.0, 0.0, 0.75, 1.0, 8.0, 0.0);
+            assert_eq!(
+                oriented_plane_depth(mode, surface.z, 1.0),
+                surface.z,
+                "front mesh must use the shared object surface"
+            );
+            assert!((object.z - surface.z - 8.0).abs() < f32::EPSILON);
+        }
+
+        let orthographic = plane_surface_point(
+            TerminalPresentationMode::Plane3d,
+            0.0,
+            0.0,
+            0.75,
+            1.0,
+            0.0,
+            0.0,
+        );
+        let perspective = plane_surface_point(
+            TerminalPresentationMode::Perspective3d,
+            0.0,
+            0.0,
+            0.75,
+            1.0,
+            0.0,
+            0.0,
+        );
+        assert_eq!(perspective, orthographic);
+    }
+
+    #[test]
+    fn every_3d_mode_animates_warped_kitty_planes() {
+        for mode in [
+            TerminalPresentationMode::Plane3d,
+            TerminalPresentationMode::Perspective3d,
+            TerminalPresentationMode::Mobius3d,
+        ] {
+            assert!(should_animate_inline_kitty_planes(
+                mode, 0.5, false, false, false, false
+            ));
+        }
+        assert!(!should_animate_inline_kitty_planes(
+            TerminalPresentationMode::Flat2d,
+            0.5,
+            true,
+            true,
+            true,
+            true
+        ));
+        assert!(should_animate_inline_kitty_planes(
+            TerminalPresentationMode::Perspective3d,
+            0.0,
+            true,
+            false,
+            false,
+            false
+        ));
+        assert!(should_animate_inline_kitty_planes(
+            TerminalPresentationMode::Plane3d,
+            0.0,
+            false,
+            true,
+            false,
+            false
+        ));
+        assert!(!should_animate_inline_kitty_planes(
+            TerminalPresentationMode::Mobius3d,
+            0.0,
+            false,
+            false,
+            false,
+            false
+        ));
+        assert!(should_animate_inline_kitty_planes(
+            TerminalPresentationMode::Mobius3d,
+            0.0,
+            false,
+            false,
+            true,
+            false
+        ));
+        assert!(should_animate_inline_kitty_planes(
+            TerminalPresentationMode::Mobius3d,
+            0.0,
+            false,
+            false,
+            false,
+            true
+        ));
+        assert!(!should_animate_inline_kitty_planes(
+            TerminalPresentationMode::Perspective3d,
+            0.0,
+            false,
+            false,
+            false,
+            false
+        ));
+    }
+
+    #[test]
+    fn settled_mobius_mode_stops_re_uploading_the_terminal_meshes() {
+        // Settled strip, no warp, nothing changed: no idle upload.
+        assert!(!should_animate_terminal_plane_warp(
+            TerminalPresentationMode::Mobius3d,
+            0.0,
+            false,
+            false,
+            false
+        ));
+        // Transition frames, the finish frame, and state changes still update.
+        assert!(should_animate_terminal_plane_warp(
+            TerminalPresentationMode::Mobius3d,
+            0.0,
+            false,
+            true,
+            false
+        ));
+        assert!(should_animate_terminal_plane_warp(
+            TerminalPresentationMode::Mobius3d,
+            0.0,
+            false,
+            false,
+            true
+        ));
+        assert!(should_animate_terminal_plane_warp(
+            TerminalPresentationMode::Mobius3d,
+            0.0,
+            true,
+            false,
+            false
+        ));
+        assert!(should_animate_terminal_plane_warp(
+            TerminalPresentationMode::Mobius3d,
+            0.5,
+            false,
+            false,
+            false
+        ));
+    }
+
+    #[test]
+    fn completed_mobius_transition_updates_the_final_kitty_frame() {
+        let layout = InlineKittyPlaneLayout {
+            local_x: 0.0,
+            local_y: 0.0,
+            local_width: 0.2,
+            local_height: 0.2,
+            x_segments: 2,
+            y_segments: 2,
+        };
+        let mesh =
+            build_kitty_plane_mesh(&layout, TerminalPresentationMode::Mobius3d, 0.0, 0.0, 0.0);
+
+        let mut slots = TerminalCameraSlots::default();
+        slots.active_mut().mode = TerminalPresentationMode::Mobius3d;
+        let pose = slots.active().pose;
+        let mut transition = MobiusTransition::default();
+        transition.begin_enter(
+            0,
+            &TerminalMobiusSource {
+                mode: TerminalPresentationMode::Plane3d,
+                pose,
+            },
+            &pose,
+            MobiusEnterZoomFloor::KeyboardTarget,
+        );
+        transition.elapsed_secs = MobiusTransition::ZOOM_OUT_SECS;
+
+        let mut app = App::new();
+        app.insert_resource(slots)
+            .insert_resource(transition)
+            .init_resource::<TerminalPlaneWarp>()
+            .init_resource::<Time>()
+            .init_resource::<Assets<Mesh>>()
+            .add_systems(
+                Update,
+                animate_inline_kitty_planes.after(animate_mobius_transition),
+            )
+            .add_systems(Update, animate_mobius_transition);
+        let mesh_handle = app.world_mut().resource_mut::<Assets<Mesh>>().add(mesh);
+        app.world_mut().spawn((
+            TerminalInlineObjectPlane,
+            layout,
+            Mesh3d(mesh_handle.clone()),
+        ));
+
+        app.update();
+        app.world_mut()
+            .resource_mut::<MobiusTransition>()
+            .elapsed_secs = MobiusTransition::ZOOM_OUT_SECS + MobiusTransition::MORPH_SECS;
+        app.update();
+
+        let meshes = app.world().resource::<Assets<Mesh>>();
+        let mesh = meshes.get(&mesh_handle).expect("Kitty mesh");
+        let Some(VertexAttributeValues::Float32x3(positions)) =
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            panic!("expected Kitty mesh positions");
+        };
+        let center = Vec3::from_array(positions[4]);
+        let expected = plane_surface_point(
+            TerminalPresentationMode::Mobius3d,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.5,
+            1.0,
+        );
+        assert_eq!(center, expected);
+    }
+
+    #[test]
+    fn kitty_plane_vertices_follow_the_mobius_surface() {
+        let layout = InlineKittyPlaneLayout {
+            local_x: 0.0,
+            local_y: 0.0,
+            local_width: 0.2,
+            local_height: 0.2,
+            x_segments: 2,
+            y_segments: 2,
+        };
+        let mesh =
+            build_kitty_plane_mesh(&layout, TerminalPresentationMode::Mobius3d, 0.0, 0.0, 1.0);
+        let Some(VertexAttributeValues::Float32x3(positions)) =
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            panic!("expected Kitty mesh positions");
+        };
+        let center = Vec3::from_array(positions[4]);
+        let expected = plane_surface_point(
+            TerminalPresentationMode::Mobius3d,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.5,
+            1.0,
+        );
+
+        assert_eq!(center, expected);
+        assert_ne!(center.x, 0.0);
+    }
+
+    #[test]
+    fn kitty_planes_are_visible_from_both_sides() {
+        let image = Handle::<Image>::default();
+        let material = kitty_plane_material(&image);
+
+        assert_eq!(material.cull_mode, None);
+    }
+
+    #[test]
+    fn keyboard_mobius_enter_finish_applies_the_target_zoom_floor() {
+        let sub_unit_pose = crate::camera::TerminalCameraPose {
+            orthographic_scale: 0.4,
+            ..crate::camera::TerminalCameraPose::default()
+        };
+        let source = TerminalMobiusSource {
+            mode: TerminalPresentationMode::Plane3d,
+            pose: sub_unit_pose,
+        };
+
+        let mut slots = TerminalCameraSlots::default();
+        slots.active_mut().mode = TerminalPresentationMode::Mobius3d;
+        slots.active_mut().pose = sub_unit_pose;
+        slots.active_mut().mobius_source = Some(source);
+
+        let mut transition = MobiusTransition::default();
+        transition.begin_enter(
+            0,
+            &source,
+            &sub_unit_pose,
+            MobiusEnterZoomFloor::KeyboardTarget,
+        );
+        transition.elapsed_secs = MobiusTransition::ZOOM_OUT_SECS + MobiusTransition::MORPH_SECS;
+
+        let mut app = App::new();
+        app.insert_resource(slots)
+            .insert_resource(transition)
+            .init_resource::<Time>()
+            .add_systems(Update, animate_mobius_transition);
+        app.update();
+
+        let preset = app.world().resource::<TerminalCameraSlots>().active();
+        // The keyboard enter is the one finish write that is not a no-op: the
+        // displayed pose is zoomed out to the target floor...
+        assert_eq!(
+            preset.pose.orthographic_scale,
+            MobiusTransition::TARGET_ZOOM_MULTIPLIER
+        );
+        // ...while the saved source keeps the exact sub-unit scale so the
+        // exit restores it.
+        assert_eq!(
+            preset
+                .mobius_source
+                .expect("Mobius source")
+                .pose
+                .orthographic_scale,
+            0.4
+        );
+        assert!(!app.world().resource::<MobiusTransition>().active);
+    }
+
+    #[test]
+    fn mobius_exit_restores_the_complete_per_slot_source_pose() {
+        let source_pose = crate::camera::TerminalCameraPose {
+            orthographic_scale: MIN_ORTHOGRAPHIC_SCALE,
+            roll: 0.4,
+            perspective_fov: 0.8,
+            ..crate::camera::TerminalCameraPose::default()
+        };
+        let source = TerminalMobiusSource {
+            mode: TerminalPresentationMode::Plane3d,
+            pose: source_pose,
+        };
+
+        let mut slots = TerminalCameraSlots::default();
+        slots.active_mut().mode = TerminalPresentationMode::Mobius3d;
+        slots.active_mut().pose.orthographic_scale = 1.0;
+        slots.active_mut().mobius_source = Some(source);
+
+        let mut transition = MobiusTransition::default();
+        transition.prepare_source(0, source.mode, &source.pose);
+        let active_pose = slots.active().pose;
+        transition.begin_exit(0, &active_pose, 1.0);
+        transition.elapsed_secs = MobiusTransition::VIEW_RESET_SECS + MobiusTransition::MORPH_SECS;
+
+        let mut app = App::new();
+        app.insert_resource(slots)
+            .insert_resource(transition)
+            .init_resource::<Time>()
+            .add_systems(Update, animate_mobius_transition);
+        app.update();
+
+        let preset = app.world().resource::<TerminalCameraSlots>().active();
+        assert_eq!(preset.mode, source.mode);
+        assert_eq!(preset.pose, source.pose);
+        assert_eq!(preset.mobius_source, None);
+    }
 }

@@ -120,21 +120,31 @@ Other useful cursor fields are:
 
 ## Key Bindings
 
-| Key                                             | Action               |
-| ----------------------------------------------- | -------------------- |
-| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>C</kbd>     | Copy selection       |
-| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>V</kbd>     | Paste clipboard      |
-| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Enter</kbd> | Toggle 2D / 3D mode  |
-| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>M</kbd>     | Toggle Mobius mode   |
-| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Up</kbd>    | Increase warp        |
-| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Down</kbd>  | Decrease warp        |
-| <kbd>Alt</kbd>+<kbd>PageUp</kbd>                | Scroll one page up   |
-| <kbd>Alt</kbd>+<kbd>PageDown</kbd>              | Scroll one page down |
-| <kbd>Alt</kbd>+<kbd>Up</kbd>                    | Scroll one line up   |
-| <kbd>Alt</kbd>+<kbd>Down</kbd>                  | Scroll one line down |
-| <kbd>Ctrl</kbd>+<kbd>=</kbd>                    | Increase font size   |
-| <kbd>Ctrl</kbd>+<kbd>-</kbd>                    | Decrease font size   |
-| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>0</kbd>     | Reset font size      |
+| Key                                                            | Action               |
+| -------------------------------------------------------------- | -------------------- |
+| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>C</kbd>                    | Copy selection       |
+| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>V</kbd>                    | Paste clipboard      |
+| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Enter</kbd>                | Toggle 2D / ortho 3D |
+| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>P</kbd>                    | Toggle perspective   |
+| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>M</kbd>                    | Toggle Mobius mode   |
+| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>0-9</kbd> | Activate camera slot |
+| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Up</kbd>                   | Increase warp        |
+| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Down</kbd>                 | Decrease warp        |
+| <kbd>Alt</kbd>+<kbd>PageUp</kbd>                               | Scroll one page up   |
+| <kbd>Alt</kbd>+<kbd>PageDown</kbd>                             | Scroll one page down |
+| <kbd>Alt</kbd>+<kbd>Up</kbd>                                   | Scroll one line up   |
+| <kbd>Alt</kbd>+<kbd>Down</kbd>                                 | Scroll one line down |
+| <kbd>Ctrl</kbd>+<kbd>=</kbd>                                   | Increase font size   |
+| <kbd>Ctrl</kbd>+<kbd>-</kbd>                                   | Decrease font size   |
+| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>0</kbd>                    | Reset font size      |
+
+In custom configs, `ToggleOrtho3DMode` is the current action name for the
+orthographic 3D toggle. The old `Toggle3DMode` action remains supported as a
+backward-compatible alias.
+
+Camera slot actions are named `ActivateCameraSlot0` through
+`ActivateCameraSlot9`. The extra <kbd>Shift</kbd> modifier keeps slot 0 distinct
+from the existing <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>0</kbd> font reset.
 
 ## Inline 3D objects
 
@@ -146,6 +156,7 @@ RGP supports:
 - registering `.obj`, `.glb`, and `.stl` assets by path
 - placing them at terminal cell anchors
 - animation, scale, color, depth and other attributes
+- camera control for flat, orthographic, perspective and Mobius views
 
 There is a Ratatui widget called `ratatui-rgp` available in
 [`widget/`](widget/) if you want to build your own terminal applications that involve inline 3D objects.
@@ -154,7 +165,9 @@ There is a Ratatui widget called `ratatui-rgp` available in
 
 #### [Big rat](widget/examples/big_rat.rs)
 
-Places a single oversized rat directly in your terminal:
+Places a single oversized rat directly in your terminal. Press `v` in the demo
+to cycle the Ratty camera protocol through flat, orthographic, perspective and
+Mobius views.
 
 <div>
   <video width="80%" src="https://github.com/user-attachments/assets/e955d09a-d0eb-4bad-b3b2-fc1331f49646"/>

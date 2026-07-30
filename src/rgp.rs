@@ -1,6 +1,9 @@
 //! Ratty Graphics Protocol parsing.
 
 use base64::Engine as _;
+use bevy::prelude::*;
+
+use crate::scene::TerminalPresentationMode;
 
 /// Ratty Graphics Protocol APC prefix.
 pub const RGP_APC_START: &[u8] = b"\x1b_ratty;g;";
@@ -28,8 +31,28 @@ pub struct RgpPlacementStyle {
     pub scale3: [f32; 3],
 }
 
-/// Partial update for an RGP object placement.
+/// Partial camera settings parsed from a `c` command.
+///
+/// `None` fields leave the slot's stored value untouched. Every angle on the
+/// wire is degrees; `fov` is converted to radians during parsing, so nothing
+/// downstream ever handles a degree value.
 #[derive(Clone, Copy, Default)]
+pub struct RgpCameraSettings {
+    /// Camera type: flat, orthographic, perspective, or Mobius.
+    pub camera_type: Option<TerminalPresentationMode>,
+    /// Orthographic projection scale.
+    pub scale: Option<f32>,
+    /// Vertical perspective FOV in radians. The wire value is degrees and is
+    /// converted in [`consume_sequence`]; never assign a degree value here.
+    pub fov: Option<f32>,
+    /// Translation offset relative to the terminal plane.
+    pub offset: [Option<f32>; 3],
+    /// Rotation in degrees, ordered as pitch, yaw, and roll.
+    pub rotation: [Option<f32>; 3],
+}
+
+/// Partial update for an RGP object placement.
+#[derive(Clone, Copy)]
 pub struct RgpPlacementUpdate {
     /// Updates the default animation flag.
     pub animate: Option<bool>,
@@ -99,15 +122,19 @@ pub fn consume_sequence(sequence: &[u8]) -> Option<RgpOperation> {
     let mut id = None;
     let mut format = None;
     let mut path = None;
+    let mut ctype = None;
     let mut source = None;
     let mut more = None;
     let mut name = None;
+    let mut set = None;
+    let mut invalid_camera_field = false;
     let mut row = None;
     let mut col = None;
     let mut width = None;
     let mut height = None;
     let mut animate = None;
     let mut scale = None;
+    let mut fov = None;
     let mut depth = None;
     let mut color = None;
     let mut brightness = None;
@@ -128,30 +155,67 @@ pub fn consume_sequence(sequence: &[u8]) -> Option<RgpOperation> {
                 payload = Some(part.to_string());
                 break;
             }
+            // A value-less token in a camera command is a truncated or broken
+            // emitter; reject the whole command instead of partially applying.
+            invalid_camera_field |= verb == "c";
             continue;
         };
         match key {
-            "id" => id = value.parse().ok(),
+            "id" => {
+                id = value.parse().ok();
+                invalid_camera_field |= verb == "c" && id.is_none();
+            }
             "fmt" => format = Some(value.to_string()),
             "path" => path = Some(value.to_string()),
+            "type" => ctype = Some(value.to_string()),
             "source" => source = Some(value.to_string()),
             "more" => more = parse_bool(value),
             "name" => name = Some(value.to_string()),
+            "set" => {
+                set = parse_bool(value);
+                invalid_camera_field |= verb == "c" && set.is_none();
+            }
             "row" => row = value.parse().ok(),
             "col" => col = value.parse().ok(),
             "w" => width = value.parse().ok(),
             "h" => height = value.parse().ok(),
             "animate" => animate = parse_bool(value),
-            "scale" => scale = value.parse().ok(),
+            "scale" => {
+                scale = parse_finite_f32(value);
+                invalid_camera_field |= verb == "c" && scale.is_none();
+            }
+            "fov" => {
+                // Degrees on the wire; radians everywhere past this point.
+                fov = parse_finite_f32(value).map(f32::to_radians);
+                invalid_camera_field |= verb == "c" && fov.is_none();
+            }
             "depth" => depth = value.parse().ok(),
             "color" | "tint" => color = parse_color(value),
             "brightness" => brightness = value.parse().ok(),
-            "px" => px = value.parse().ok(),
-            "py" => py = value.parse().ok(),
-            "pz" => pz = value.parse().ok(),
-            "rx" => rx = value.parse().ok(),
-            "ry" => ry = value.parse().ok(),
-            "rz" => rz = value.parse().ok(),
+            "px" => {
+                px = parse_finite_f32(value);
+                invalid_camera_field |= verb == "c" && px.is_none();
+            }
+            "py" => {
+                py = parse_finite_f32(value);
+                invalid_camera_field |= verb == "c" && py.is_none();
+            }
+            "pz" => {
+                pz = parse_finite_f32(value);
+                invalid_camera_field |= verb == "c" && pz.is_none();
+            }
+            "rx" => {
+                rx = parse_finite_f32(value);
+                invalid_camera_field |= verb == "c" && rx.is_none();
+            }
+            "ry" => {
+                ry = parse_finite_f32(value);
+                invalid_camera_field |= verb == "c" && ry.is_none();
+            }
+            "rz" => {
+                rz = parse_finite_f32(value);
+                invalid_camera_field |= verb == "c" && rz.is_none();
+            }
             "sx" => sx = value.parse().ok(),
             "sy" => sy = value.parse().ok(),
             "sz" => sz = value.parse().ok(),
@@ -166,6 +230,33 @@ pub fn consume_sequence(sequence: &[u8]) -> Option<RgpOperation> {
 
     match verb {
         "s" => Some(RgpOperation::SupportQuery),
+        "c" => {
+            let Some(camera_slot) = id.filter(|slot| *slot < 10) else {
+                return Some(RgpOperation::Ignored);
+            };
+            let camera_type = match ctype.as_deref() {
+                Some("Flat") => Some(TerminalPresentationMode::Flat2d),
+                Some("Ortho") => Some(TerminalPresentationMode::Plane3d),
+                Some("Persp") => Some(TerminalPresentationMode::Perspective3d),
+                Some("Mobius") => Some(TerminalPresentationMode::Mobius3d),
+                Some(_) => return Some(RgpOperation::Ignored),
+                None => None,
+            };
+            if invalid_camera_field {
+                return Some(RgpOperation::Ignored);
+            }
+            Some(RgpOperation::Camera {
+                camera_slot,
+                switch_immediately: set.unwrap_or(false),
+                settings: RgpCameraSettings {
+                    camera_type,
+                    scale,
+                    fov,
+                    offset: [px, py, pz],
+                    rotation: [rx, ry, rz],
+                },
+            })
+        }
         "r" => Some(RgpOperation::Register {
             object_id: id?,
             format: format?,
@@ -255,6 +346,15 @@ pub enum RgpOperation {
         /// Register source.
         source: RgpRegisterSource,
     },
+    /// Camera manipulation.
+    Camera {
+        /// Camera preset slot, `0` through `9`.
+        camera_slot: u32,
+        /// Activates the slot after applying the update (`set=1`, default `0`).
+        switch_immediately: bool,
+        /// The partial settings: mode, scale, FOV, rotation, and offset.
+        settings: RgpCameraSettings,
+    },
     /// Object placement.
     Place {
         /// Object identifier.
@@ -280,7 +380,7 @@ pub enum RgpOperation {
 
 /// Returns the RGP support reply sequence.
 pub fn support_reply() -> Vec<u8> {
-    b"\x1b_ratty;g;s;v=1;fmt=obj|glb|stl;path=1;payload=1;chunk=1;anim=1;depth=1;color=1;brightness=1;transform=1;update=1;normalize=1\x1b\\".to_vec()
+    b"\x1b_ratty;g;s;v=1;fmt=obj|glb|stl;path=1;payload=1;chunk=1;anim=1;depth=1;color=1;brightness=1;transform=1;update=1;normalize=1;camera=1\x1b\\".to_vec()
 }
 
 fn parse_color(value: &str) -> Option<[u8; 3]> {
@@ -301,5 +401,90 @@ fn parse_bool(value: &str) -> Option<bool> {
         "1" | "true" => Some(true),
         "0" | "false" => Some(false),
         _ => None,
+    }
+}
+
+fn parse_finite_f32(value: &str) -> Option<f32> {
+    value.parse::<f32>().ok().filter(|value| value.is_finite())
+}
+
+#[cfg(test)]
+mod camera_tests {
+    use super::*;
+
+    fn parse(fields: &str) -> RgpOperation {
+        let sequence = format!("\x1b_ratty;g;c;{fields}\x1b\\");
+        consume_sequence(sequence.as_bytes()).expect("RGP sequence")
+    }
+
+    #[test]
+    fn parses_complete_camera_update() {
+        let operation =
+            parse("id=9;set=1;type=Persp;scale=1.2;fov=90;px=1;py=2;pz=3;rx=10;ry=20;rz=30");
+        let RgpOperation::Camera {
+            camera_slot,
+            switch_immediately,
+            settings,
+        } = operation
+        else {
+            panic!("expected camera update");
+        };
+        assert_eq!(camera_slot, 9);
+        assert!(switch_immediately);
+        assert_eq!(
+            settings.camera_type,
+            Some(TerminalPresentationMode::Perspective3d)
+        );
+        assert_eq!(settings.scale, Some(1.2));
+        assert_eq!(settings.fov, Some(90.0_f32.to_radians()));
+        assert_eq!(settings.offset, [Some(1.0), Some(2.0), Some(3.0)]);
+        assert_eq!(settings.rotation, [Some(10.0), Some(20.0), Some(30.0)]);
+    }
+
+    #[test]
+    fn preserves_partial_camera_updates() {
+        let RgpOperation::Camera { settings, .. } = parse("id=2;py=-4") else {
+            panic!("expected camera update");
+        };
+        assert_eq!(settings.camera_type, None);
+        assert_eq!(settings.scale, None);
+        assert_eq!(settings.fov, None);
+        assert_eq!(settings.offset, [None, Some(-4.0), None]);
+        assert_eq!(settings.rotation, [None, None, None]);
+    }
+
+    #[test]
+    fn rejects_invalid_slot_mode_boolean_and_numbers() {
+        for fields in [
+            "id=10",
+            "id=bad",
+            "id=0;type=FishEye",
+            "id=0;set=2",
+            "id=0;scale=nope",
+            "id=0;fov=nope",
+            "id=0;fov=NaN",
+            "id=0;fov",
+            "id=0;px=NaN",
+            "id=0;ry=inf",
+            "id=0;px",
+            "id=0;px;py=2",
+        ] {
+            assert!(matches!(parse(fields), RgpOperation::Ignored), "{fields}");
+        }
+    }
+
+    #[test]
+    fn accepts_all_camera_modes() {
+        for (name, expected) in [
+            ("Flat", TerminalPresentationMode::Flat2d),
+            ("Ortho", TerminalPresentationMode::Plane3d),
+            ("Persp", TerminalPresentationMode::Perspective3d),
+            ("Mobius", TerminalPresentationMode::Mobius3d),
+        ] {
+            let RgpOperation::Camera { settings, .. } = parse(&format!("id=0;type={name}")) else {
+                panic!("expected camera update");
+            };
+            assert_eq!(settings.camera_type, Some(expected));
+        }
     }
 }

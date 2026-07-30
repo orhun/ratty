@@ -2,6 +2,10 @@
 
 use bevy::prelude::*;
 
+use crate::camera::{
+    ActivateTerminalCameraPreset, TerminalCameraSlots, TerminalCameraSystemSet,
+    TerminalCameraUpdate, activate_terminal_camera_presets, apply_terminal_camera_updates,
+};
 use crate::config::AppConfig;
 use crate::direct_render::DirectTerminalRenderPlugin;
 use crate::inline::{
@@ -11,8 +15,7 @@ use crate::keyboard::{TerminalClipboard, TerminalKeyBindings, handle_keyboard_in
 use crate::mouse::{TerminalSelection, handle_mouse_input};
 use crate::present::TerminalPresentPlugin;
 use crate::scene::{
-    MobiusTransition, TerminalPlaneView, TerminalPresentation, TerminalPresentationMode,
-    apply_terminal_presentation, setup_scene,
+    MobiusTransition, TerminalPresentationMode, apply_terminal_presentation, setup_scene,
 };
 use crate::systems::{
     TerminalFrameDirty, TerminalRedrawSet, animate_inline_kitty_planes, animate_mobius_transition,
@@ -45,42 +48,79 @@ impl Plugin for TerminalPlugin {
             .init_resource::<TerminalKeyBindings>()
             .init_resource::<TerminalFrameDirty>()
             .init_non_send::<TerminalClipboard>()
+            .add_message::<TerminalCameraUpdate>()
+            .add_message::<ActivateTerminalCameraPreset>()
             .add_systems(Startup, setup_scene)
             .add_systems(Update, request_exit_on_primary_window_close)
             .add_systems(Update, pump_pty_output)
-            .add_systems(Update, handle_keyboard_input)
-            .add_systems(Update, handle_mouse_input)
+            .configure_sets(
+                Update,
+                (
+                    TerminalCameraSystemSet::ProtocolUpdates,
+                    TerminalCameraSystemSet::KeyboardInput,
+                    TerminalCameraSystemSet::Activation,
+                    TerminalCameraSystemSet::MouseInput,
+                    TerminalCameraSystemSet::Transition,
+                    TerminalCameraSystemSet::Synchronize,
+                )
+                    .chain(),
+            )
+            .add_systems(
+                Update,
+                apply_terminal_camera_updates
+                    .after(pump_pty_output)
+                    .in_set(TerminalCameraSystemSet::ProtocolUpdates),
+            )
+            .add_systems(
+                Update,
+                handle_keyboard_input.in_set(TerminalCameraSystemSet::KeyboardInput),
+            )
+            .add_systems(
+                Update,
+                activate_terminal_camera_presets.in_set(TerminalCameraSystemSet::Activation),
+            )
+            .add_systems(
+                Update,
+                handle_mouse_input.in_set(TerminalCameraSystemSet::MouseInput),
+            )
+            .add_systems(
+                Update,
+                animate_mobius_transition
+                    .run_if(
+                        |camera_slots: Res<TerminalCameraSlots>,
+                         mobius_transition: Res<MobiusTransition>| {
+                            camera_slots.active().mode == TerminalPresentationMode::Mobius3d
+                                || mobius_transition.active
+                        },
+                    )
+                    .in_set(TerminalCameraSystemSet::Transition),
+            )
             .add_systems(Update, handle_window_resize)
             .add_systems(
                 Update,
                 apply_terminal_presentation
-                    .after(handle_keyboard_input)
-                    .after(handle_mouse_input)
                     .run_if(
-                        |presentation: Res<TerminalPresentation>,
-                         plane_view: Res<TerminalPlaneView>,
+                        |camera_slots: Res<TerminalCameraSlots>,
                          mobius_transition: Res<MobiusTransition>| {
-                            presentation.is_changed()
-                                || plane_view.is_changed()
-                                || mobius_transition.is_changed()
+                            camera_slots.is_changed() || mobius_transition.is_changed()
                         },
-                    ),
+                    )
+                    .in_set(TerminalCameraSystemSet::Synchronize),
             )
             .add_systems(
                 Update,
                 apply_inline_objects
                     .after(apply_terminal_presentation)
                     .run_if(
-                        |presentation: Res<TerminalPresentation>, added: AddedInlineObjects| {
-                            presentation.is_changed() || !added.is_empty()
+                        |camera_slots: Res<TerminalCameraSlots>, added: AddedInlineObjects| {
+                            camera_slots.is_changed() || !added.is_empty()
                         },
                     ),
             )
             .configure_sets(
                 Update,
                 TerminalRedrawSet
-                    .after(handle_mouse_input)
-                    .after(handle_keyboard_input)
+                    .after(TerminalCameraSystemSet::MouseInput)
                     .after(handle_window_resize)
                     .after(pump_pty_output),
             )
@@ -94,38 +134,42 @@ impl Plugin for TerminalPlugin {
                     .chain()
                     .in_set(TerminalRedrawSet),
             )
-            .add_systems(Update, sync_inline_objects.after(TerminalRedrawSet))
             .add_systems(
                 Update,
-                animate_inline_kitty_planes.after(sync_inline_objects),
+                sync_inline_objects
+                    .after(TerminalRedrawSet)
+                    // Deterministic vs the Transition set: on the frame a
+                    // Mobius exit finishes, spawned inline entities must see
+                    // the restored mode, not race it.
+                    .after(TerminalCameraSystemSet::Transition),
+            )
+            .add_systems(
+                Update,
+                animate_inline_kitty_planes
+                    .after(sync_inline_objects)
+                    .after(TerminalCameraSystemSet::Transition),
             )
             .add_systems(
                 Update,
                 sync_rgp_objects
                     .after(sync_inline_objects)
+                    .after(TerminalCameraSystemSet::Synchronize)
                     .run_if(|objects: Query<(), With<TerminalRgpObject>>| !objects.is_empty()),
             )
             .add_systems(Update, apply_instance_brightness.after(sync_rgp_objects))
             .add_systems(
                 Update,
-                animate_mobius_transition.run_if(
-                    |presentation: Res<TerminalPresentation>,
-                     mobius_transition: Res<MobiusTransition>| {
-                        presentation.mode == TerminalPresentationMode::Mobius3d
-                            || mobius_transition.active
-                    },
-                ),
-            )
-            .add_systems(
-                Update,
-                animate_terminal_plane_warp.run_if(|presentation: Res<TerminalPresentation>| {
-                    presentation.mode != TerminalPresentationMode::Flat2d
-                }),
+                animate_terminal_plane_warp
+                    .after(TerminalCameraSystemSet::Transition)
+                    .run_if(|camera_slots: Res<TerminalCameraSlots>| {
+                        camera_slots.active().mode != TerminalPresentationMode::Flat2d
+                    }),
             )
             .add_systems(
                 Update,
                 sync_asset_to_terminal_cursor
                     .after(TerminalRedrawSet)
+                    .after(TerminalCameraSystemSet::Synchronize)
                     .run_if(|config: Res<AppConfig>| config.cursor.model.visible),
             )
             .add_systems(Last, shutdown_terminal_runtime_on_exit)
