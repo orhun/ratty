@@ -10,7 +10,7 @@ inline 3D objects in [Ratty](https://github.com/orhun/ratty) through the
 use std::io;
 
 use ratatui_core::{buffer::Buffer, layout::Rect, widgets::Widget};
-use ratatui_ratty::{ObjectFormat, RattyGraphic, RattyGraphicSettings};
+use ratatui_ratty::{AnchorMode, ObjectFormat, RattyGraphic, RattyGraphicSettings};
 
 fn main() -> io::Result<()> {
     let mut graphic = RattyGraphic::new(
@@ -18,6 +18,7 @@ fn main() -> io::Result<()> {
             .id(7)
             .format(ObjectFormat::Glb)
             .animate(true)
+            .anchor_mode(AnchorMode::Text)
             .scale(1.0)
             .depth(1.5)
             .rotation([0.0, 30.0, 0.0]),
@@ -41,6 +42,11 @@ fn main() -> io::Result<()> {
 The widget emits RGP APC sequences into the target buffer cell. Ratty then
 resolves the asset and renders it as an inline 3D object anchored to that
 terminal region.
+
+`AnchorMode::Screen` is the backward-compatible default. `AnchorMode::Text`
+attaches the graphic to the character in the anchor cell, so the graphic moves
+with that character during terminal scrolling and disappears while the
+character is outside the visible viewport.
 
 ## Payload Registration
 

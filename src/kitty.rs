@@ -328,16 +328,21 @@ pub fn refresh_kitty_placeholder_anchors(
             let columns = u32::from(right - left + 1);
             let rows = u32::from(bottom - top + 1);
             let new_anchor = InlineAnchor {
-                row: top,
+                row: i32::from(top),
                 col: left,
                 columns,
                 rows,
+                mode: crate::inline::InlineAnchorMode::Text,
+                marker_id: None,
+                marker_row_offset: 0,
+                marker_col_offset: 0,
+                visible: true,
                 style: InlineStyle::default(),
             };
             changed |= anchors
                 .insert(object_id, new_anchor)
                 .is_none_or(|old_anchor| {
-                    old_anchor.row != top
+                    old_anchor.row != i32::from(top)
                         || old_anchor.col != left
                         || old_anchor.columns != columns
                         || old_anchor.rows != rows

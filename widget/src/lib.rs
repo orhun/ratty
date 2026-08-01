@@ -17,6 +17,25 @@ pub enum ObjectFormat {
     Glb,
 }
 
+/// How a graphic placement is anchored.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AnchorMode {
+    /// Keep the graphic at fixed screen coordinates.
+    #[default]
+    Screen,
+    /// Follow the terminal character containing the placement sequence.
+    Text,
+}
+
+impl AnchorMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Screen => "screen",
+            Self::Text => "text",
+        }
+    }
+}
+
 impl ObjectFormat {
     fn as_str(self) -> &'static str {
         match self {
@@ -70,6 +89,8 @@ pub struct RattyGraphicSettings<'a> {
     pub rotation: [f32; 3],
     /// Non-uniform scale multiplier.
     pub scale3: [f32; 3],
+    /// Placement anchoring mode.
+    pub anchor_mode: AnchorMode,
 }
 
 impl<'a> RattyGraphicSettings<'a> {
@@ -88,6 +109,7 @@ impl<'a> RattyGraphicSettings<'a> {
             offset: [0.0, 0.0, 0.0],
             rotation: [0.0, 0.0, 0.0],
             scale3: [1.0, 1.0, 1.0],
+            anchor_mode: AnchorMode::Screen,
         }
     }
 
@@ -148,6 +170,12 @@ impl<'a> RattyGraphicSettings<'a> {
     /// Sets the non-uniform scale multiplier.
     pub fn scale3(mut self, scale3: [f32; 3]) -> Self {
         self.scale3 = scale3;
+        self
+    }
+
+    /// Sets how the graphic follows terminal content.
+    pub fn anchor_mode(mut self, anchor_mode: AnchorMode) -> Self {
+        self.anchor_mode = anchor_mode;
         self
     }
 }
@@ -276,12 +304,13 @@ impl<'a> RattyGraphic<'a> {
         let center_row = area.y.saturating_add(area.height.saturating_sub(1) / 2);
         let center_col = area.x.saturating_add(area.width.saturating_sub(1) / 2);
         format!(
-            "\x1b_ratty;g;p;id={};row={};col={};w={};h={};animate={};scale={};depth={};color={};brightness={};px={};py={};pz={};rx={};ry={};rz={};sx={};sy={};sz={}\x1b\\",
+            "\x1b_ratty;g;p;id={};row={};col={};w={};h={};anchor={};animate={};scale={};depth={};color={};brightness={};px={};py={};pz={};rx={};ry={};rz={};sx={};sy={};sz={}\x1b\\",
             self.settings.id,
             center_row,
             center_col,
             area.width.max(1),
             area.height.max(1),
+            self.settings.anchor_mode.as_str(),
             u8::from(self.settings.animate),
             self.settings.scale,
             self.settings.depth,
@@ -361,13 +390,49 @@ impl Widget for &RattyGraphic<'_> {
         }
 
         let place = self.place_sequence(area);
+        let marker_position = if self.settings.anchor_mode == AnchorMode::Text {
+            (
+                area.x.saturating_add(area.width.saturating_sub(1) / 2),
+                area.y.saturating_add(area.height.saturating_sub(1) / 2),
+            )
+        } else {
+            (area.x, area.y)
+        };
 
-        if let Some(cell) = buf.cell_mut((area.x, area.y)) {
+        if let Some(cell) = buf.cell_mut(marker_position) {
             let existing = cell.symbol();
             let mut symbol = String::with_capacity(place.len() + existing.len());
-            symbol.push_str(&place);
-            symbol.push_str(existing);
+            if self.settings.anchor_mode == AnchorMode::Text {
+                symbol.push_str(existing);
+                symbol.push_str(&place);
+            } else {
+                symbol.push_str(&place);
+                symbol.push_str(existing);
+            }
             cell.set_symbol(&symbol);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui_core::{buffer::Buffer, layout::Rect, widgets::Widget};
+
+    use super::{AnchorMode, RattyGraphic, RattyGraphicSettings};
+
+    #[test]
+    fn text_anchor_sequence_follows_cell_character() {
+        let graphic = RattyGraphic::new(
+            RattyGraphicSettings::new("model.obj").anchor_mode(AnchorMode::Text),
+        );
+        let area = Rect::new(2, 3, 1, 1);
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 10, 10));
+        buffer[(2, 3)].set_char('x');
+
+        (&graphic).render(area, &mut buffer);
+
+        let symbol = buffer[(2, 3)].symbol();
+        assert!(symbol.starts_with('x'));
+        assert!(symbol.contains("anchor=text"));
     }
 }

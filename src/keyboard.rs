@@ -315,6 +315,7 @@ pub struct KeyboardSystemParams<'w, 's> {
     mobius_transition: ResMut<'w, MobiusTransition>,
     clipboard: NonSendMut<'w, TerminalClipboard>,
     runtime: NonSendMut<'w, TerminalRuntime>,
+    inline_objects: ResMut<'w, crate::inline::TerminalInlineObjects>,
     terminal: NonSendMut<'w, TerminalSurface>,
     viewport: Res<'w, TerminalViewport>,
     bindings: Res<'w, TerminalKeyBindings>,
@@ -421,6 +422,9 @@ pub fn handle_keyboard_input(
                             current.saturating_sub(amount)
                         };
                         screen.set_scrollback(next);
+                        params
+                            .inline_objects
+                            .apply_scrollback_change(current, params.runtime.parser.screen());
                         params.selection.clear();
                         params.redraw.request();
                     }
@@ -512,7 +516,11 @@ pub fn handle_keyboard_input(
         ) {
             let screen = params.runtime.parser.screen_mut();
             if screen.scrollback() != 0 {
+                let previous = screen.scrollback();
                 screen.set_scrollback(0);
+                params
+                    .inline_objects
+                    .apply_scrollback_change(previous, params.runtime.parser.screen());
                 params.redraw.request();
             }
             params.runtime.write_input(&input);

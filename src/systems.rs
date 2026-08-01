@@ -145,7 +145,7 @@ pub fn pump_pty_output(
                     let scrolled = infer_upward_scroll(&prev_rows, &next_rows);
                     inline_objects.apply_scroll(scrolled);
                 }
-                inline_objects.refresh_placeholder_anchors(runtime.parser.screen());
+                inline_objects.refresh_anchors_after_output(runtime.parser.screen());
                 processed_output = true;
             }
             Err(TryRecvError::Empty) => break,
@@ -479,7 +479,10 @@ pub(crate) fn sync_inline_objects(mut params: SyncInlineParams) {
         .iter()
         .filter_map(|(object_id, anchor)| {
             inline_objects.objects.get(object_id)?;
-            let start = anchor.row as i32;
+            if !anchor.visible {
+                return None;
+            }
+            let start = anchor.row;
             let end = start + anchor.rows as i32;
             (start < terminal.rows as i32 && end > 0).then_some(*object_id)
         })

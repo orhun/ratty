@@ -7,6 +7,16 @@ pub const RGP_APC_START: &[u8] = b"\x1b_ratty;g;";
 const ST: &[u8] = b"\x1b\\";
 const C1_ST: u8 = 0x9c;
 
+/// How an RGP placement is anchored.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RgpAnchorMode {
+    /// Keep the placement at its screen coordinates.
+    #[default]
+    Screen,
+    /// Follow the terminal character immediately preceding the place sequence.
+    Text,
+}
+
 /// Placement style for an RGP object.
 #[derive(Clone, Copy, Default)]
 pub struct RgpPlacementStyle {
@@ -93,6 +103,7 @@ pub fn consume_sequence(sequence: &[u8]) -> Option<RgpOperation> {
     let mut col = None;
     let mut width = None;
     let mut height = None;
+    let mut anchor_mode = None;
     let mut animate = None;
     let mut scale = None;
     let mut depth = None;
@@ -127,6 +138,13 @@ pub fn consume_sequence(sequence: &[u8]) -> Option<RgpOperation> {
             "col" => col = value.parse().ok(),
             "w" => width = value.parse().ok(),
             "h" => height = value.parse().ok(),
+            "anchor" => {
+                anchor_mode = match value {
+                    "screen" => Some(RgpAnchorMode::Screen),
+                    "text" => Some(RgpAnchorMode::Text),
+                    _ => None,
+                }
+            }
             "animate" => animate = parse_bool(value),
             "scale" => scale = value.parse().ok(),
             "depth" => depth = value.parse().ok(),
@@ -177,6 +195,7 @@ pub fn consume_sequence(sequence: &[u8]) -> Option<RgpOperation> {
                 col: col?,
                 columns: width?,
                 rows: height?,
+                mode: anchor_mode.unwrap_or_default(),
                 style: RgpPlacementStyle {
                     animate: animate.unwrap_or(false),
                     scale: scale.unwrap_or(1.0),
@@ -218,6 +237,8 @@ pub struct RgpAnchor {
     pub columns: u32,
     /// Object height in cells.
     pub rows: u32,
+    /// Placement anchoring mode.
+    pub mode: RgpAnchorMode,
     /// Placement style.
     pub style: RgpPlacementStyle,
 }
@@ -260,7 +281,7 @@ pub enum RgpOperation {
 
 /// Returns the RGP support reply sequence.
 pub fn support_reply() -> Vec<u8> {
-    b"\x1b_ratty;g;s;v=1;fmt=obj|glb;path=1;payload=1;chunk=1;anim=1;depth=1;color=1;brightness=1;transform=1;update=1\x1b\\".to_vec()
+    b"\x1b_ratty;g;s;v=1;fmt=obj|glb;path=1;payload=1;chunk=1;anim=1;depth=1;color=1;brightness=1;transform=1;update=1;anchor=screen|text\x1b\\".to_vec()
 }
 
 fn parse_color(value: &str) -> Option<[u8; 3]> {
@@ -281,5 +302,37 @@ fn parse_bool(value: &str) -> Option<bool> {
         "1" | "true" => Some(true),
         "0" | "false" => Some(false),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RgpAnchorMode, RgpOperation, consume_sequence, support_reply};
+
+    #[test]
+    fn place_defaults_to_screen_anchor() {
+        let sequence = b"\x1b_ratty;g;p;id=7;row=5;col=10;w=3;h=2\x1b\\";
+        let Some(RgpOperation::Place { anchor, .. }) = consume_sequence(sequence) else {
+            panic!("expected place operation");
+        };
+        assert_eq!(anchor.mode, RgpAnchorMode::Screen);
+    }
+
+    #[test]
+    fn parses_text_anchor() {
+        let sequence = b"\x1b_ratty;g;p;id=7;row=5;col=10;w=3;h=2;anchor=text\x1b\\";
+        let Some(RgpOperation::Place { anchor, .. }) = consume_sequence(sequence) else {
+            panic!("expected place operation");
+        };
+        assert_eq!(anchor.mode, RgpAnchorMode::Text);
+    }
+
+    #[test]
+    fn advertises_text_anchors() {
+        assert!(
+            std::str::from_utf8(&support_reply())
+                .unwrap()
+                .contains("anchor=screen|text")
+        );
     }
 }

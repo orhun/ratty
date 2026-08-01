@@ -163,7 +163,7 @@ impl TerminalSelection {
                 }
 
                 let symbol = if cell.has_contents() {
-                    cell.contents()
+                    crate::inline::strip_rgp_text_marker(cell.contents())
                 } else {
                     " "
                 };
@@ -187,6 +187,7 @@ impl TerminalSelection {
 pub struct MouseSystemParams<'w, 's> {
     primary_window: Query<'w, 's, (Entity, &'static Window), With<PrimaryWindow>>,
     runtime: NonSendMut<'w, TerminalRuntime>,
+    inline_objects: ResMut<'w, crate::inline::TerminalInlineObjects>,
     terminal: NonSend<'w, TerminalSurface>,
     viewport: Res<'w, TerminalViewport>,
     presentation: Res<'w, TerminalPresentation>,
@@ -208,6 +209,7 @@ pub(crate) fn handle_mouse_input(
     let MouseSystemParams {
         primary_window,
         runtime,
+        inline_objects,
         terminal,
         viewport,
         presentation,
@@ -455,9 +457,10 @@ pub(crate) fn handle_mouse_input(
 
             if amount != 0 {
                 let screen = runtime.parser.screen_mut();
-                let current = screen.scrollback() as isize;
-                let next = (current + amount).max(0) as usize;
+                let current = screen.scrollback();
+                let next = (current as isize + amount).max(0) as usize;
                 screen.set_scrollback(next);
+                inline_objects.apply_scrollback_change(current, runtime.parser.screen());
                 selection.clear();
                 redraw.request();
             }

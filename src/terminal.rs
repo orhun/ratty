@@ -358,7 +358,7 @@ impl Widget for TerminalWidget<'_> {
                 let mut style =
                     vt100_cell_style(vt_cell, &theme_palette, theme_fg, self.font_style);
                 let symbol = if vt_cell.has_contents() {
-                    vt_cell.contents()
+                    crate::inline::strip_rgp_text_marker(vt_cell.contents())
                 } else {
                     " "
                 };

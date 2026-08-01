@@ -65,7 +65,7 @@ ESC _ ratty;g;s ESC \
 Ratty replies:
 
 ```text
-ESC _ ratty;g;s;v=1;fmt=obj|glb;path=1;payload=1;chunk=1;anim=1;depth=1;color=1;brightness=1;transform=1;update=1 ESC \
+ESC _ ratty;g;s;v=1;fmt=obj|glb;path=1;payload=1;chunk=1;anim=1;depth=1;color=1;brightness=1;transform=1;update=1;anchor=screen|text ESC \
 ```
 
 Fields:
@@ -81,6 +81,7 @@ Fields:
 - `brightness=1`: `brightness=<f32>` placement is supported
 - `transform=1`: transform fields such as rotation and offsets are supported
 - `update=1`: `u` object updates are supported
+- `anchor=screen|text`: fixed screen and text-tracked placements are supported
 
 If no reply arrives, the terminal does not support the protocol.
 
@@ -161,6 +162,10 @@ Fields:
 - `col`: anchor column at the center of the placement
 - `w`: width in terminal cells
 - `h`: height in terminal cells
+- `anchor`: optional anchoring mode, defaults to `screen`
+  - `screen`: keep the object at the specified screen coordinates
+  - `text`: attach the object to the text cell immediately preceding the place
+    sequence in the output stream
 - `animate`: optional, `1` enables default animation
 - `scale`: optional scale factor, defaults to `1.0`
 - `depth`: optional z-offset, defaults to `0.0`
@@ -171,6 +176,26 @@ Fields:
 - `sx`, `sy`, `sz`: optional non-uniform scale, defaults to `1`
 
 Clients that only send the original v1 fields still work unchanged.
+
+#### Text-anchored placement
+
+With `anchor=text`, Ratty stores a zero-width marker in the preceding terminal
+cell. The object follows that cell when terminal output scrolls or rearranges
+the text buffer. It is hidden while the cell is outside the visible viewport
+and reappears when the cell returns through scrollback.
+
+The place sequence must be emitted immediately after the character at
+`row`,`col`. For example, this output attaches object `42` to `X`:
+
+```text
+X ESC _ ratty;g;p;id=42;row=12;col=8;w=4;h=2;anchor=text ESC \
+```
+
+`row` and `col` remain the center of the placement. The tracked character is
+therefore also the placement's anchor cell. Applications using
+`ratatui-ratty` can select this behavior with
+`RattyGraphicSettings::anchor_mode(AnchorMode::Text)`; the widget emits the
+character and sequence in the required order.
 
 ### 4. Update Object
 

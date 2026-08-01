@@ -10,7 +10,7 @@ use vt100::Callbacks;
 use crate::kitty::{KittyOperation, KittyParserState, refresh_kitty_placeholder_anchors};
 use crate::model::{ObjectSource, load_object_source, load_object_source_from_bytes};
 use crate::rgp::{
-    RgpOperation, RgpPlacementStyle, RgpPlacementUpdate, RgpRegisterSource,
+    RgpAnchorMode, RgpOperation, RgpPlacementStyle, RgpPlacementUpdate, RgpRegisterSource,
     consume_sequence as consume_rgp_sequence, support_reply,
 };
 const APC_START: &[u8] = b"\x1b_";
@@ -42,6 +42,7 @@ pub struct TerminalInlineObjects {
     last_viewport_size: Vec2,
     last_cols: u16,
     last_rows: u16,
+    next_rgp_marker_id: u32,
     pub(crate) objects: HashMap<u32, InlineObject>,
     pub(crate) anchors: HashMap<u32, InlineAnchor>,
 }
@@ -79,8 +80,7 @@ impl TerminalInlineObjects {
                 return replies;
             };
             let sequence = self.pending_bytes[start..end].to_vec();
-            let (handled, reply) =
-                self.handle_apc_sequence(&sequence, parser.screen().cursor_position());
+            let (handled, reply) = self.handle_apc_sequence(&sequence, parser);
             if let Some(reply) = reply {
                 replies.push(reply);
             }
@@ -107,44 +107,120 @@ impl TerminalInlineObjects {
         self.last_rows = rows;
     }
 
-    /// Applies upward scroll to anchored objects.
+    /// Applies inferred upward scroll to legacy scroll-coupled objects.
     pub fn apply_scroll(&mut self, rows_scrolled: u16) {
         if rows_scrolled == 0 || self.anchors.is_empty() {
             return;
         }
 
-        self.anchors.retain(|object_id, anchor| {
-            if self
-                .objects
-                .get(object_id)
-                .is_some_and(|object| !object.scrolls_with_text())
-            {
-                return true;
+        for (object_id, anchor) in &mut self.anchors {
+            let scrolls_with_text = match self.objects.get(object_id) {
+                Some(InlineObject::KittyImage(object)) => !object.uses_placeholders,
+                Some(InlineObject::RgpObject(_)) => anchor.marker_id.is_some(),
+                None => false,
+            };
+            if scrolls_with_text {
+                anchor.row -= i32::from(rows_scrolled);
+                anchor.visible = anchor.row + anchor.rows as i32 > 0;
             }
-            let new_row = anchor.row as i32 - rows_scrolled as i32;
-            if new_row + anchor.rows as i32 <= 0 {
-                return false;
-            }
-            anchor.row = new_row.max(0) as u16;
-            true
-        });
+        }
         self.dirty = true;
     }
 
     /// Returns whether any anchors need scroll tracking.
     pub fn has_scroll_tracked_anchors(&self) -> bool {
-        self.anchors.keys().any(|object_id| {
-            self.objects
-                .get(object_id)
-                .is_some_and(InlineObject::scrolls_with_text)
-        })
+        self.anchors
+            .iter()
+            .any(|(object_id, anchor)| match self.objects.get(object_id) {
+                Some(InlineObject::KittyImage(object)) => !object.uses_placeholders,
+                Some(InlineObject::RgpObject(_)) => anchor.marker_id.is_some(),
+                None => false,
+            })
     }
 
-    /// Refreshes placeholder-derived Kitty anchors.
+    /// Refreshes anchors derived from markers in the terminal buffer.
     pub fn refresh_placeholder_anchors(&mut self, screen: &vt100::Screen) {
-        if refresh_kitty_placeholder_anchors(&self.objects, &mut self.anchors, screen) {
+        self.refresh_anchors(screen, false);
+    }
+
+    /// Moves text anchors with a scrollback viewport change, then resolves visible markers.
+    pub fn apply_scrollback_change(&mut self, previous: usize, screen: &vt100::Screen) {
+        let delta = scrollback_row_delta(previous, screen.scrollback());
+        if delta != 0 {
+            let viewport_rows = screen.size().0;
+            for anchor in self.anchors.values_mut() {
+                if anchor.mode == InlineAnchorMode::Text && anchor.marker_id.is_some() {
+                    anchor.row = anchor.row.saturating_add(delta);
+                    anchor.visible =
+                        anchor_intersects_viewport(anchor.row, anchor.rows, viewport_rows);
+                }
+            }
             self.dirty = true;
         }
+        self.refresh_anchors(screen, true);
+    }
+
+    /// Refreshes anchors after PTY output, retaining objects that are still scrolling offscreen.
+    pub fn refresh_anchors_after_output(&mut self, screen: &vt100::Screen) {
+        self.refresh_anchors(screen, true);
+    }
+
+    fn refresh_anchors(&mut self, screen: &vt100::Screen, preserve_exiting: bool) {
+        if refresh_kitty_placeholder_anchors(&self.objects, &mut self.anchors, screen)
+            | self.refresh_rgp_text_anchors(screen, preserve_exiting)
+        {
+            self.dirty = true;
+        }
+    }
+
+    fn refresh_rgp_text_anchors(&mut self, screen: &vt100::Screen, preserve_exiting: bool) -> bool {
+        let tracked_anchors = self
+            .anchors
+            .iter()
+            .filter_map(|(object_id, anchor)| {
+                (anchor.mode == InlineAnchorMode::Text).then_some((*object_id, anchor.marker_id?))
+            })
+            .collect::<Vec<_>>();
+        if tracked_anchors.is_empty() {
+            return false;
+        }
+
+        let mut positions = HashMap::new();
+        let (rows, cols) = screen.size();
+        for row in 0..rows {
+            for col in 0..cols {
+                let Some(object_id) = screen
+                    .cell(row, col)
+                    .and_then(|cell| rgp_text_marker_id(cell.contents()))
+                else {
+                    continue;
+                };
+                positions.insert(object_id, (row, col));
+            }
+        }
+
+        let mut changed = false;
+        for (object_id, marker_id) in tracked_anchors {
+            let Some(anchor) = self.anchors.get_mut(&object_id) else {
+                continue;
+            };
+            if let Some((row, col)) = positions.get(&marker_id).copied() {
+                let top = text_anchor_top(row, anchor.marker_row_offset);
+                let left = col.saturating_sub(anchor.marker_col_offset);
+                changed |= anchor.row != top || anchor.col != left || !anchor.visible;
+                anchor.row = top;
+                anchor.col = left;
+                anchor.visible = true;
+            } else if preserve_exiting && anchor.row < 0 {
+                let visible = anchor_intersects_viewport_top(anchor.row, anchor.rows);
+                changed |= anchor.visible != visible;
+                anchor.visible = visible;
+            } else {
+                changed |= anchor.visible;
+                anchor.visible = false;
+            }
+        }
+        changed
     }
 
     fn set_anchor(&mut self, object_id: u32, anchor: InlineAnchor) {
@@ -166,15 +242,16 @@ impl TerminalInlineObjects {
         self.dirty = true;
     }
 
-    fn handle_apc_sequence(
+    fn handle_apc_sequence<CB: Callbacks>(
         &mut self,
         sequence: &[u8],
-        cursor_position: (u16, u16),
+        parser: &mut vt100::Parser<CB>,
     ) -> (bool, Option<Vec<u8>>) {
-        if let Some(reply) = self.handle_rgp_sequence(sequence) {
+        if let Some(reply) = self.handle_rgp_sequence(sequence, parser) {
             return (true, reply);
         }
 
+        let cursor_position = parser.screen().cursor_position();
         let Some(operation) = self.kitty.consume_sequence(sequence, cursor_position) else {
             return (false, None);
         };
@@ -193,10 +270,15 @@ impl TerminalInlineObjects {
                 anchor,
             } => {
                 self.remove_objects_at(&InlineAnchor {
-                    row: anchor.row,
+                    row: i32::from(anchor.row),
                     col: anchor.col,
                     columns: anchor.columns,
                     rows: anchor.rows,
+                    mode: InlineAnchorMode::Screen,
+                    marker_id: None,
+                    marker_row_offset: 0,
+                    marker_col_offset: 0,
+                    visible: true,
                     style: InlineStyle::default(),
                 });
                 self.objects
@@ -204,10 +286,15 @@ impl TerminalInlineObjects {
                 self.set_anchor(
                     object_id,
                     InlineAnchor {
-                        row: anchor.row,
+                        row: i32::from(anchor.row),
                         col: anchor.col,
                         columns: anchor.columns,
                         rows: anchor.rows,
+                        mode: InlineAnchorMode::Screen,
+                        marker_id: None,
+                        marker_row_offset: 0,
+                        marker_col_offset: 0,
+                        visible: true,
                         style: InlineStyle::default(),
                     },
                 );
@@ -218,10 +305,15 @@ impl TerminalInlineObjects {
                     self.set_anchor(
                         object_id,
                         InlineAnchor {
-                            row: anchor.row,
+                            row: i32::from(anchor.row),
                             col: anchor.col,
                             columns: anchor.columns,
                             rows: anchor.rows,
+                            mode: InlineAnchorMode::Screen,
+                            marker_id: None,
+                            marker_row_offset: 0,
+                            marker_col_offset: 0,
+                            visible: true,
                             style: InlineStyle::default(),
                         },
                     );
@@ -239,7 +331,11 @@ impl TerminalInlineObjects {
         }
     }
 
-    fn handle_rgp_sequence(&mut self, sequence: &[u8]) -> Option<Option<Vec<u8>>> {
+    fn handle_rgp_sequence<CB: Callbacks>(
+        &mut self,
+        sequence: &[u8],
+        parser: &mut vt100::Parser<CB>,
+    ) -> Option<Option<Vec<u8>>> {
         let operation = consume_rgp_sequence(sequence)?;
         Some(match operation {
             RgpOperation::SupportQuery => Some(support_reply()),
@@ -290,12 +386,14 @@ impl TerminalInlineObjects {
             }
             RgpOperation::Place { object_id, anchor } => {
                 if self.objects.contains_key(&object_id) {
-                    let row = anchor
-                        .row
-                        .saturating_sub(anchor.rows.saturating_sub(1).div_ceil(2) as u16);
+                    let marker_row_offset = anchor.rows.saturating_sub(1).div_ceil(2) as u16;
+                    let row = i32::from(anchor.row) - i32::from(marker_row_offset);
                     let col = anchor
                         .col
                         .saturating_sub(anchor.columns.saturating_sub(1).div_ceil(2) as u16);
+                    let marker_col_offset = anchor.col.saturating_sub(col);
+                    let marker_id =
+                        (anchor.mode == RgpAnchorMode::Text).then(|| self.allocate_rgp_marker_id());
                     self.set_anchor(
                         object_id,
                         InlineAnchor {
@@ -303,9 +401,17 @@ impl TerminalInlineObjects {
                             col,
                             columns: anchor.columns,
                             rows: anchor.rows,
+                            mode: anchor.mode.into(),
+                            marker_id,
+                            marker_row_offset,
+                            marker_col_offset,
+                            visible: true,
                             style: anchor.style.into(),
                         },
                     );
+                    if let Some(marker_id) = marker_id {
+                        parser.process(rgp_text_marker(marker_id).as_bytes());
+                    }
                 }
                 None
             }
@@ -328,8 +434,14 @@ impl TerminalInlineObjects {
         })
     }
 
+    fn allocate_rgp_marker_id(&mut self) -> u32 {
+        let marker_id = self.next_rgp_marker_id;
+        self.next_rgp_marker_id = self.next_rgp_marker_id.wrapping_add(1);
+        marker_id
+    }
+
     fn remove_objects_at(&mut self, new_anchor: &InlineAnchor) {
-        let row_start = new_anchor.row as i32;
+        let row_start = new_anchor.row;
         let row_end = row_start + new_anchor.rows as i32;
         let col_start = new_anchor.col as i32;
         let col_end = col_start + new_anchor.columns as i32;
@@ -338,7 +450,7 @@ impl TerminalInlineObjects {
             .anchors
             .iter()
             .filter_map(|(object_id, anchor)| {
-                let anchor_row_start = anchor.row as i32;
+                let anchor_row_start = anchor.row;
                 let anchor_row_end = anchor_row_start + anchor.rows as i32;
                 let anchor_col_start = anchor.col as i32;
                 let anchor_col_end = anchor_col_start + anchor.columns as i32;
@@ -536,11 +648,21 @@ pub enum RgpInlineObject {
     },
 }
 
-impl InlineObject {
-    fn scrolls_with_text(&self) -> bool {
-        match self {
-            InlineObject::KittyImage(object) => !object.uses_placeholders,
-            InlineObject::RgpObject(_) => true,
+/// How an inline anchor follows terminal content.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum InlineAnchorMode {
+    /// Remain at fixed screen coordinates.
+    #[default]
+    Screen,
+    /// Follow a marker attached to a terminal cell.
+    Text,
+}
+
+impl From<RgpAnchorMode> for InlineAnchorMode {
+    fn from(value: RgpAnchorMode) -> Self {
+        match value {
+            RgpAnchorMode::Screen => Self::Screen,
+            RgpAnchorMode::Text => Self::Text,
         }
     }
 }
@@ -548,15 +670,93 @@ impl InlineObject {
 /// Inline object anchor.
 pub struct InlineAnchor {
     /// Anchor row.
-    pub row: u16,
+    pub row: i32,
     /// Anchor column.
     pub col: u16,
     /// Object width in cells.
     pub columns: u32,
     /// Object height in cells.
     pub rows: u32,
+    /// Anchor tracking mode.
+    pub mode: InlineAnchorMode,
+    /// Unique marker token for a text-tracked placement.
+    pub marker_id: Option<u32>,
+    /// Marker row offset from the placement's top-left cell.
+    pub marker_row_offset: u16,
+    /// Marker column offset from the placement's top-left cell.
+    pub marker_col_offset: u16,
+    /// Whether the anchor marker is currently visible.
+    pub visible: bool,
     /// Inline styling.
     pub style: InlineStyle,
+}
+
+const VARIATION_SELECTOR_1: u32 = 0xfe00;
+const VARIATION_SELECTOR_17: u32 = 0xe0100;
+
+/// Encodes an object id as four zero-width Unicode variation selectors.
+pub fn rgp_text_marker(object_id: u32) -> String {
+    object_id
+        .to_be_bytes()
+        .into_iter()
+        .map(|byte| {
+            let codepoint = if byte < 16 {
+                VARIATION_SELECTOR_1 + u32::from(byte)
+            } else {
+                VARIATION_SELECTOR_17 + u32::from(byte - 16)
+            };
+            char::from_u32(codepoint).expect("variation selector is a valid scalar")
+        })
+        .collect()
+}
+
+/// Removes an RGP text marker suffix before a cell is rendered.
+pub fn strip_rgp_text_marker(contents: &str) -> &str {
+    let Some((start, _)) = decode_rgp_text_marker(contents) else {
+        return contents;
+    };
+    &contents[..start]
+}
+
+fn rgp_text_marker_id(contents: &str) -> Option<u32> {
+    decode_rgp_text_marker(contents).map(|(_, object_id)| object_id)
+}
+
+fn decode_rgp_text_marker(contents: &str) -> Option<(usize, u32)> {
+    let chars = contents.char_indices().collect::<Vec<_>>();
+    if chars.len() < 4 {
+        return None;
+    }
+    let marker = &chars[chars.len() - 4..];
+    let mut bytes = [0; 4];
+    for (index, (_, ch)) in marker.iter().enumerate() {
+        let codepoint = u32::from(*ch);
+        bytes[index] = if (VARIATION_SELECTOR_1..VARIATION_SELECTOR_1 + 16).contains(&codepoint) {
+            (codepoint - VARIATION_SELECTOR_1) as u8
+        } else if (VARIATION_SELECTOR_17..VARIATION_SELECTOR_17 + 240).contains(&codepoint) {
+            (codepoint - VARIATION_SELECTOR_17 + 16) as u8
+        } else {
+            return None;
+        };
+    }
+    Some((marker[0].0, u32::from_be_bytes(bytes)))
+}
+
+fn text_anchor_top(marker_row: u16, marker_row_offset: u16) -> i32 {
+    i32::from(marker_row) - i32::from(marker_row_offset)
+}
+
+fn anchor_intersects_viewport_top(row: i32, rows: u32) -> bool {
+    row + rows as i32 > 0
+}
+
+fn anchor_intersects_viewport(row: i32, rows: u32, viewport_rows: u16) -> bool {
+    row < i32::from(viewport_rows) && anchor_intersects_viewport_top(row, rows)
+}
+
+fn scrollback_row_delta(previous: usize, current: usize) -> i32 {
+    let delta = current as i128 - previous as i128;
+    delta.clamp(i128::from(i32::MIN), i128::from(i32::MAX)) as i32
 }
 
 /// Inline object style.
@@ -625,5 +825,54 @@ fn apply_vec3_update(target: &mut Vec3, update: [Option<f32>; 3]) {
     }
     if let Some(z) = update[2] {
         target.z = z;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        anchor_intersects_viewport_top, rgp_text_marker, rgp_text_marker_id, scrollback_row_delta,
+        strip_rgp_text_marker, text_anchor_top,
+    };
+
+    #[test]
+    fn text_marker_round_trips_full_object_id() {
+        for object_id in [0, 1, 0x00ff_ffff, u32::MAX] {
+            let contents = format!("x{}", rgp_text_marker(object_id));
+            assert_eq!(rgp_text_marker_id(&contents), Some(object_id));
+            assert_eq!(strip_rgp_text_marker(&contents), "x");
+        }
+    }
+
+    #[test]
+    fn ordinary_variation_selector_is_not_a_marker() {
+        let contents = "text\u{fe0f}";
+        assert_eq!(rgp_text_marker_id(contents), None);
+        assert_eq!(strip_rgp_text_marker(contents), contents);
+    }
+
+    #[test]
+    fn vt_parser_attaches_marker_to_preceding_character() {
+        let mut parser = vt100::Parser::new(2, 10, 0);
+        let marker = rgp_text_marker(u32::MAX);
+        parser.process(format!("x{marker}").as_bytes());
+
+        let contents = parser.screen().cell(0, 0).unwrap().contents();
+        assert_eq!(rgp_text_marker_id(contents), Some(u32::MAX));
+        assert_eq!(strip_rgp_text_marker(contents), "x");
+    }
+
+    #[test]
+    fn text_anchor_can_scroll_partially_above_viewport() {
+        assert_eq!(text_anchor_top(0, 3), -3);
+        assert!(anchor_intersects_viewport_top(-3, 8));
+        assert!(anchor_intersects_viewport_top(-7, 8));
+        assert!(!anchor_intersects_viewport_top(-8, 8));
+    }
+
+    #[test]
+    fn scrollback_delta_moves_anchor_before_marker_is_visible() {
+        assert_eq!(scrollback_row_delta(0, 1), 1);
+        assert_eq!(scrollback_row_delta(4, 1), -3);
     }
 }
