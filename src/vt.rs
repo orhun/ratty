@@ -12,6 +12,7 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
 use rio_vt::ansi::CursorShape;
+use rio_vt::ansi::graphics::UpdateQueues;
 use rio_vt::config::colors::{AnsiColor, NamedColor};
 use rio_vt::crosswords::grid::row::Row;
 use rio_vt::crosswords::grid::{Grid, Scroll};
@@ -26,16 +27,18 @@ pub type VtTerminal = Crosswords<TerminalEventSink>;
 
 /// Sink for the events rio-vt raises while parsing.
 ///
-/// The only variant ratty acts on today is [`RioEvent::PtyWrite`] — the
-/// engine's DA, DSR, CPR, XTVERSION, and kitty-keyboard replies, which have to
-/// be written back to the PTY.
+/// Ratty acts on two variants: [`RioEvent::PtyWrite`] — the engine's DA, DSR,
+/// CPR, XTVERSION, kitty-keyboard, and kitty-graphics replies, which have to
+/// be written back to the PTY — and [`RioEvent::UpdateGraphics`], which
+/// carries decoded kitty image pixels for upload to the GPU.
 ///
-/// `send_event` takes `&self`, so the queue needs interior mutability, and
+/// `send_event` takes `&self`, so the queues need interior mutability, and
 /// `TerminalRuntime` is a Bevy resource that has to stay `Send + Sync`, which
 /// rules out `RefCell`.
 #[derive(Clone, Default)]
 pub struct TerminalEventSink {
     replies: Arc<Mutex<Vec<Vec<u8>>>>,
+    graphics: Arc<Mutex<Vec<UpdateQueues>>>,
 }
 
 impl TerminalEventSink {
@@ -43,6 +46,12 @@ impl TerminalEventSink {
     pub fn take_replies(&self) -> Vec<Vec<u8>> {
         let mut replies = self.replies.lock().unwrap_or_else(PoisonError::into_inner);
         std::mem::take(&mut *replies)
+    }
+
+    /// Drains the graphics update queues rio-vt has emitted.
+    pub fn take_graphics_updates(&self) -> Vec<UpdateQueues> {
+        let mut updates = self.graphics.lock().unwrap_or_else(PoisonError::into_inner);
+        std::mem::take(&mut *updates)
     }
 }
 
@@ -57,6 +66,14 @@ impl EventListener for TerminalEventSink {
                 let reply = rewrite_reply(&text).unwrap_or(text);
                 let mut replies = self.replies.lock().unwrap_or_else(PoisonError::into_inner);
                 replies.push(reply.into_bytes());
+            }
+
+            // Decoded image pixels the engine wants uploaded to the GPU, plus
+            // texture keys whose images were deleted or evicted. Ratty's
+            // kitty-graphics sync drains these each frame.
+            RioEvent::UpdateGraphics { queues, .. } => {
+                let mut updates = self.graphics.lock().unwrap_or_else(PoisonError::into_inner);
+                updates.push(queues);
             }
 
             // Requests carrying a reply callback rio-vt expects the embedder to
@@ -96,10 +113,11 @@ impl EventListener for TerminalEventSink {
 ///
 /// rio-vt answers primary device attributes with a fixed list describing what
 /// the *engine* can parse, not what the embedder renders. `4` is sixel
-/// graphics — rio-vt's `graphics` feature is off here, so nothing decodes it —
-/// and `52` is OSC 52 clipboard access, whose events [`TerminalEventSink`]
-/// drops. Leaving either in makes applications feature-detect support that does
-/// not exist and emit payloads ratty silently swallows.
+/// graphics — the engine decodes it, but ratty only renders kitty-protocol
+/// placements — and `52` is OSC 52 clipboard access, whose events
+/// [`TerminalEventSink`] drops. Leaving either in makes applications
+/// feature-detect support that does not exist and emit payloads ratty
+/// silently swallows.
 const UNSUPPORTED_DA1_CAPABILITIES: &[&str] = &["4", "52"];
 
 /// Rewrites an engine reply that would misreport ratty's capabilities or

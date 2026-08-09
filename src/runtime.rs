@@ -242,6 +242,11 @@ impl TerminalRuntime {
         self.sink.take_replies()
     }
 
+    /// Drains the kitty graphics update queues rio-vt has emitted.
+    pub fn take_graphics_updates(&mut self) -> Vec<rio_vt::ansi::graphics::UpdateQueues> {
+        self.sink.take_graphics_updates()
+    }
+
     /// Receives pending PTY output without blocking.
     pub fn try_recv(&mut self) -> Result<Vec<u8>, TryRecvError> {
         self.rx.get().try_recv()
@@ -278,8 +283,17 @@ impl TerminalRuntime {
 
         // rio-vt reflows content and resets the scrolling region natively, so
         // the grid resize is the whole operation — no snapshot and replay.
-        self.term
-            .resize(CrosswordsSize::new(usize::from(cols), usize::from(rows)));
+        // The pixel dimensions matter too: the engine sizes kitty graphics
+        // placements against the cell pixel size, and refuses placements
+        // while it is zero.
+        self.term.resize(CrosswordsSize::new_with_dimensions(
+            usize::from(cols),
+            usize::from(rows),
+            u32::from(pw),
+            u32::from(ph),
+            u32::from(pw / cols),
+            u32::from(ph / rows),
+        ));
     }
 
     /// Returns the active kitty keyboard enhancement flags.
