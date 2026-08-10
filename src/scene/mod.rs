@@ -234,11 +234,14 @@ pub(crate) fn setup_scene(mut params: SetupSceneParams) {
     let render_scale = render_scale_for_window(window);
     let layout = terminal.resize_to_fit(window_size, render_scale);
     let pty_pixels = layout.pty_pixels();
+    let cell_px = terminal.char_dimensions() * layout.render_scale;
     runtime.resize(
         layout.cols,
         layout.rows,
         pty_pixels.x as u16,
         pty_pixels.y as u16,
+        cell_px.x,
+        cell_px.y,
     );
 
     commands.spawn((

@@ -242,11 +242,6 @@ impl TerminalRuntime {
         self.sink.take_replies()
     }
 
-    /// Drains the kitty graphics update queues rio-vt has emitted.
-    pub fn take_graphics_updates(&mut self) -> Vec<rio_vt::ansi::graphics::UpdateQueues> {
-        self.sink.take_graphics_updates()
-    }
-
     /// Receives pending PTY output without blocking.
     pub fn try_recv(&mut self) -> Result<Vec<u8>, TryRecvError> {
         self.rx.get().try_recv()
@@ -267,7 +262,22 @@ impl TerminalRuntime {
     }
 
     /// Resizes the PTY and parser screen.
-    pub fn resize(&mut self, cols: u16, rows: u16, pw: u16, ph: u16) {
+    ///
+    /// `cell_width`/`cell_height` are the renderer's physical cell metrics.
+    /// They arrive fractional (parley cells rarely land on whole pixels) and
+    /// are rounded for the engine, which sizes kitty graphics placements
+    /// against them and refuses placements while they are zero. Deriving
+    /// them from `pw / cols` instead would truncate — an 8.4px cell would
+    /// reach the engine as 8px and mis-scale every native-size image by 5%.
+    pub fn resize(
+        &mut self,
+        cols: u16,
+        rows: u16,
+        pw: u16,
+        ph: u16,
+        cell_width: f32,
+        cell_height: f32,
+    ) {
         if cols == 0 || rows == 0 {
             return;
         }
@@ -283,16 +293,13 @@ impl TerminalRuntime {
 
         // rio-vt reflows content and resets the scrolling region natively, so
         // the grid resize is the whole operation — no snapshot and replay.
-        // The pixel dimensions matter too: the engine sizes kitty graphics
-        // placements against the cell pixel size, and refuses placements
-        // while it is zero.
         self.term.resize(CrosswordsSize::new_with_dimensions(
             usize::from(cols),
             usize::from(rows),
             u32::from(pw),
             u32::from(ph),
-            u32::from(pw / cols),
-            u32::from(ph / rows),
+            cell_width.round().max(1.0) as u32,
+            cell_height.round().max(1.0) as u32,
         ));
     }
 
