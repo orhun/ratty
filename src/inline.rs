@@ -6,7 +6,7 @@ use std::path::Path;
 use bevy::prelude::*;
 
 use crate::camera::{OptionalVec3, TerminalCameraUpdate};
-use crate::kitty::{KittyOperation, KittyParserState, refresh_kitty_placeholder_anchors};
+use crate::kitty::{KittyGraphics, PlacementKey};
 use crate::model::{
     ObjectLoadOptions, load_object_source_from_bytes_with_options, load_object_source_with_options,
 };
@@ -15,7 +15,6 @@ use crate::rgp::{
     consume_sequence as consume_rgp_sequence, support_reply,
 };
 use crate::runtime::TerminalRuntime;
-use crate::vt::{self, VtTerminal};
 
 const APC_START: &[u8] = b"\x1b_";
 const ST: &[u8] = b"\x1b\\";
@@ -44,6 +43,8 @@ pub(crate) struct InlineKittyPlaneLayout {
     pub x_segments: u32,
     /// Vertical mesh subdivision count.
     pub y_segments: u32,
+    /// Normalized source crop mapped onto the mesh UVs.
+    pub source_rect: [f32; 4],
 }
 
 /// Cached GPU assets for a Kitty image plane attached to the terminal surface.
@@ -52,6 +53,8 @@ pub(crate) struct KittyPlaneCache {
     pub x_segments: u32,
     /// Cached vertical mesh subdivision count.
     pub y_segments: u32,
+    /// Cached normalized source crop baked into the mesh UVs.
+    pub source_rect: [f32; 4],
     /// Cached plane mesh handle.
     pub mesh: Handle<Mesh>,
     /// Cached plane material handle.
@@ -70,13 +73,16 @@ pub struct TerminalRgpObject {
 pub struct TerminalInlineObjects {
     pending_bytes: Vec<u8>,
     pending_rgp_payloads: HashMap<u32, PendingRgpPayload>,
-    kitty: KittyParserState,
     dirty: bool,
     last_viewport_size: Vec2,
     last_cols: u16,
     last_rows: u16,
-    pub(crate) objects: HashMap<u32, InlineObject>,
+    pub(crate) objects: HashMap<u32, RgpInlineObject>,
     pub(crate) anchors: HashMap<u32, InlineAnchor>,
+    /// Kitty graphics derived from rio-vt's engine state.
+    pub(crate) kitty: KittyGraphics,
+    /// Cached plane assets per kitty placement (3D presentation).
+    pub(crate) kitty_planes: HashMap<PlacementKey, KittyPlaneCache>,
 }
 
 impl TerminalInlineObjects {
@@ -122,11 +128,7 @@ impl TerminalInlineObjects {
                 return replies;
             };
             let sequence = self.pending_bytes[start..end].to_vec();
-            let (handled, reply) = self.handle_apc_sequence(
-                &sequence,
-                vt::cursor_position(&runtime.term),
-                camera_updates,
-            );
+            let (handled, reply) = self.handle_apc_sequence(&sequence, camera_updates);
             if let Some(reply) = reply {
                 replies.push(reply);
             }
@@ -160,14 +162,7 @@ impl TerminalInlineObjects {
             return;
         }
 
-        self.anchors.retain(|object_id, anchor| {
-            if self
-                .objects
-                .get(object_id)
-                .is_some_and(|object| !object.scrolls_with_text())
-            {
-                return true;
-            }
+        self.anchors.retain(|_, anchor| {
             let new_row = anchor.row as i32 - rows_scrolled as i32;
             if new_row + anchor.rows as i32 <= 0 {
                 return false;
@@ -180,16 +175,17 @@ impl TerminalInlineObjects {
 
     /// Returns whether any anchors need scroll tracking.
     pub fn has_scroll_tracked_anchors(&self) -> bool {
-        self.anchors.keys().any(|object_id| {
-            self.objects
-                .get(object_id)
-                .is_some_and(InlineObject::scrolls_with_text)
-        })
+        !self.anchors.is_empty()
     }
 
-    /// Refreshes placeholder-derived Kitty anchors.
-    pub fn refresh_placeholder_anchors(&mut self, term: &VtTerminal) {
-        if refresh_kitty_placeholder_anchors(&self.objects, &mut self.anchors, term) {
+    /// Synchronizes kitty graphics with the engine's state.
+    ///
+    /// Drains the pixel data rio-vt queued for GPU upload and re-derives
+    /// the visible placements. Cheap when nothing changed, so it runs every
+    /// frame — placements move with scrollback without any PTY traffic.
+    pub fn refresh_kitty(&mut self, runtime: &mut TerminalRuntime) {
+        let updates = runtime.take_graphics_updates();
+        if self.kitty.refresh(&runtime.term, updates) {
             self.dirty = true;
         }
     }
@@ -216,75 +212,14 @@ impl TerminalInlineObjects {
     fn handle_apc_sequence(
         &mut self,
         sequence: &[u8],
-        cursor_position: (u16, u16),
         camera_updates: &mut Vec<TerminalCameraUpdate>,
     ) -> (bool, Option<Vec<u8>>) {
+        // Only RGP is ratty's to parse. Kitty graphics APCs flow through to
+        // rio-vt, which owns that protocol end to end.
         if let Some(reply) = self.handle_rgp_sequence(sequence, camera_updates) {
             return (true, reply);
         }
-
-        let Some(operation) = self.kitty.consume_sequence(sequence, cursor_position) else {
-            return (false, None);
-        };
-
-        match operation {
-            KittyOperation::Pending | KittyOperation::Ignored => (true, None),
-            KittyOperation::TransmitOnly { object_id, image } => {
-                self.objects
-                    .insert(object_id, InlineObject::KittyImage(image.rasterize()));
-                self.dirty = true;
-                (true, None)
-            }
-            KittyOperation::TransmitAndPlace {
-                object_id,
-                image,
-                anchor,
-            } => {
-                self.remove_objects_at(&InlineAnchor {
-                    row: anchor.row,
-                    col: anchor.col,
-                    columns: anchor.columns,
-                    rows: anchor.rows,
-                    style: InlineStyle::default(),
-                });
-                self.objects
-                    .insert(object_id, InlineObject::KittyImage(image.rasterize()));
-                self.set_anchor(
-                    object_id,
-                    InlineAnchor {
-                        row: anchor.row,
-                        col: anchor.col,
-                        columns: anchor.columns,
-                        rows: anchor.rows,
-                        style: InlineStyle::default(),
-                    },
-                );
-                (true, None)
-            }
-            KittyOperation::PlaceExisting { object_id, anchor } => {
-                if self.objects.contains_key(&object_id) {
-                    self.set_anchor(
-                        object_id,
-                        InlineAnchor {
-                            row: anchor.row,
-                            col: anchor.col,
-                            columns: anchor.columns,
-                            rows: anchor.rows,
-                            style: InlineStyle::default(),
-                        },
-                    );
-                }
-                (true, None)
-            }
-            KittyOperation::Delete { object_id } => {
-                if let Some(object_id) = object_id {
-                    self.remove_object(object_id);
-                } else {
-                    self.clear_objects();
-                }
-                (true, None)
-            }
-        }
+        (false, None)
     }
 
     fn handle_rgp_sequence(
@@ -397,35 +332,6 @@ impl TerminalInlineObjects {
         })
     }
 
-    fn remove_objects_at(&mut self, new_anchor: &InlineAnchor) {
-        let row_start = new_anchor.row as i32;
-        let row_end = row_start + new_anchor.rows as i32;
-        let col_start = new_anchor.col as i32;
-        let col_end = col_start + new_anchor.columns as i32;
-
-        let overlapping_ids = self
-            .anchors
-            .iter()
-            .filter_map(|(object_id, anchor)| {
-                let anchor_row_start = anchor.row as i32;
-                let anchor_row_end = anchor_row_start + anchor.rows as i32;
-                let anchor_col_start = anchor.col as i32;
-                let anchor_col_end = anchor_col_start + anchor.columns as i32;
-
-                (anchor_row_start < row_end
-                    && anchor_row_end > row_start
-                    && anchor_col_start < col_end
-                    && anchor_col_end > col_start)
-                    .then_some(*object_id)
-            })
-            .collect::<Vec<_>>();
-
-        for object_id in overlapping_ids {
-            self.objects.remove(&object_id);
-            self.anchors.remove(&object_id);
-        }
-    }
-
     // Buffers chunked payload registrations until the final chunk arrives, then loads and registers the object.
     fn handle_rgp_payload_chunk(
         &mut self,
@@ -526,14 +432,6 @@ fn apc_end(bytes: &[u8], payload_start: usize) -> Option<usize> {
     }
 }
 
-/// Registered inline object.
-pub enum InlineObject {
-    /// Kitty image object.
-    KittyImage(KittyInlineObject),
-    /// Ratty graphics object.
-    RgpObject(RgpInlineObject),
-}
-
 /// Raster image payload.
 pub struct RasterObject {
     /// Image width in pixels.
@@ -544,16 +442,6 @@ pub struct RasterObject {
     pub rgba: Vec<u8>,
     /// Uploaded image handle.
     pub handle: Option<Handle<Image>>,
-}
-
-/// Kitty-backed inline object.
-pub struct KittyInlineObject {
-    /// Raster image payload.
-    pub raster: RasterObject,
-    /// Indicates placeholder-driven placement.
-    pub uses_placeholders: bool,
-    /// Cached plane mesh and material for 3D presentation.
-    pub(crate) plane: Option<KittyPlaneCache>,
 }
 
 /// RGP-backed inline object.
@@ -579,15 +467,6 @@ pub enum RgpInlineObject {
         /// Cached scene handle.
         handle: Option<Handle<WorldAsset>>,
     },
-}
-
-impl InlineObject {
-    fn scrolls_with_text(&self) -> bool {
-        match self {
-            InlineObject::KittyImage(object) => !object.uses_placeholders,
-            InlineObject::RgpObject(_) => true,
-        }
-    }
 }
 
 /// Inline object anchor.
