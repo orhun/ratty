@@ -209,15 +209,19 @@ pub fn pump_pty_output(
 
 /// Synchronizes kitty graphics state with the rio-vt engine.
 ///
-/// Runs every frame between [`pump_pty_output`] and [`sync_inline_objects`]:
-/// placements depend on the scrollback display offset, which mouse input
-/// changes without any PTY traffic, so PTY-driven refreshes are not enough.
-/// The refresh is a no-op diff when nothing changed.
+/// Runs every frame after [`pump_pty_output`], [`handle_window_resize`],
+/// and the mouse input set, and before the redraw set: placements depend on
+/// the scrollback display offset, which mouse input changes without any PTY
+/// traffic, and on the post-resize grid. The pending-redraw flag is peeked
+/// (the redraw set consumes it later in the frame) as the grid-changed
+/// signal that gates the placeholder rescan.
 pub(crate) fn refresh_kitty_graphics(
     mut runtime: ResMut<TerminalRuntime>,
     mut inline_objects: ResMut<TerminalInlineObjects>,
+    redraw: Res<TerminalRedrawState>,
 ) {
-    inline_objects.refresh_kitty(&mut runtime);
+    let terminal_changed = redraw.pending();
+    inline_objects.refresh_kitty(&mut runtime, terminal_changed);
 }
 
 fn infer_upward_scroll(prev_rows: &[String], next_rows: &[String]) -> u16 {
@@ -292,11 +296,14 @@ pub(crate) fn handle_window_resize(
     let window_size = window_size.max(Vec2::ONE);
     let layout = terminal.resize_to_fit(window_size, render_scale_for_window(window));
     let pty_pixels = layout.pty_pixels();
+    let cell_px = terminal.char_dimensions() * layout.render_scale;
     runtime.resize(
         layout.cols,
         layout.rows,
         pty_pixels.x as u16,
         pty_pixels.y as u16,
+        cell_px.x,
+        cell_px.y,
     );
     sync_terminal_layout(layout, viewport, plane_query, plane_back_query);
     redraw.request();
@@ -683,7 +690,7 @@ pub(crate) fn sync_inline_objects(mut params: SyncInlineParams) {
     // free them so `Assets` does not accumulate dead meshes and materials.
     let live_keys = views
         .iter()
-        .map(|view| (view.image_id, view.placement_id))
+        .map(KittyPlacementView::key)
         .collect::<std::collections::HashSet<PlacementKey>>();
     inline.kitty_planes.retain(|key, cache| {
         if live_keys.contains(key) {
@@ -773,16 +780,21 @@ fn sync_kitty_placement(
             v1 * raster.height as f32,
         ));
     }
+    // Negative kitty z-indices render behind the terminal per the spec: the
+    // sprite goes under the text quad (z = 0), and the plane sinks behind
+    // the terminal surface. The epsilon per placement keeps overlapping
+    // images stacked back-to-front on both paths — the views arrive sorted
+    // by kitty z-index.
+    let layer = draw_order as f32 * 0.001;
+    let sprite_z = if view.z < 0 {
+        -5.0 + layer
+    } else {
+        5.0 + layer
+    };
     commands.spawn((
         TerminalInlineObjectSprite,
         sprite,
-        // The kitty z-index ordering is baked into the placement order, so
-        // an epsilon per placement keeps sprites stacked back-to-front.
-        Transform::from_translation(Vec3::new(
-            layout.center_x,
-            layout.center_y,
-            5.0 + draw_order as f32 * 0.001,
-        )),
+        Transform::from_translation(Vec3::new(layout.center_x, layout.center_y, sprite_z)),
         if ctx.mode.is_3d() {
             Visibility::Hidden
         } else {
@@ -791,9 +803,13 @@ fn sync_kitty_placement(
     ));
 
     let plane_layout = inline_kitty_plane_layout(layout, view.source_rect);
-    let key = (view.image_id, view.placement_id);
     let (mesh_handle, material_handle) =
-        ensure_kitty_plane_assets(plane_caches, key, &plane_layout, &image_handle, ctx);
+        ensure_kitty_plane_assets(plane_caches, view.key(), &plane_layout, &image_handle, ctx);
+    let plane_bias = if view.z < 0 {
+        -0.002 - draw_order as f32 * 0.0005
+    } else {
+        0.002 + draw_order as f32 * 0.0005
+    };
     ctx.plane_children.push(
         commands
             .spawn((
@@ -801,7 +817,7 @@ fn sync_kitty_placement(
                 plane_layout,
                 Mesh3d(mesh_handle),
                 MeshMaterial3d(material_handle),
-                Transform::default(),
+                Transform::from_xyz(0.0, 0.0, plane_bias),
                 // Warp and Mobius morphing move the vertices far outside the
                 // AABB cached at spawn, like the terminal planes.
                 NoFrustumCulling,

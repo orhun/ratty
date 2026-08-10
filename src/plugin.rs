@@ -137,11 +137,15 @@ impl Plugin for TerminalPlugin {
             )
             .add_systems(
                 Update,
-                // After the mouse input set so scrollback changes land in the
-                // same frame's placement views.
+                // After the mouse input set and the window resize so
+                // scrollback changes and post-reflow grids land in the same
+                // frame's placement views; before the redraw set because the
+                // refresh peeks the pending-redraw flag the redraw consumes.
                 refresh_kitty_graphics
                     .after(pump_pty_output)
+                    .after(handle_window_resize)
                     .after(TerminalCameraSystemSet::MouseInput)
+                    .before(TerminalRedrawSet)
                     .before(sync_inline_objects),
             )
             .add_systems(
