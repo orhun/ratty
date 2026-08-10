@@ -28,9 +28,10 @@ use crate::camera::{
 use crate::config::{AppConfig, CURSOR_DEPTH};
 use crate::direct_render::DirectTerminalSceneExchange;
 use crate::inline::{
-    InlineKittyPlaneLayout, InlineObject, TerminalInlineObjectPlane, TerminalInlineObjectSprite,
+    InlineKittyPlaneLayout, KittyPlaneCache, TerminalInlineObjectPlane, TerminalInlineObjectSprite,
     TerminalInlineObjects, TerminalRgpObject,
 };
+use crate::kitty::{KittyPlacementView, PlacementKey};
 use crate::model::CursorModel;
 use crate::model::spawn_cursor_model;
 use crate::mouse::TerminalSelection;
@@ -60,8 +61,8 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::window::{PrimaryWindow, Window, WindowCloseRequested, WindowResized};
 
 struct InlineLayout {
-    columns: u32,
-    rows: u32,
+    columns: f32,
+    rows: f32,
     center_x: f32,
     center_y: f32,
     local_x: f32,
@@ -189,7 +190,6 @@ pub fn pump_pty_output(
                     let scrolled = infer_upward_scroll(&prev_rows, &next_rows);
                     inline_objects.apply_scroll(scrolled);
                 }
-                inline_objects.refresh_placeholder_anchors(&runtime.term);
             }
             Err(TryRecvError::Empty) => break,
             Err(TryRecvError::Disconnected) => {
@@ -205,6 +205,19 @@ pub fn pump_pty_output(
     if processed_output {
         redraw.request();
     }
+}
+
+/// Synchronizes kitty graphics state with the rio-vt engine.
+///
+/// Runs every frame between [`pump_pty_output`] and [`sync_inline_objects`]:
+/// placements depend on the scrollback display offset, which mouse input
+/// changes without any PTY traffic, so PTY-driven refreshes are not enough.
+/// The refresh is a no-op diff when nothing changed.
+pub(crate) fn refresh_kitty_graphics(
+    mut runtime: ResMut<TerminalRuntime>,
+    mut inline_objects: ResMut<TerminalInlineObjects>,
+) {
+    inline_objects.refresh_kitty(&mut runtime);
 }
 
 fn infer_upward_scroll(prev_rows: &[String], next_rows: &[String]) -> u16 {
@@ -547,11 +560,11 @@ pub(crate) struct SyncInlineParams<'w, 's> {
     meshes: ResMut<'w, Assets<Mesh>>,
 }
 
-/// Synchronizes Kitty inline object entities.
+/// Synchronizes inline object entities.
 ///
-/// This runs after [`render_terminal_widget`]. It rebuilds the scene entities for registered
-/// [`InlineObject::KittyImage`] values and clears stale inline entities first so the scene matches
-/// the latest terminal anchors exactly.
+/// This runs after [`render_terminal_widget`]. It rebuilds the scene entities for kitty graphics
+/// placements and registered RGP objects, clearing stale inline entities first so the scene
+/// matches the latest terminal state exactly.
 ///
 /// In 2D mode it spawns [`TerminalInlineObjectSprite`] entities. In 3D mode it also generates
 /// plane-attached meshes under [`TerminalPlane`] so images follow the warped terminal surface.
@@ -607,46 +620,79 @@ pub(crate) fn sync_inline_objects(mut params: SyncInlineParams) {
         })
         .collect::<Vec<_>>();
 
-    let mut plane_children = Vec::new();
     for object_id in renderable_ids {
         let Some(anchor) = inline_objects.anchors.get(&object_id) else {
             continue;
         };
-        let layout = inline_layout(anchor, terminal, viewport, cell_width, cell_height);
         let style = anchor.style;
         let Some(object) = inline_objects.objects.get_mut(&object_id) else {
             continue;
         };
-        match object {
-            InlineObject::KittyImage(object) => {
-                let mut ctx = KittyRenderContext {
-                    mode: camera_slots.active().mode,
-                    mobius_progress: active_mobius_progress(
-                        camera_slots.active().mode,
-                        mobius_transition,
-                    ),
-                    warp_amount: plane_warp.amount,
-                    elapsed_secs,
-                    materials,
-                    images,
-                    meshes,
-                    plane_children: &mut plane_children,
-                };
-                sync_kitty_inline_image(commands, object, &layout, &mut ctx);
-            }
-            InlineObject::RgpObject(object) => {
-                spawn_rgp_object(
-                    commands,
-                    object_id,
-                    object,
-                    style,
-                    materials,
-                    meshes,
-                    asset_server,
-                );
-            }
-        }
+        spawn_rgp_object(
+            commands,
+            object_id,
+            object,
+            style,
+            materials,
+            meshes,
+            asset_server,
+        );
     }
+
+    // Kitty placements come resolved from the engine; the views are cloned
+    // out so the image store can be borrowed mutably for texture uploads.
+    let mut plane_children = Vec::new();
+    let views = inline_objects.kitty.placements().to_vec();
+    let inline: &mut TerminalInlineObjects = inline_objects;
+    for (draw_order, view) in views.iter().enumerate() {
+        let Some(image) = inline.kitty.image_mut(view.image_id) else {
+            continue;
+        };
+        let layout = inline_layout(
+            view.row,
+            view.col,
+            view.columns,
+            view.rows,
+            terminal,
+            viewport,
+            cell_width,
+            cell_height,
+        );
+        let mut ctx = KittyRenderContext {
+            mode: camera_slots.active().mode,
+            mobius_progress: active_mobius_progress(camera_slots.active().mode, mobius_transition),
+            warp_amount: plane_warp.amount,
+            elapsed_secs,
+            materials,
+            images,
+            meshes,
+            plane_children: &mut plane_children,
+        };
+        sync_kitty_placement(
+            commands,
+            view,
+            &mut image.raster,
+            &mut inline.kitty_planes,
+            &layout,
+            draw_order,
+            &mut ctx,
+        );
+    }
+
+    // Placements that disappeared leave their cached plane assets behind;
+    // free them so `Assets` does not accumulate dead meshes and materials.
+    let live_keys = views
+        .iter()
+        .map(|view| (view.image_id, view.placement_id))
+        .collect::<std::collections::HashSet<PlacementKey>>();
+    inline.kitty_planes.retain(|key, cache| {
+        if live_keys.contains(key) {
+            return true;
+        }
+        meshes.remove(&cache.mesh);
+        materials.remove(&cache.material);
+        false
+    });
 
     if !plane_children.is_empty() {
         commands.entity(plane_entity).add_children(&plane_children);
@@ -655,47 +701,53 @@ pub(crate) fn sync_inline_objects(mut params: SyncInlineParams) {
     inline_objects.finish_sync(viewport.size, terminal.cols, terminal.rows);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn inline_layout(
-    anchor: &crate::inline::InlineAnchor,
+    row: f32,
+    col: f32,
+    columns: f32,
+    rows: f32,
     terminal: &TerminalSurface,
     viewport: &TerminalViewport,
     cell_width: f32,
     cell_height: f32,
 ) -> InlineLayout {
-    let cols = terminal.cols.max(1) as f32;
-    let rows = terminal.rows.max(1) as f32;
-    let center_x = viewport.center.x - viewport.size.x * 0.5
-        + (anchor.col as f32 + anchor.columns as f32 * 0.5) * cell_width;
-    let center_y = viewport.center.y + viewport.size.y * 0.5
-        - (anchor.row as f32 + anchor.rows as f32 * 0.5) * cell_height;
+    let grid_cols = terminal.cols.max(1) as f32;
+    let grid_rows = terminal.rows.max(1) as f32;
+    let center_x = viewport.center.x - viewport.size.x * 0.5 + (col + columns * 0.5) * cell_width;
+    let center_y = viewport.center.y + viewport.size.y * 0.5 - (row + rows * 0.5) * cell_height;
 
     InlineLayout {
-        columns: anchor.columns,
-        rows: anchor.rows,
+        columns,
+        rows,
         center_x,
         center_y,
-        local_x: (anchor.col as f32 + anchor.columns as f32 * 0.5) / cols - 0.5,
-        local_y: 0.5 - (anchor.row as f32 + anchor.rows as f32 * 0.5) / rows,
-        local_width: anchor.columns as f32 / cols,
-        local_height: anchor.rows as f32 / rows,
-        pixel_width: anchor.columns as f32 * cell_width,
-        pixel_height: anchor.rows as f32 * cell_height,
+        local_x: (col + columns * 0.5) / grid_cols - 0.5,
+        local_y: 0.5 - (row + rows * 0.5) / grid_rows,
+        local_width: columns / grid_cols,
+        local_height: rows / grid_rows,
+        pixel_width: columns * cell_width,
+        pixel_height: rows * cell_height,
     }
 }
 
-fn sync_kitty_inline_image(
+#[allow(clippy::too_many_arguments)]
+fn sync_kitty_placement(
     commands: &mut Commands,
-    object: &mut crate::inline::KittyInlineObject,
+    view: &KittyPlacementView,
+    raster: &mut crate::inline::RasterObject,
+    plane_caches: &mut HashMap<PlacementKey, KittyPlaneCache>,
     layout: &InlineLayout,
+    draw_order: usize,
     ctx: &mut KittyRenderContext<'_>,
 ) {
-    let image_handle = if let Some(handle) = object.raster.handle.as_ref() {
+    let image_handle = if let Some(handle) = raster.handle.as_ref() {
         handle.clone()
     } else {
         let mut image = Image::new_fill(
             Extent3d {
-                width: object.raster.width,
-                height: object.raster.height,
+                width: raster.width,
+                height: raster.height,
                 depth_or_array_layers: 1,
             },
             TextureDimension::D2,
@@ -704,18 +756,33 @@ fn sync_kitty_inline_image(
             bevy::asset::RenderAssetUsages::default(),
         );
         image.sampler = ImageSampler::nearest();
-        image.data = Some(std::mem::take(&mut object.raster.rgba));
+        image.data = Some(std::mem::take(&mut raster.rgba));
         let handle = ctx.images.add(image);
-        object.raster.handle = Some(handle.clone());
+        raster.handle = Some(handle.clone());
         handle
     };
 
     let mut sprite = Sprite::from_image(image_handle.clone());
     sprite.custom_size = Some(Vec2::new(layout.pixel_width, layout.pixel_height));
+    if view.source_rect != [0.0, 0.0, 1.0, 1.0] {
+        let [u0, v0, u1, v1] = view.source_rect;
+        sprite.rect = Some(Rect::new(
+            u0 * raster.width as f32,
+            v0 * raster.height as f32,
+            u1 * raster.width as f32,
+            v1 * raster.height as f32,
+        ));
+    }
     commands.spawn((
         TerminalInlineObjectSprite,
         sprite,
-        Transform::from_translation(Vec3::new(layout.center_x, layout.center_y, 5.0)),
+        // The kitty z-index ordering is baked into the placement order, so
+        // an epsilon per placement keeps sprites stacked back-to-front.
+        Transform::from_translation(Vec3::new(
+            layout.center_x,
+            layout.center_y,
+            5.0 + draw_order as f32 * 0.001,
+        )),
         if ctx.mode.is_3d() {
             Visibility::Hidden
         } else {
@@ -723,9 +790,10 @@ fn sync_kitty_inline_image(
         },
     ));
 
-    let plane_layout = inline_kitty_plane_layout(layout);
+    let plane_layout = inline_kitty_plane_layout(layout, view.source_rect);
+    let key = (view.image_id, view.placement_id);
     let (mesh_handle, material_handle) =
-        ensure_kitty_plane_assets(object, &plane_layout, &image_handle, ctx);
+        ensure_kitty_plane_assets(plane_caches, key, &plane_layout, &image_handle, ctx);
     ctx.plane_children.push(
         commands
             .spawn((
@@ -742,28 +810,35 @@ fn sync_kitty_inline_image(
     );
 }
 
-fn inline_kitty_plane_layout(layout: &InlineLayout) -> InlineKittyPlaneLayout {
+fn inline_kitty_plane_layout(
+    layout: &InlineLayout,
+    source_rect: [f32; 4],
+) -> InlineKittyPlaneLayout {
     InlineKittyPlaneLayout {
         local_x: layout.local_x,
         local_y: layout.local_y,
         local_width: layout.local_width,
         local_height: layout.local_height,
-        x_segments: layout.columns.clamp(2, 24),
-        y_segments: layout.rows.clamp(2, 24),
+        x_segments: (layout.columns.ceil() as u32).clamp(2, 24),
+        y_segments: (layout.rows.ceil() as u32).clamp(2, 24),
+        source_rect,
     }
 }
 
 fn ensure_kitty_plane_assets(
-    object: &mut crate::inline::KittyInlineObject,
+    plane_caches: &mut HashMap<PlacementKey, KittyPlaneCache>,
+    key: PlacementKey,
     layout: &InlineKittyPlaneLayout,
     image_handle: &Handle<Image>,
     ctx: &mut KittyRenderContext<'_>,
 ) -> (Handle<Mesh>, Handle<StandardMaterial>) {
-    let needs_rebuild = object.plane.as_ref().is_none_or(|cache| {
-        cache.x_segments != layout.x_segments || cache.y_segments != layout.y_segments
+    let needs_rebuild = plane_caches.get(&key).is_none_or(|cache| {
+        cache.x_segments != layout.x_segments
+            || cache.y_segments != layout.y_segments
+            || cache.source_rect != layout.source_rect
     });
     if needs_rebuild {
-        if let Some(cache) = object.plane.take() {
+        if let Some(cache) = plane_caches.remove(&key) {
             ctx.meshes.remove(&cache.mesh);
             ctx.materials.remove(&cache.material);
         }
@@ -776,16 +851,22 @@ fn ensure_kitty_plane_assets(
         );
         let mesh_handle = ctx.meshes.add(mesh);
         let material_handle = ctx.materials.add(kitty_plane_material(image_handle));
-        object.plane = Some(crate::inline::KittyPlaneCache {
-            x_segments: layout.x_segments,
-            y_segments: layout.y_segments,
-            mesh: mesh_handle.clone(),
-            material: material_handle.clone(),
-        });
+        plane_caches.insert(
+            key,
+            KittyPlaneCache {
+                x_segments: layout.x_segments,
+                y_segments: layout.y_segments,
+                source_rect: layout.source_rect,
+                mesh: mesh_handle.clone(),
+                material: material_handle.clone(),
+            },
+        );
         return (mesh_handle, material_handle);
     }
 
-    let cache = object.plane.as_mut().expect("plane cache should exist");
+    let cache = plane_caches
+        .get_mut(&key)
+        .expect("plane cache should exist");
     if let Some(mut mesh) = ctx.meshes.get_mut(&cache.mesh) {
         write_kitty_plane_positions(
             &mut mesh,
@@ -826,6 +907,7 @@ fn build_kitty_plane_mesh(
     let mut uvs = Vec::with_capacity(vertex_count);
     let mut indices = Vec::with_capacity((layout.x_segments * layout.y_segments * 6) as usize);
 
+    let [u0, v0, u1, v1] = layout.source_rect;
     for y in 0..=layout.y_segments {
         let v = y as f32 / layout.y_segments as f32;
         let py = layout.local_y + (0.5 - v) * layout.local_height;
@@ -833,7 +915,7 @@ fn build_kitty_plane_mesh(
             let u = x as f32 / layout.x_segments as f32;
             let px = layout.local_x + (u - 0.5) * layout.local_width;
             positions.push([px, py, 0.0]);
-            uvs.push([u, v]);
+            uvs.push([u0 + u * (u1 - u0), v0 + v * (v1 - v0)]);
         }
     }
 
@@ -1180,7 +1262,16 @@ pub(crate) fn sync_rgp_objects(mut params: RgpSyncParams) {
             *visibility = Visibility::Hidden;
             continue;
         };
-        let layout = inline_layout(anchor, terminal, viewport, cell_width, cell_height);
+        let layout = inline_layout(
+            f32::from(anchor.row),
+            f32::from(anchor.col),
+            anchor.columns as f32,
+            anchor.rows as f32,
+            terminal,
+            viewport,
+            cell_width,
+            cell_height,
+        );
         let base_scale = layout.pixel_width.max(layout.pixel_height).max(1.0) * 0.9;
         let scale = base_scale * anchor.style.scale.max(0.001);
         let scale3 = Vec3::new(
@@ -2048,6 +2139,7 @@ mod tests {
             local_height: 0.2,
             x_segments: 2,
             y_segments: 2,
+            source_rect: [0.0, 0.0, 1.0, 1.0],
         };
         let mesh =
             build_kitty_plane_mesh(&layout, TerminalPresentationMode::Mobius3d, 0.0, 0.0, 0.0);
@@ -2120,6 +2212,7 @@ mod tests {
             local_height: 0.2,
             x_segments: 2,
             y_segments: 2,
+            source_rect: [0.0, 0.0, 1.0, 1.0],
         };
         let mesh =
             build_kitty_plane_mesh(&layout, TerminalPresentationMode::Mobius3d, 0.0, 0.0, 1.0);

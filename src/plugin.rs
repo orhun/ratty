@@ -20,9 +20,10 @@ use crate::scene::{
 use crate::systems::{
     TerminalFrameDirty, TerminalRedrawSet, animate_inline_kitty_planes, animate_mobius_transition,
     animate_terminal_plane_warp, apply_inline_objects, apply_instance_brightness,
-    finish_terminal_model_load, handle_window_resize, pump_pty_output, render_terminal_widget,
-    request_exit_on_primary_window_close, shutdown_terminal_runtime_on_exit,
-    sync_asset_to_terminal_cursor, sync_inline_objects, sync_rgp_objects, sync_terminal_materials,
+    finish_terminal_model_load, handle_window_resize, pump_pty_output, refresh_kitty_graphics,
+    render_terminal_widget, request_exit_on_primary_window_close,
+    shutdown_terminal_runtime_on_exit, sync_asset_to_terminal_cursor, sync_inline_objects,
+    sync_rgp_objects, sync_terminal_materials,
 };
 use crate::terminal::TerminalRedrawState;
 
@@ -133,6 +134,15 @@ impl Plugin for TerminalPlugin {
                 )
                     .chain()
                     .in_set(TerminalRedrawSet),
+            )
+            .add_systems(
+                Update,
+                // After the mouse input set so scrollback changes land in the
+                // same frame's placement views.
+                refresh_kitty_graphics
+                    .after(pump_pty_output)
+                    .after(TerminalCameraSystemSet::MouseInput)
+                    .before(sync_inline_objects),
             )
             .add_systems(
                 Update,
