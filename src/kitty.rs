@@ -4,35 +4,46 @@
 //! decodes PNG, RGB, and RGBA payloads (chunked or not), stores images and
 //! placements per screen, answers queries, applies deletes, and evicts
 //! images over the spec's memory budget. This module owns what is ratty's
-//! to draw: it drains the pixel data the engine queues for upload and turns
-//! the engine's placement state into the flat list of textured quads the
-//! Bevy scene renders each frame.
+//! to draw: it turns the engine's placement state into the flat list of
+//! textured quads the Bevy scene renders each frame, converting pixels
+//! from the engine's image store into GPU textures on demand.
+//!
+//! The engine store is the single source of truth for pixels. Textures are
+//! cached per image id and validated against the store's transmission
+//! timestamp, so retransmissions, alternate-screen id collisions, and
+//! evictions all resolve to whatever the engine currently holds.
 //!
 //! Two placement kinds reach the screen:
 //!
 //! - *Direct* placements (`a=T`/`a=p`) live in the engine as absolute,
-//!   scrollback-aware grid positions. Their on-screen position is derived
-//!   per refresh from the terminal's history and display offset, so they
-//!   stay glued to the text they were placed next to — including while the
-//!   user scrolls into history.
+//!   scrollback-aware grid positions. Their on-screen quad comes from the
+//!   engine's own [`kitty_overlay_geometry`], clipped to the terminal
+//!   surface with a proportional source-rect shrink, so partially scrolled
+//!   images show the correct slice instead of overhanging the grid.
 //! - *Virtual* placements (`U=1`, what `kitten icat --unicode-placeholder`
 //!   emits) are anchored by U+10EEEE placeholder cells the application
-//!   prints itself. The visible cells are scanned and the image is fitted
-//!   to their bounding box, so the image moves, clips, and disappears with
-//!   the text that carries it.
+//!   prints itself. Each row-run of placeholder cells is decoded with the
+//!   engine's [`IncompletePlacement`] rules (image id in the foreground
+//!   color — RGB or indexed — placement id in the underline color, row,
+//!   column, and id high byte in combining diacritics) and rendered as its
+//!   own slice via [`compute_run_geometry`], so scrolled or split
+//!   placeholder regions show the right image tiles.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use rio_graphics::{ColorType, GraphicData};
-use rio_vt::ansi::graphics::{kitty_display_size, resolve_source_rect};
-use rio_vt::ansi::kitty_virtual::PLACEHOLDER;
+use rio_graphics::{ColorType, GraphicData, GraphicOverlay};
+use rio_vt::ansi::graphics::{OverlayViewport, clip_overlay_to_rect, kitty_overlay_geometry};
+use rio_vt::ansi::kitty_virtual::{IncompletePlacement, PLACEHOLDER, compute_run_geometry};
 use rio_vt::crosswords::pos::Column;
 
 use crate::inline::RasterObject;
-use crate::vt::{self, CellColor, VtTerminal};
+use crate::vt::{self, VtTerminal};
 
-/// A kitty placement key: `(image_id, placement_id)`.
-pub type PlacementKey = (u32, u32);
+/// A kitty placement view key: `(image_id, placement_id, run)`.
+///
+/// Direct placements use run `0`; virtual placements get one view per
+/// placeholder row-run, keyed by the run's screen position.
+pub type PlacementKey = (u32, u32, u32);
 
 /// Kitty images and the placements to draw, derived from engine state.
 #[derive(Default)]
@@ -42,29 +53,58 @@ pub struct KittyGraphics {
     images: HashMap<u32, KittyImage>,
     /// Placements to draw, sorted back-to-front.
     placements: Vec<KittyPlacementView>,
+    /// Scroll state the current placement views were derived from.
+    snapshot: Option<Snapshot>,
 }
 
 /// A decoded kitty image and its GPU upload state.
 pub struct KittyImage {
     /// Pixel payload and texture handle.
     pub raster: RasterObject,
-    /// Engine transmission timestamp, used to skip redundant re-uploads
-    /// when the engine re-queues the same pixels for another placement.
+    /// Engine transmission timestamp. A mismatch with the engine store
+    /// means the pixels changed under this id — a retransmission, or an
+    /// alternate-screen swap where both screens use the same id — and the
+    /// texture is rebuilt from the store.
     transmit_time: std::time::Instant,
+}
+
+/// The terminal state the placement views depend on besides the grid
+/// content and the engine's dirty flag: any change here moves placements
+/// without either of those signals firing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Snapshot {
+    display_offset: usize,
+    history_size: usize,
+    lines_evicted: u64,
+    direct: usize,
+    r#virtual: usize,
+}
+
+impl Snapshot {
+    fn of(term: &VtTerminal) -> Self {
+        Self {
+            display_offset: term.display_offset(),
+            history_size: term.history_size(),
+            lines_evicted: term.grid.lines_evicted(),
+            direct: term.graphics.kitty_placements.len(),
+            r#virtual: term.graphics.kitty_virtual_placements.len(),
+        }
+    }
 }
 
 /// One kitty placement resolved to visible-grid coordinates.
 ///
 /// Spans are fractional cells: a placement shown at native pixel size
 /// rarely lands on a cell boundary, and rounding it up would stretch the
-/// image. `row` is signed so a placement partially scrolled off the top
-/// keeps its true origin instead of clamping to the first row.
+/// image.
 #[derive(Clone, Debug, PartialEq)]
 pub struct KittyPlacementView {
     /// Kitty image id (`i=`).
     pub image_id: u32,
     /// Kitty placement id (`p=`, or engine-allocated).
     pub placement_id: u32,
+    /// Distinguishes the row-runs of a virtual placement; `0` for direct.
+    pub run: u32,
     /// Top-left corner in visible-grid cells.
     pub row: f32,
     /// Top-left corner in visible-grid cells.
@@ -75,8 +115,15 @@ pub struct KittyPlacementView {
     pub rows: f32,
     /// Normalized source crop within the image, `[u0, v0, u1, v1]`.
     pub source_rect: [f32; 4],
-    /// Kitty z-index, used for draw order among images.
+    /// Kitty z-index. Negative layers render behind the terminal surface.
     pub z: i32,
+}
+
+impl KittyPlacementView {
+    /// Returns the plane-cache key for this view.
+    pub fn key(&self) -> PlacementKey {
+        (self.image_id, self.placement_id, self.run)
+    }
 }
 
 impl KittyGraphics {
@@ -90,23 +137,75 @@ impl KittyGraphics {
         self.images.get_mut(&image_id)
     }
 
-    /// Synchronizes with the engine: applies queued pixel uploads and
-    /// removals, then rebuilds the placement list from the terminal's
-    /// kitty state. Returns whether anything the renderer draws changed.
-    pub fn refresh(
-        &mut self,
-        term: &VtTerminal,
-        updates: Vec<rio_vt::ansi::graphics::UpdateQueues>,
-    ) -> bool {
-        let mut changed = false;
-        for queues in updates {
-            changed |= self.apply_queues(queues);
+    /// Synchronizes with the engine: re-derives the placement views and
+    /// keeps the texture cache aligned with the engine's image store.
+    /// Returns whether anything the renderer draws changed.
+    ///
+    /// `terminal_changed` marks frames where grid content changed (PTY
+    /// output, resize); together with the engine's dirty flag and the
+    /// scroll-state snapshot it gates the rebuild, so idle frames — and
+    /// all frames on a terminal with no graphics — cost a few comparisons.
+    pub fn refresh(&mut self, term: &mut VtTerminal, terminal_changed: bool) -> bool {
+        let engine_dirty = std::mem::take(&mut term.graphics.kitty_graphics_dirty);
+        let snapshot = Snapshot::of(term);
+        if !engine_dirty && !terminal_changed && self.snapshot == Some(snapshot) {
+            return false;
         }
+        self.snapshot = Some(snapshot);
 
-        // Deletes clear the engine's image store without queueing texture
-        // removals, so drop whatever the engine no longer holds. Images on
-        // the *inactive* screen stay: the engine does not re-send pixels
-        // when the terminal swaps back from the alternate screen.
+        let mut views = direct_placement_views(term);
+        views.extend(virtual_placement_views(term));
+        // Back-to-front by kitty z-index, then by keys so equal layers
+        // keep a deterministic order across refreshes.
+        views.sort_by_key(|view| (view.z, view.key()));
+
+        let mut changed = self.ensure_textures(term, &views);
+        changed |= self.prune_textures(term);
+        if views != self.placements {
+            self.placements = views;
+            changed = true;
+        }
+        changed
+    }
+
+    /// Builds or refreshes textures for every image the views reference,
+    /// pulling pixels from the engine's store.
+    fn ensure_textures(&mut self, term: &VtTerminal, views: &[KittyPlacementView]) -> bool {
+        let mut changed = false;
+        let mut seen = HashSet::new();
+        for view in views {
+            if !seen.insert(view.image_id) {
+                continue;
+            }
+            let Some(stored) = term.graphics.get_kitty_image(view.image_id) else {
+                continue;
+            };
+            if self
+                .images
+                .get(&view.image_id)
+                .is_some_and(|image| image.transmit_time == stored.transmission_time)
+            {
+                continue;
+            }
+            let Some(raster) = rasterize(&stored.data) else {
+                continue;
+            };
+            self.images.insert(
+                view.image_id,
+                KittyImage {
+                    raster,
+                    transmit_time: stored.transmission_time,
+                },
+            );
+            changed = true;
+        }
+        changed
+    }
+
+    /// Drops textures for images the engine no longer holds. Images on
+    /// the *inactive* screen stay cached: the engine does not re-send
+    /// pixels when the terminal swaps back from the alternate screen.
+    fn prune_textures(&mut self, term: &VtTerminal) -> bool {
         let graphics = &term.graphics;
         let before = self.images.len();
         self.images.retain(|image_id, _| {
@@ -116,65 +215,12 @@ impl KittyGraphics {
                     .kitty_images
                     .contains_key(image_id)
         });
-        changed |= self.images.len() != before;
-
-        let mut views = direct_placement_views(term);
-        views.extend(virtual_placement_views(term));
-        // Back-to-front by kitty z-index, then by ids so equal layers keep
-        // a deterministic order across refreshes.
-        views.sort_by_key(|view| (view.z, view.image_id, view.placement_id));
-        if views != self.placements {
-            self.placements = views;
-            changed = true;
-        }
-        changed
-    }
-
-    /// Applies one engine update batch: new image pixels in, deleted or
-    /// evicted textures out. Atlas graphics (sixel/iTerm2) are dropped —
-    /// ratty renders kitty placements only and does not advertise sixel.
-    fn apply_queues(&mut self, queues: rio_vt::ansi::graphics::UpdateQueues) -> bool {
-        let mut changed = false;
-
-        for key in queues.remove_queue {
-            // Kitty texture keys are the protocol image id verbatim; atlas
-            // keys live above the u32 range (see rio-graphics).
-            if let Ok(image_id) = u32::try_from(key) {
-                changed |= self.images.remove(&image_id).is_some();
-            }
-        }
-
-        for (image_id, data) in queues.pending_images {
-            // The engine re-queues the stored pixels for every new
-            // placement of an already-transmitted image; only a genuine
-            // retransmission carries a new timestamp.
-            if self
-                .images
-                .get(&image_id)
-                .is_some_and(|image| image.transmit_time == data.transmit_time)
-            {
-                continue;
-            }
-            let transmit_time = data.transmit_time;
-            let Some(raster) = rasterize(data) else {
-                continue;
-            };
-            self.images.insert(
-                image_id,
-                KittyImage {
-                    raster,
-                    transmit_time,
-                },
-            );
-            changed = true;
-        }
-
-        changed
+        before != self.images.len()
     }
 }
 
 /// Converts engine pixel data into ratty's RGBA raster form.
-fn rasterize(data: GraphicData) -> Option<RasterObject> {
+fn rasterize(data: &GraphicData) -> Option<RasterObject> {
     let width = u32::try_from(data.width).ok()?;
     let height = u32::try_from(data.height).ok()?;
     let pixel_count = data.width.checked_mul(data.height)?;
@@ -183,7 +229,7 @@ fn rasterize(data: GraphicData) -> Option<RasterObject> {
             if data.pixels.len() != pixel_count.checked_mul(4)? {
                 return None;
             }
-            data.pixels
+            data.pixels.clone()
         }
         ColorType::Rgb => {
             if data.pixels.len() != pixel_count.checked_mul(3)? {
@@ -204,7 +250,9 @@ fn rasterize(data: GraphicData) -> Option<RasterObject> {
     })
 }
 
-/// Resolves the engine's direct placements against the current viewport.
+/// Resolves the engine's direct placements against the current viewport,
+/// using the engine's own geometry and clipping helpers so ratty draws
+/// exactly the slice rio's renderer would.
 fn direct_placement_views(term: &VtTerminal) -> Vec<KittyPlacementView> {
     let graphics = &term.graphics;
     let cell_width = graphics.cell_width;
@@ -213,67 +261,55 @@ fn direct_placement_views(term: &VtTerminal) -> Vec<KittyPlacementView> {
         return Vec::new();
     }
 
-    // The visible viewport's top row in the engine's absolute row space.
-    let viewport_top = term.grid.lines_evicted() as i64 + term.history_size() as i64
-        - term.display_offset() as i64;
-    let screen_lines = term.screen_lines() as i64;
+    let viewport = OverlayViewport {
+        cell_width,
+        cell_height,
+        origin_x: 0.0,
+        origin_y: 0.0,
+        // `dest_row` is anchored in the stable row space that includes
+        // rows evicted off the ring; fold them into the history so the
+        // viewport top lines up.
+        history_size: term.grid.lines_evicted() as i64 + term.history_size() as i64,
+        display_offset: term.display_offset() as i64,
+        screen_lines: term.screen_lines() as i64,
+    };
+    let surface_width = term.columns() as f32 * cell_width;
+    let surface_height = term.screen_lines() as f32 * cell_height;
 
     let mut views = Vec::new();
     for (&(image_id, placement_id), placement) in &graphics.kitty_placements {
         let Some(stored) = graphics.get_kitty_image(image_id) else {
             continue;
         };
-        let image_width = stored.data.width;
-        let image_height = stored.data.height;
-        let Some((source_x, source_y, source_width, source_height)) = resolve_source_rect(
-            placement.source_x,
-            placement.source_y,
-            placement.source_width,
-            placement.source_height,
-            image_width,
-            image_height,
-        ) else {
+        let Some(geometry) =
+            kitty_overlay_geometry(placement, stored.data.width, stored.data.height, &viewport)
+        else {
             continue;
         };
-
-        let (display_width, display_height) = kitty_display_size(
-            source_width,
-            source_height,
-            placement.requested_columns,
-            placement.requested_rows,
-            cell_width.round() as usize,
-            cell_height.round() as usize,
-        );
-        if display_width == 0 || display_height == 0 {
+        // Clip to the terminal surface: a partially scrolled placement
+        // keeps its position and shows the covered part of the image,
+        // instead of overhanging the grid.
+        let mut overlay = GraphicOverlay {
+            image_id: u64::from(image_id),
+            x: geometry.x,
+            y: geometry.y,
+            width: geometry.width,
+            height: geometry.height,
+            z_index: placement.z_index,
+            source_rect: geometry.source_rect,
+        };
+        if !clip_overlay_to_rect(&mut overlay, 0.0, 0.0, surface_width, surface_height) {
             continue;
         }
-
-        // Per the kitty spec the sub-cell offset stays inside the cell box;
-        // the engine stores the raw request, so clamp at read time.
-        let x_offset = (placement.cell_x_offset as f32).min(cell_width - 1.0) / cell_width;
-        let y_offset = (placement.cell_y_offset as f32).min(cell_height - 1.0) / cell_height;
-
-        let row = (placement.dest_row - viewport_top) as f32 + y_offset;
-        let col = placement.dest_col as f32 + x_offset;
-        let columns = display_width as f32 / cell_width;
-        let rows = display_height as f32 / cell_height;
-        if row + rows <= 0.0 || row >= screen_lines as f32 {
-            continue;
-        }
-
         views.push(KittyPlacementView {
             image_id,
             placement_id,
-            row,
-            col,
-            columns,
-            rows,
-            source_rect: [
-                source_x as f32 / image_width as f32,
-                source_y as f32 / image_height as f32,
-                (source_x + source_width) as f32 / image_width as f32,
-                (source_y + source_height) as f32 / image_height as f32,
-            ],
+            run: 0,
+            row: overlay.y / cell_height,
+            col: overlay.x / cell_width,
+            columns: overlay.width / cell_width,
+            rows: overlay.height / cell_height,
+            source_rect: overlay.source_rect,
             z: placement.z_index,
         });
     }
@@ -283,100 +319,115 @@ fn direct_placement_views(term: &VtTerminal) -> Vec<KittyPlacementView> {
 /// Resolves virtual (`U=1`) placements from their placeholder cells.
 ///
 /// The engine registers the placement metadata; the application prints the
-/// U+10EEEE cells whose foreground color carries the image id. The image is
-/// fitted to the visible placeholder bounding box, which keeps it welded to
-/// the text while scrolling, splitting, and erasing — kitty's reason for
-/// the placeholder mode to exist.
+/// U+10EEEE cells itself. Each row-run of consecutive placeholder cells is
+/// decoded with the engine's continuation rules and rendered as one slice,
+/// which keeps the image welded to the text while scrolling, splitting,
+/// and erasing — kitty's reason for the placeholder mode to exist.
 fn virtual_placement_views(term: &VtTerminal) -> Vec<KittyPlacementView> {
-    let virtual_placements = &term.graphics.kitty_virtual_placements;
-    if virtual_placements.is_empty() {
+    if term.graphics.kitty_virtual_placements.is_empty() {
+        return Vec::new();
+    }
+    let cell_width = term.graphics.cell_width;
+    let cell_height = term.graphics.cell_height;
+    if cell_width < 1.0 || cell_height < 1.0 {
         return Vec::new();
     }
 
-    // Placeholder cells carry the image id's low 24 bits in the foreground
-    // color; the optional high byte lives in a third combining mark that
-    // real emitters (kitten icat) leave unused.
-    let lookup: HashMap<u32, PlacementKey> = virtual_placements
-        .keys()
-        .map(|&(image_id, placement_id)| (image_id & 0x00ff_ffff, (image_id, placement_id)))
-        .collect();
-
-    let mut bounds = HashMap::<PlacementKey, (u16, u16, u16, u16)>::new();
     let rows = u16::try_from(term.screen_lines()).unwrap_or(u16::MAX);
     let cols = u16::try_from(term.columns()).unwrap_or(u16::MAX);
     let styles = vt::styles(term);
+    let mut views = Vec::new();
     for row in 0..rows {
         let Some(grid_row) = vt::visible_row(term, row) else {
             continue;
         };
-        // rio-vt flags rows holding a placeholder, so rows without one skip
-        // the per-cell scan entirely.
+        // rio-vt flags rows holding a placeholder, so rows without one
+        // skip the per-cell scan entirely.
         if !grid_row.kitty_virtual_placeholder {
             continue;
         }
+        let mut current: Option<(IncompletePlacement, u16)> = None;
         for col in 0..cols {
             let square = grid_row[Column(usize::from(col))];
-            if square.c() != PLACEHOLDER {
-                continue;
-            }
-            let (fg, _, _) = vt::cell_attributes(styles, square);
-            let CellColor::Rgb(r, g, b) = fg else {
-                continue;
+            let cell = (square.c() == PLACEHOLDER).then(|| {
+                let style = styles
+                    .get(usize::from(square.style_id()))
+                    .copied()
+                    .unwrap_or_default();
+                // Combining marks carry the row/column/id-high diacritics.
+                let combining = term
+                    .grid
+                    .cell_text(vt::visible_pos(term, row, col))
+                    .skip(1)
+                    .collect::<Vec<_>>();
+                IncompletePlacement::from_cell(style.fg, style.underline_color, &combining)
+            });
+            current = match (current.take(), cell) {
+                (Some((mut run, start)), Some(cell)) if run.can_append(&cell) => {
+                    run.append();
+                    Some((run, start))
+                }
+                (previous, cell) => {
+                    if let Some((run, start)) = previous {
+                        views.extend(run_view(term, &run, row, start, cell_width, cell_height));
+                    }
+                    cell.map(|cell| (cell, col))
+                }
             };
-            let encoded_id = (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b);
-            let Some(&key) = lookup.get(&encoded_id) else {
-                continue;
-            };
-            bounds
-                .entry(key)
-                .and_modify(|(top, left, bottom, right)| {
-                    *top = (*top).min(row);
-                    *left = (*left).min(col);
-                    *bottom = (*bottom).max(row);
-                    *right = (*right).max(col);
-                })
-                .or_insert((row, col, row, col));
+        }
+        if let Some((run, start)) = current {
+            views.extend(run_view(term, &run, row, start, cell_width, cell_height));
         }
     }
+    views
+}
 
-    bounds
-        .into_iter()
-        .map(|((image_id, placement_id), (top, left, bottom, right))| {
-            let placement = &virtual_placements[&(image_id, placement_id)];
-            let source_rect = term
-                .graphics
-                .get_kitty_image(image_id)
-                .and_then(|stored| {
-                    let width = stored.data.width;
-                    let height = stored.data.height;
-                    let (x, y, w, h) = resolve_source_rect(
-                        placement.x,
-                        placement.y,
-                        placement.width,
-                        placement.height,
-                        width,
-                        height,
-                    )?;
-                    Some([
-                        x as f32 / width as f32,
-                        y as f32 / height as f32,
-                        (x + w) as f32 / width as f32,
-                        (y + h) as f32 / height as f32,
-                    ])
-                })
-                .unwrap_or([0.0, 0.0, 1.0, 1.0]);
-            KittyPlacementView {
-                image_id,
-                placement_id,
-                row: f32::from(top),
-                col: f32::from(left),
-                columns: f32::from(right - left + 1),
-                rows: f32::from(bottom - top + 1),
-                source_rect,
-                z: 0,
-            }
-        })
-        .collect()
+/// Resolves one placeholder row-run into a placement view.
+fn run_view(
+    term: &VtTerminal,
+    run: &IncompletePlacement,
+    screen_row: u16,
+    start_col: u16,
+    cell_width: f32,
+    cell_height: f32,
+) -> Option<KittyPlacementView> {
+    let run = run.complete();
+    let virtual_placements = &term.graphics.kitty_virtual_placements;
+    // Exact key first; placeholder streams that omit the underline color
+    // (placement id 0) fall back to any placement of the image.
+    let (&(image_id, placement_id), placement) = virtual_placements
+        .get_key_value(&(run.image_id, run.placement_id))
+        .or_else(|| {
+            virtual_placements
+                .iter()
+                .find(|((id, _), _)| *id == run.image_id)
+        })?;
+    let stored = term.graphics.get_kitty_image(image_id)?;
+    let geometry = compute_run_geometry(
+        &run,
+        placement.columns,
+        placement.rows,
+        u32::try_from(stored.data.width).ok()?,
+        u32::try_from(stored.data.height).ok()?,
+        (placement.x, placement.y, placement.width, placement.height),
+        cell_width,
+        cell_height,
+        0.0,
+        0.0,
+        usize::from(screen_row),
+        usize::from(start_col),
+    )?;
+    Some(KittyPlacementView {
+        image_id,
+        placement_id,
+        run: (u32::from(screen_row) << 16) | u32::from(start_col),
+        row: geometry.y / cell_height,
+        col: geometry.x / cell_width,
+        columns: geometry.width / cell_width,
+        rows: geometry.height / cell_height,
+        source_rect: geometry.source_rect,
+        z: 0,
+    })
 }
 
 #[cfg(test)]
@@ -385,6 +436,7 @@ mod tests {
 
     use base64::Engine as _;
     use rio_vt::ansi::CursorShape;
+    use rio_vt::ansi::kitty_virtual::encode_placeholder;
     use rio_vt::crosswords::{Crosswords, CrosswordsSize};
     use rio_vt::event::WindowId;
     use rio_vt::performer::handler::Processor;
@@ -393,6 +445,7 @@ mod tests {
 
     const CELL_WIDTH: u32 = 10;
     const CELL_HEIGHT: u32 = 20;
+    const FULL: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
 
     struct Harness {
         term: VtTerminal,
@@ -431,14 +484,31 @@ mod tests {
             self.processor.advance(&mut self.term, bytes);
         }
 
+        /// Refreshes as a frame with terminal changes would.
         fn refresh(&mut self) -> bool {
-            let updates = self.sink.take_graphics_updates();
-            self.kitty.refresh(&self.term, updates)
+            self.kitty.refresh(&mut self.term, true)
         }
 
-        /// Transmits and places an opaque RGBA image at the cursor.
+        /// Refreshes as a quiet frame would: only the engine dirty flag
+        /// and the scroll snapshot can trigger a rebuild.
+        fn refresh_quiet(&mut self) -> bool {
+            self.kitty.refresh(&mut self.term, false)
+        }
+
+        /// Transmits and places a solid RGBA image at the cursor.
         fn transmit_and_place(&mut self, image_id: u32, width: u32, height: u32, extra: &str) {
-            let pixels = vec![255_u8; (width * height * 4) as usize];
+            self.transmit_pixels(image_id, width, height, [255, 255, 255, 255], extra);
+        }
+
+        fn transmit_pixels(
+            &mut self,
+            image_id: u32,
+            width: u32,
+            height: u32,
+            pixel: [u8; 4],
+            extra: &str,
+        ) {
+            let pixels = pixel.repeat((width * height) as usize);
             let payload = base64::engine::general_purpose::STANDARD.encode(&pixels);
             self.feed(
                 format!("\x1b_Ga=T,f=32,s={width},v={height},i={image_id}{extra};{payload}\x1b\\")
@@ -468,7 +538,7 @@ mod tests {
         assert_eq!(view.image_id, 7);
         assert_eq!((view.row, view.col), (1.0, 2.0));
         assert_eq!((view.columns, view.rows), (2.0, 2.0));
-        assert_eq!(view.source_rect, [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(view.source_rect, FULL);
 
         let image = harness.kitty.image_mut(7).expect("decoded image");
         assert_eq!(image.raster.width, 2 * CELL_WIDTH);
@@ -482,8 +552,27 @@ mod tests {
             harness.reply_text().contains("\x1b_Gi=7;OK\x1b\\"),
             "the engine must acknowledge the transfer"
         );
+    }
 
-        assert!(!harness.refresh(), "an unchanged frame must not re-sync");
+    #[test]
+    fn quiet_frames_skip_the_rebuild() {
+        let mut harness = Harness::new(5, 20);
+        for line in 0..10 {
+            harness.feed(format!("row{line}\r\n").as_bytes());
+        }
+        harness.transmit_and_place(3, CELL_WIDTH, CELL_HEIGHT, "");
+
+        assert!(
+            harness.refresh_quiet(),
+            "the engine dirty flag must trigger a rebuild without a grid-change hint"
+        );
+        assert!(!harness.refresh_quiet(), "an idle frame must be a no-op");
+
+        vt::set_scrollback(&mut harness.term, 2);
+        assert!(
+            harness.refresh_quiet(),
+            "a scrollback change must rebuild the views"
+        );
     }
 
     #[test]
@@ -532,26 +621,31 @@ mod tests {
     }
 
     #[test]
-    fn placements_scroll_with_content_and_history() {
+    fn scrolled_placements_clip_to_the_visible_slice() {
         let mut harness = Harness::new(3, 20);
         harness.transmit_and_place(5, CELL_WIDTH, 2 * CELL_HEIGHT, "");
         harness.refresh();
         assert_eq!(harness.kitty.placements()[0].row, 0.0);
 
-        // Scroll the content up one row: the placement follows the text.
+        // Scroll the content up one row: the top half leaves the screen,
+        // and the visible remainder shows the bottom half of the image.
         harness.feed(b"\x1b[3;1H\r\n");
         harness.refresh();
-        assert_eq!(harness.kitty.placements()[0].row, -1.0);
+        let view = &harness.kitty.placements()[0];
+        assert_eq!((view.row, view.rows), (0.0, 1.0));
+        assert_eq!(view.source_rect, [0.0, 0.5, 1.0, 1.0]);
 
         // And another: fully above the viewport, so nothing to draw.
         harness.feed(b"\r\n");
         harness.refresh();
         assert!(harness.kitty.placements().is_empty());
 
-        // Scrolling back into history brings it back.
+        // Scrolling back into history brings the whole image back.
         vt::set_scrollback(&mut harness.term, 2);
         harness.refresh();
-        assert_eq!(harness.kitty.placements()[0].row, 0.0);
+        let view = &harness.kitty.placements()[0];
+        assert_eq!((view.row, view.rows), (0.0, 2.0));
+        assert_eq!(view.source_rect, FULL);
     }
 
     #[test]
@@ -588,6 +682,20 @@ mod tests {
     }
 
     #[test]
+    fn negative_z_layers_sort_first_and_stay_negative() {
+        let mut harness = Harness::new(5, 20);
+        harness.transmit_and_place(1, CELL_WIDTH, CELL_HEIGHT, ",z=1");
+        harness.feed(b"\x1b[1;1H");
+        harness.transmit_and_place(2, CELL_WIDTH, CELL_HEIGHT, ",z=-1");
+
+        harness.refresh();
+        let views = harness.kitty.placements();
+        assert_eq!(views.len(), 2);
+        assert_eq!((views[0].image_id, views[0].z), (2, -1));
+        assert_eq!((views[1].image_id, views[1].z), (1, 1));
+    }
+
+    #[test]
     fn virtual_placements_follow_their_placeholder_cells() {
         let mut harness = Harness::new(5, 20);
         harness.transmit_and_place(42, 2 * CELL_WIDTH, CELL_HEIGHT, ",U=1,c=2,r=1");
@@ -599,10 +707,9 @@ mod tests {
 
         // The application prints the placeholder cells itself, image id in
         // the foreground color and row/column in combining diacritics.
-        let encode = rio_vt::ansi::kitty_virtual::encode_placeholder;
         harness.feed(b"\x1b[3;4H\x1b[38;2;0;0;42m");
-        harness.feed(encode(0, 0, None).as_bytes());
-        harness.feed(encode(0, 1, None).as_bytes());
+        harness.feed(encode_placeholder(0, 0, None).as_bytes());
+        harness.feed(encode_placeholder(0, 1, None).as_bytes());
         harness.feed(b"\x1b[m");
 
         assert!(harness.refresh());
@@ -612,6 +719,80 @@ mod tests {
         assert_eq!(view.image_id, 42);
         assert_eq!((view.row, view.col), (2.0, 3.0));
         assert_eq!((view.columns, view.rows), (2.0, 1.0));
+        assert_eq!(view.source_rect, FULL);
+    }
+
+    #[test]
+    fn indexed_color_placeholders_render() {
+        let mut harness = Harness::new(5, 20);
+        harness.transmit_and_place(42, 2 * CELL_WIDTH, CELL_HEIGHT, ",U=1,c=2,r=1");
+
+        // Ids up to 255 may arrive as an indexed foreground color.
+        harness.feed(b"\x1b[1;1H\x1b[38;5;42m");
+        harness.feed(encode_placeholder(0, 0, None).as_bytes());
+        harness.feed(encode_placeholder(0, 1, None).as_bytes());
+        harness.feed(b"\x1b[m");
+
+        harness.refresh();
+        let views = harness.kitty.placements();
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0].image_id, 42);
+    }
+
+    #[test]
+    fn partially_shown_virtual_placements_slice_by_diacritics() {
+        let mut harness = Harness::new(5, 20);
+        // A 2x2-cell virtual placement, but the application only shows the
+        // second image row: kitty semantics say those cells display the
+        // bottom slice, never a squashed whole image.
+        harness.transmit_and_place(9, 2 * CELL_WIDTH, 2 * CELL_HEIGHT, ",U=1,c=2,r=2");
+        harness.feed(b"\x1b[1;1H\x1b[38;2;0;0;9m");
+        harness.feed(encode_placeholder(1, 0, None).as_bytes());
+        harness.feed(encode_placeholder(1, 1, None).as_bytes());
+        harness.feed(b"\x1b[m");
+
+        harness.refresh();
+        let views = harness.kitty.placements();
+        assert_eq!(views.len(), 1);
+        let view = &views[0];
+        assert_eq!((view.row, view.col), (0.0, 0.0));
+        assert_eq!((view.columns, view.rows), (2.0, 1.0));
+        assert_eq!(
+            view.source_rect,
+            [0.0, 0.5, 1.0, 1.0],
+            "the run must show the image row its diacritics name"
+        );
+    }
+
+    #[test]
+    fn alt_screen_id_collisions_rebuild_from_the_engine_store() {
+        let mut harness = Harness::new(5, 20);
+        harness.transmit_pixels(1, 1, 1, [255, 0, 0, 255], "");
+        harness.refresh();
+        assert_eq!(
+            &harness.kitty.image_mut(1).expect("image 1").raster.rgba,
+            &[255, 0, 0, 255]
+        );
+
+        // An alt-screen app reuses id 1 for a different image.
+        harness.feed(b"\x1b[?1049h");
+        harness.transmit_pixels(1, 1, 1, [0, 0, 255, 255], "");
+        harness.refresh();
+        assert_eq!(
+            &harness.kitty.image_mut(1).expect("image 1").raster.rgba,
+            &[0, 0, 255, 255]
+        );
+
+        // Swapping back must restore the main screen's pixels even though
+        // the engine sends no new UpdateGraphics event for them.
+        harness.feed(b"\x1b[?1049l");
+        harness.refresh();
+        let views = harness.kitty.placements();
+        assert_eq!(views.len(), 1);
+        assert_eq!(
+            &harness.kitty.image_mut(1).expect("image 1").raster.rgba,
+            &[255, 0, 0, 255]
+        );
     }
 
     #[test]

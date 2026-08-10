@@ -12,7 +12,6 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
 use rio_vt::ansi::CursorShape;
-use rio_vt::ansi::graphics::UpdateQueues;
 use rio_vt::config::colors::{AnsiColor, NamedColor};
 use rio_vt::crosswords::grid::row::Row;
 use rio_vt::crosswords::grid::{Grid, Scroll};
@@ -27,18 +26,16 @@ pub type VtTerminal = Crosswords<TerminalEventSink>;
 
 /// Sink for the events rio-vt raises while parsing.
 ///
-/// Ratty acts on two variants: [`RioEvent::PtyWrite`] — the engine's DA, DSR,
-/// CPR, XTVERSION, kitty-keyboard, and kitty-graphics replies, which have to
-/// be written back to the PTY — and [`RioEvent::UpdateGraphics`], which
-/// carries decoded kitty image pixels for upload to the GPU.
+/// The only variant ratty acts on today is [`RioEvent::PtyWrite`] — the
+/// engine's DA, DSR, CPR, XTVERSION, kitty-keyboard, and kitty-graphics
+/// replies, which have to be written back to the PTY.
 ///
-/// `send_event` takes `&self`, so the queues need interior mutability, and
+/// `send_event` takes `&self`, so the queue needs interior mutability, and
 /// `TerminalRuntime` is a Bevy resource that has to stay `Send + Sync`, which
 /// rules out `RefCell`.
 #[derive(Clone, Default)]
 pub struct TerminalEventSink {
     replies: Arc<Mutex<Vec<Vec<u8>>>>,
-    graphics: Arc<Mutex<Vec<UpdateQueues>>>,
 }
 
 impl TerminalEventSink {
@@ -46,12 +43,6 @@ impl TerminalEventSink {
     pub fn take_replies(&self) -> Vec<Vec<u8>> {
         let mut replies = self.replies.lock().unwrap_or_else(PoisonError::into_inner);
         std::mem::take(&mut *replies)
-    }
-
-    /// Drains the graphics update queues rio-vt has emitted.
-    pub fn take_graphics_updates(&self) -> Vec<UpdateQueues> {
-        let mut updates = self.graphics.lock().unwrap_or_else(PoisonError::into_inner);
-        std::mem::take(&mut *updates)
     }
 }
 
@@ -68,13 +59,11 @@ impl EventListener for TerminalEventSink {
                 replies.push(reply.into_bytes());
             }
 
-            // Decoded image pixels the engine wants uploaded to the GPU, plus
-            // texture keys whose images were deleted or evicted. Ratty's
-            // kitty-graphics sync drains these each frame.
-            RioEvent::UpdateGraphics { queues, .. } => {
-                let mut updates = self.graphics.lock().unwrap_or_else(PoisonError::into_inner);
-                updates.push(queues);
-            }
+            // Decoded image pixels the engine queues for GPU upload. Ratty's
+            // kitty-graphics sync reads pixels from the engine's image store
+            // directly (the store, unlike this event, is per-screen and
+            // survives alternate-screen swaps), so the queue is dropped here.
+            RioEvent::UpdateGraphics { .. } => {}
 
             // Requests carrying a reply callback rio-vt expects the embedder to
             // invoke and write back. Ratty answers none of them yet, so an
