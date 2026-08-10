@@ -11,14 +11,18 @@ use crate::model::{
     ObjectLoadOptions, load_object_source_from_bytes_with_options, load_object_source_with_options,
 };
 use crate::rgp::{
-    RgpOperation, RgpPlacementStyle, RgpPlacementUpdate, RgpRegisterSource,
+    RGP_APC_START, RgpOperation, RgpPlacementStyle, RgpPlacementUpdate, RgpRegisterSource,
     consume_sequence as consume_rgp_sequence, support_reply,
 };
 use crate::runtime::TerminalRuntime;
 
-const APC_START: &[u8] = b"\x1b_";
 const ST: &[u8] = b"\x1b\\";
 const C1_ST: u8 = 0x9c;
+
+/// Longest unterminated RGP sequence held back from the engine. Past this,
+/// the bytes are almost certainly not a real RGP message (chunked payloads
+/// stay far smaller), so they flow through rather than freezing the screen.
+const RGP_MAX_PENDING: usize = 8 * 1024 * 1024;
 
 /// Marker for 2D inline object sprites.
 #[derive(Component)]
@@ -86,7 +90,16 @@ pub struct TerminalInlineObjects {
 }
 
 impl TerminalInlineObjects {
-    /// Consumes PTY output and extracts inline object control sequences.
+    /// Consumes PTY output, extracting RGP control sequences and streaming
+    /// everything else — kitty graphics APCs included — straight through to
+    /// the engine, which parses APC statefully itself.
+    ///
+    /// Only bytes that could still become an RGP sequence are withheld: a
+    /// partial `ESC _ratty;g;` prefix at the tail of a chunk, or a matched
+    /// prefix whose terminator has not arrived yet (capped, so a runaway
+    /// stream cannot freeze the display). Everything else flows to the
+    /// engine immediately, so a multi-megabyte kitty transfer is never
+    /// buffered or rescanned here.
     pub fn consume_pty_output(
         &mut self,
         chunk: &[u8],
@@ -99,44 +112,53 @@ impl TerminalInlineObjects {
 
         let mut cursor = 0;
         loop {
-            let Some(start_offset) = self.pending_bytes[cursor..]
-                .windows(APC_START.len())
-                .position(|window| window == APC_START)
-            else {
-                let pending_len = self.pending_bytes.len();
-                let keep_from = pending_apc_prefix_start(&self.pending_bytes, cursor);
-                if cursor < keep_from {
-                    *terminal_output = true;
-                    runtime.process(&self.pending_bytes[cursor..keep_from]);
-                }
-                if keep_from < pending_len {
-                    self.pending_bytes.drain(..keep_from);
-                } else {
+            match next_rgp_candidate(&self.pending_bytes, cursor) {
+                RgpScan::None => {
+                    if cursor < self.pending_bytes.len() {
+                        *terminal_output = true;
+                        runtime.process(&self.pending_bytes[cursor..]);
+                    }
                     self.pending_bytes.clear();
+                    return replies;
                 }
-                return replies;
-            };
-            let start = cursor + start_offset;
-            if cursor < start {
-                *terminal_output = true;
-                runtime.process(&self.pending_bytes[cursor..start]);
+                RgpScan::Partial(start) => {
+                    if cursor < start {
+                        *terminal_output = true;
+                        runtime.process(&self.pending_bytes[cursor..start]);
+                    }
+                    self.pending_bytes.drain(..start);
+                    return replies;
+                }
+                RgpScan::Complete(start) => {
+                    if cursor < start {
+                        *terminal_output = true;
+                        runtime.process(&self.pending_bytes[cursor..start]);
+                    }
+                    let Some(end) = apc_end(&self.pending_bytes, start + RGP_APC_START.len())
+                    else {
+                        if self.pending_bytes.len() - start > RGP_MAX_PENDING {
+                            // Runaway unterminated sequence: stop withholding
+                            // and let the engine's APC parser deal with it.
+                            *terminal_output = true;
+                            runtime.process(&self.pending_bytes[start..]);
+                            self.pending_bytes.clear();
+                            return replies;
+                        }
+                        self.pending_bytes.drain(..start);
+                        return replies;
+                    };
+                    let sequence = self.pending_bytes[start..end].to_vec();
+                    let (handled, reply) = self.handle_rgp_apc(&sequence, camera_updates);
+                    if let Some(reply) = reply {
+                        replies.push(reply);
+                    }
+                    if !handled {
+                        *terminal_output = true;
+                        runtime.process(&sequence);
+                    }
+                    cursor = end;
+                }
             }
-
-            let payload_start = start + APC_START.len();
-            let Some(end) = apc_end(&self.pending_bytes, payload_start) else {
-                self.pending_bytes.drain(..start);
-                return replies;
-            };
-            let sequence = self.pending_bytes[start..end].to_vec();
-            let (handled, reply) = self.handle_apc_sequence(&sequence, camera_updates);
-            if let Some(reply) = reply {
-                replies.push(reply);
-            }
-            if !handled {
-                *terminal_output = true;
-                runtime.process(&sequence);
-            }
-            cursor = end;
         }
     }
 
@@ -180,12 +202,13 @@ impl TerminalInlineObjects {
 
     /// Synchronizes kitty graphics with the engine's state.
     ///
-    /// Drains the pixel data rio-vt queued for GPU upload and re-derives
-    /// the visible placements. Cheap when nothing changed, so it runs every
-    /// frame — placements move with scrollback without any PTY traffic.
-    pub fn refresh_kitty(&mut self, runtime: &mut TerminalRuntime) {
-        let updates = runtime.take_graphics_updates();
-        if self.kitty.refresh(&runtime.term, updates) {
+    /// Re-derives the visible placements and keeps textures aligned with
+    /// the engine's image store. Runs every frame — placements move with
+    /// scrollback without any PTY traffic — but the refresh gates itself
+    /// on the engine's dirty flag, `terminal_changed`, and the scroll
+    /// state, so quiet frames cost a few comparisons.
+    pub fn refresh_kitty(&mut self, runtime: &mut TerminalRuntime, terminal_changed: bool) {
+        if self.kitty.refresh(&mut runtime.term, terminal_changed) {
             self.dirty = true;
         }
     }
@@ -209,13 +232,15 @@ impl TerminalInlineObjects {
         self.dirty = true;
     }
 
-    fn handle_apc_sequence(
+    fn handle_rgp_apc(
         &mut self,
         sequence: &[u8],
         camera_updates: &mut Vec<TerminalCameraUpdate>,
     ) -> (bool, Option<Vec<u8>>) {
         // Only RGP is ratty's to parse. Kitty graphics APCs flow through to
-        // rio-vt, which owns that protocol end to end.
+        // rio-vt, which owns that protocol end to end. A sequence that
+        // matched the RGP prefix but fails to parse also flows through, so
+        // no bytes are ever swallowed silently.
         if let Some(reply) = self.handle_rgp_sequence(sequence, camera_updates) {
             return (true, reply);
         }
@@ -407,13 +432,34 @@ struct PendingRgpPayload {
     options: ObjectLoadOptions,
 }
 
-fn pending_apc_prefix_start(bytes: &[u8], cursor: usize) -> usize {
-    let start = cursor.min(bytes.len());
-    if bytes[start..].ends_with(&APC_START[..1]) {
-        bytes.len() - 1
-    } else {
-        bytes.len()
+/// Where the next possible RGP sequence starts, relative to `bytes`.
+enum RgpScan {
+    /// No RGP prefix anywhere after `from` — everything can flow through.
+    None,
+    /// The buffer ends mid-prefix; bytes from here must wait for more input.
+    Partial(usize),
+    /// A full `ESC _ratty;g;` prefix starts here.
+    Complete(usize),
+}
+
+/// Scans for the next byte position that matches the RGP APC prefix as far
+/// as the buffer reaches. APC payloads cannot contain `ESC` (it terminates
+/// them), so a match inside another sequence's payload is impossible.
+fn next_rgp_candidate(bytes: &[u8], from: usize) -> RgpScan {
+    let mut index = from;
+    while let Some(offset) = bytes[index..].iter().position(|byte| *byte == 0x1b) {
+        let start = index + offset;
+        let available = bytes.len() - start;
+        let compare = available.min(RGP_APC_START.len());
+        if bytes[start..start + compare] == RGP_APC_START[..compare] {
+            if compare < RGP_APC_START.len() {
+                return RgpScan::Partial(start);
+            }
+            return RgpScan::Complete(start);
+        }
+        index = start + 1;
     }
+    RgpScan::None
 }
 
 fn apc_end(bytes: &[u8], payload_start: usize) -> Option<usize> {
