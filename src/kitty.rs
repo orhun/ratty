@@ -378,3 +378,254 @@ fn virtual_placement_views(term: &VtTerminal) -> Vec<KittyPlacementView> {
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use base64::Engine as _;
+    use rio_vt::ansi::CursorShape;
+    use rio_vt::crosswords::{Crosswords, CrosswordsSize};
+    use rio_vt::event::WindowId;
+    use rio_vt::performer::handler::Processor;
+
+    use crate::vt::TerminalEventSink;
+
+    const CELL_WIDTH: u32 = 10;
+    const CELL_HEIGHT: u32 = 20;
+
+    struct Harness {
+        term: VtTerminal,
+        processor: Processor,
+        sink: TerminalEventSink,
+        kitty: KittyGraphics,
+    }
+
+    impl Harness {
+        fn new(rows: u16, cols: u16) -> Self {
+            let sink = TerminalEventSink::default();
+            let term = Crosswords::new(
+                CrosswordsSize::new_with_dimensions(
+                    usize::from(cols),
+                    usize::from(rows),
+                    u32::from(cols) * CELL_WIDTH,
+                    u32::from(rows) * CELL_HEIGHT,
+                    CELL_WIDTH,
+                    CELL_HEIGHT,
+                ),
+                CursorShape::Block,
+                sink.clone(),
+                WindowId::from(0),
+                0,
+                1000,
+            );
+            Self {
+                term,
+                processor: Processor::default(),
+                sink,
+                kitty: KittyGraphics::default(),
+            }
+        }
+
+        fn feed(&mut self, bytes: &[u8]) {
+            self.processor.advance(&mut self.term, bytes);
+        }
+
+        fn refresh(&mut self) -> bool {
+            let updates = self.sink.take_graphics_updates();
+            self.kitty.refresh(&self.term, updates)
+        }
+
+        /// Transmits and places an opaque RGBA image at the cursor.
+        fn transmit_and_place(&mut self, image_id: u32, width: u32, height: u32, extra: &str) {
+            let pixels = vec![255_u8; (width * height * 4) as usize];
+            let payload = base64::engine::general_purpose::STANDARD.encode(&pixels);
+            self.feed(
+                format!("\x1b_Ga=T,f=32,s={width},v={height},i={image_id}{extra};{payload}\x1b\\")
+                    .as_bytes(),
+            );
+        }
+
+        fn reply_text(&mut self) -> String {
+            self.sink
+                .take_replies()
+                .into_iter()
+                .map(|reply| String::from_utf8_lossy(&reply).into_owned())
+                .collect()
+        }
+    }
+
+    #[test]
+    fn transmit_and_place_lands_at_the_cursor() {
+        let mut harness = Harness::new(5, 20);
+        harness.feed(b"\x1b[2;3H");
+        harness.transmit_and_place(7, 2 * CELL_WIDTH, 2 * CELL_HEIGHT, "");
+
+        assert!(harness.refresh(), "a new placement must report a change");
+        let views = harness.kitty.placements();
+        assert_eq!(views.len(), 1);
+        let view = &views[0];
+        assert_eq!(view.image_id, 7);
+        assert_eq!((view.row, view.col), (1.0, 2.0));
+        assert_eq!((view.columns, view.rows), (2.0, 2.0));
+        assert_eq!(view.source_rect, [0.0, 0.0, 1.0, 1.0]);
+
+        let image = harness.kitty.image_mut(7).expect("decoded image");
+        assert_eq!(image.raster.width, 2 * CELL_WIDTH);
+        assert_eq!(image.raster.height, 2 * CELL_HEIGHT);
+        assert_eq!(
+            image.raster.rgba.len(),
+            (2 * CELL_WIDTH * 2 * CELL_HEIGHT * 4) as usize
+        );
+
+        assert!(
+            harness.reply_text().contains("\x1b_Gi=7;OK\x1b\\"),
+            "the engine must acknowledge the transfer"
+        );
+
+        assert!(!harness.refresh(), "an unchanged frame must not re-sync");
+    }
+
+    #[test]
+    fn rgb_payloads_expand_to_rgba() {
+        let mut harness = Harness::new(5, 20);
+        let payload = base64::engine::general_purpose::STANDARD.encode([9_u8, 8, 7]);
+        harness.feed(format!("\x1b_Ga=T,f=24,s=1,v=1,i=3;{payload}\x1b\\").as_bytes());
+
+        harness.refresh();
+        let image = harness.kitty.image_mut(3).expect("decoded image");
+        assert_eq!(image.raster.rgba, vec![9, 8, 7, 255]);
+    }
+
+    #[test]
+    fn chunked_png_transfers_decode_once_complete() {
+        let mut harness = Harness::new(5, 20);
+        let png = {
+            let image = image::RgbaImage::from_pixel(4, 4, image::Rgba([1, 2, 3, 255]));
+            let mut bytes = Vec::new();
+            image::DynamicImage::ImageRgba8(image)
+                .write_to(
+                    &mut std::io::Cursor::new(&mut bytes),
+                    image::ImageFormat::Png,
+                )
+                .expect("png encode");
+            bytes
+        };
+        let payload = base64::engine::general_purpose::STANDARD.encode(&png);
+        // Chunk boundaries must fall on base64 quantum edges, as kitten
+        // icat's 4096-byte chunks do.
+        let (first, second) = payload.split_at((payload.len() / 2) & !3);
+
+        harness.feed(format!("\x1b_Ga=T,f=100,i=9,m=1;{first}\x1b\\").as_bytes());
+        harness.refresh();
+        assert!(
+            harness.kitty.placements().is_empty(),
+            "an incomplete transfer must not place anything"
+        );
+
+        harness.feed(format!("\x1b_Gm=0;{second}\x1b\\").as_bytes());
+        harness.refresh();
+        assert_eq!(harness.kitty.placements().len(), 1);
+        let image = harness.kitty.image_mut(9).expect("decoded image");
+        assert_eq!((image.raster.width, image.raster.height), (4, 4));
+        assert_eq!(&image.raster.rgba[..4], &[1, 2, 3, 255]);
+    }
+
+    #[test]
+    fn placements_scroll_with_content_and_history() {
+        let mut harness = Harness::new(3, 20);
+        harness.transmit_and_place(5, CELL_WIDTH, 2 * CELL_HEIGHT, "");
+        harness.refresh();
+        assert_eq!(harness.kitty.placements()[0].row, 0.0);
+
+        // Scroll the content up one row: the placement follows the text.
+        harness.feed(b"\x1b[3;1H\r\n");
+        harness.refresh();
+        assert_eq!(harness.kitty.placements()[0].row, -1.0);
+
+        // And another: fully above the viewport, so nothing to draw.
+        harness.feed(b"\r\n");
+        harness.refresh();
+        assert!(harness.kitty.placements().is_empty());
+
+        // Scrolling back into history brings it back.
+        vt::set_scrollback(&mut harness.term, 2);
+        harness.refresh();
+        assert_eq!(harness.kitty.placements()[0].row, 0.0);
+    }
+
+    #[test]
+    fn delete_all_drops_placements_and_image_data() {
+        let mut harness = Harness::new(5, 20);
+        harness.transmit_and_place(4, CELL_WIDTH, CELL_HEIGHT, "");
+        harness.refresh();
+        assert_eq!(harness.kitty.placements().len(), 1);
+
+        harness.feed(b"\x1b_Ga=d,d=A\x1b\\");
+        assert!(harness.refresh());
+        assert!(harness.kitty.placements().is_empty());
+        assert!(
+            harness.kitty.image_mut(4).is_none(),
+            "deleted image data must not keep a texture alive"
+        );
+    }
+
+    #[test]
+    fn source_crops_resolve_to_normalized_rects() {
+        let mut harness = Harness::new(5, 20);
+        // Show only the right half of a 2-cell-wide image.
+        harness.transmit_and_place(
+            11,
+            2 * CELL_WIDTH,
+            CELL_HEIGHT,
+            &format!(",x={CELL_WIDTH},w={CELL_WIDTH}"),
+        );
+
+        harness.refresh();
+        let view = &harness.kitty.placements()[0];
+        assert_eq!(view.source_rect, [0.5, 0.0, 1.0, 1.0]);
+        assert_eq!(view.columns, 1.0);
+    }
+
+    #[test]
+    fn virtual_placements_follow_their_placeholder_cells() {
+        let mut harness = Harness::new(5, 20);
+        harness.transmit_and_place(42, 2 * CELL_WIDTH, CELL_HEIGHT, ",U=1,c=2,r=1");
+        harness.refresh();
+        assert!(
+            harness.kitty.placements().is_empty(),
+            "a virtual placement must not draw before placeholders exist"
+        );
+
+        // The application prints the placeholder cells itself, image id in
+        // the foreground color and row/column in combining diacritics.
+        let encode = rio_vt::ansi::kitty_virtual::encode_placeholder;
+        harness.feed(b"\x1b[3;4H\x1b[38;2;0;0;42m");
+        harness.feed(encode(0, 0, None).as_bytes());
+        harness.feed(encode(0, 1, None).as_bytes());
+        harness.feed(b"\x1b[m");
+
+        assert!(harness.refresh());
+        let views = harness.kitty.placements();
+        assert_eq!(views.len(), 1);
+        let view = &views[0];
+        assert_eq!(view.image_id, 42);
+        assert_eq!((view.row, view.col), (2.0, 3.0));
+        assert_eq!((view.columns, view.rows), (2.0, 1.0));
+    }
+
+    #[test]
+    fn queries_answer_without_placing() {
+        let mut harness = Harness::new(5, 20);
+        let payload = base64::engine::general_purpose::STANDARD.encode([0_u8, 0, 0, 0]);
+        harness.feed(format!("\x1b_Ga=q,f=32,s=1,v=1,i=6;{payload}\x1b\\").as_bytes());
+
+        let replies = harness.reply_text();
+        assert!(
+            replies.contains("\x1b_Gi=6;OK\x1b\\"),
+            "queries must be acknowledged, got {replies:?}"
+        );
+        harness.refresh();
+        assert!(harness.kitty.placements().is_empty());
+    }
+}
