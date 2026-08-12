@@ -795,6 +795,22 @@ mod tests {
         );
     }
 
+    /// rio-vt 0.5.20: placing an image the engine does not hold answers
+    /// ENOENT instead of OK, so clients retransmit evicted images.
+    #[test]
+    fn placements_of_unknown_images_reply_enoent() {
+        let mut harness = Harness::new(5, 20);
+        harness.feed(b"\x1b_Ga=p,i=404\x1b\\");
+
+        let replies = harness.reply_text();
+        assert!(
+            replies.contains("ENOENT") && !replies.contains(";OK"),
+            "expected an ENOENT reply, got {replies:?}"
+        );
+        harness.refresh();
+        assert!(harness.kitty.placements().is_empty());
+    }
+
     #[test]
     fn queries_answer_without_placing() {
         let mut harness = Harness::new(5, 20);
