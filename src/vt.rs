@@ -27,8 +27,8 @@ pub type VtTerminal = Crosswords<TerminalEventSink>;
 /// Sink for the events rio-vt raises while parsing.
 ///
 /// The only variant ratty acts on today is [`RioEvent::PtyWrite`] — the
-/// engine's DA, DSR, CPR, XTVERSION, and kitty-keyboard replies, which have to
-/// be written back to the PTY.
+/// engine's DA, DSR, CPR, XTVERSION, kitty-keyboard, and kitty-graphics
+/// replies, which have to be written back to the PTY.
 ///
 /// `send_event` takes `&self`, so the queue needs interior mutability, and
 /// `TerminalRuntime` is a Bevy resource that has to stay `Send + Sync`, which
@@ -58,6 +58,12 @@ impl EventListener for TerminalEventSink {
                 let mut replies = self.replies.lock().unwrap_or_else(PoisonError::into_inner);
                 replies.push(reply.into_bytes());
             }
+
+            // Decoded image pixels the engine queues for GPU upload. Ratty's
+            // kitty-graphics sync reads pixels from the engine's image store
+            // directly (the store, unlike this event, is per-screen and
+            // survives alternate-screen swaps), so the queue is dropped here.
+            RioEvent::UpdateGraphics { .. } => {}
 
             // Requests carrying a reply callback rio-vt expects the embedder to
             // invoke and write back. Ratty answers none of them yet, so an
@@ -96,10 +102,11 @@ impl EventListener for TerminalEventSink {
 ///
 /// rio-vt answers primary device attributes with a fixed list describing what
 /// the *engine* can parse, not what the embedder renders. `4` is sixel
-/// graphics — rio-vt's `graphics` feature is off here, so nothing decodes it —
-/// and `52` is OSC 52 clipboard access, whose events [`TerminalEventSink`]
-/// drops. Leaving either in makes applications feature-detect support that does
-/// not exist and emit payloads ratty silently swallows.
+/// graphics — the engine decodes it, but ratty only renders kitty-protocol
+/// placements — and `52` is OSC 52 clipboard access, whose events
+/// [`TerminalEventSink`] drops. Leaving either in makes applications
+/// feature-detect support that does not exist and emit payloads ratty
+/// silently swallows.
 const UNSUPPORTED_DA1_CAPABILITIES: &[&str] = &["4", "52"];
 
 /// Rewrites an engine reply that would misreport ratty's capabilities or

@@ -45,7 +45,8 @@ image = { version = "0.25", default-features = false, features = ["png", "ico"] 
 parley_ratatui = "0.3.4"
 portable-pty = "0.8"
 ratatui = "0.30"
-rio-vt = { version = "0.5.19", default-features = false }
+rio-graphics = { version = "0.5.20", default-features = false }
+rio-vt = { version = "0.5.20", default-features = false, features = ["graphics"] }
 rust-embed = "8.5"
 serde = { version = "1.0", features = ["derive"] }
 shellexpand = "3.1"

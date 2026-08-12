@@ -564,11 +564,14 @@ pub fn handle_keyboard_input(
                             render_scale_for_window(window),
                         );
                         let pty_pixels = layout.pty_pixels();
+                        let cell_px = params.terminal.char_dimensions() * layout.render_scale;
                         params.runtime.resize(
                             layout.cols,
                             layout.rows,
                             pty_pixels.x as u16,
                             pty_pixels.y as u16,
+                            cell_px.x,
+                            cell_px.y,
                         );
                         sync_terminal_layout(
                             layout,

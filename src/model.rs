@@ -11,7 +11,7 @@ use bevy::prelude::*;
 use rust_embed::RustEmbed;
 
 use crate::config::{AppConfig, CURSOR_DEPTH};
-use crate::inline::{InlineObject, RgpInlineObject};
+use crate::inline::RgpInlineObject;
 use crate::paths::{expand_path, runtime_asset_root};
 
 #[derive(RustEmbed)]
@@ -32,9 +32,9 @@ pub enum ObjectSource {
     Stl(Mesh),
 }
 
-impl From<ObjectSource> for InlineObject {
+impl From<ObjectSource> for RgpInlineObject {
     fn from(val: ObjectSource) -> Self {
-        InlineObject::RgpObject(match val {
+        match val {
             ObjectSource::Stl(mesh) => RgpInlineObject::Stl { mesh, handle: None },
             ObjectSource::Obj(meshes) => RgpInlineObject::Obj {
                 meshes,
@@ -44,7 +44,7 @@ impl From<ObjectSource> for InlineObject {
                 asset_path,
                 handle: None,
             },
-        })
+        }
     }
 }
 

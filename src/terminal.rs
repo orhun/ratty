@@ -77,6 +77,11 @@ impl TerminalRedrawState {
     pub fn take(&mut self) -> bool {
         std::mem::take(&mut self.needs_redraw)
     }
+
+    /// Returns whether a redraw is pending, without consuming it.
+    pub fn pending(&self) -> bool {
+        self.needs_redraw
+    }
 }
 
 /// Terminal surface and render state.
