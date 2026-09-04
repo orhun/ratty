@@ -1,7 +1,11 @@
 #![doc = include_str!("../README.md")]
 
 use base64::Engine as _;
-use ratatui_core::{buffer::Buffer, layout::Rect, widgets::Widget};
+use ratatui_core::{
+    buffer::{Buffer, CellDiffOption},
+    layout::Rect,
+    widgets::Widget,
+};
 use std::borrow::Cow;
 use std::io::{self, Write};
 use std::path::Path;
@@ -417,6 +421,20 @@ impl Widget for &RattyGraphic<'_> {
             symbol.push_str(&place);
             symbol.push_str(existing);
             cell.set_symbol(&symbol);
+            // The escape prefix prints nothing; only the retained symbol
+            // occupies the cell. Without this, the diff computes the raw
+            // string width and skips that many following cells, scrambling
+            // everything after the anchor (ratatui-core >= 0.1.2 semantics).
+            cell.set_diff_option(forced_width(1));
         }
+    }
+}
+
+/// A [`CellDiffOption::ForcedWidth`] for escape-carrying cells whose visible
+/// content is `width` columns.
+fn forced_width(width: u16) -> CellDiffOption {
+    match core::num::NonZeroU16::new(width.max(1)) {
+        Some(width) => CellDiffOption::ForcedWidth(width),
+        None => CellDiffOption::None,
     }
 }

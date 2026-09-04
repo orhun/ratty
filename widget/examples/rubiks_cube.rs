@@ -1079,4 +1079,10 @@ fn emit_sequence(buf: &mut Buffer, x: u16, y: u16, sequence: &str) {
     symbol.push_str(sequence);
     symbol.push_str(existing);
     cell.set_symbol(&symbol);
+    // The escape prefix prints nothing; only the retained symbol occupies the
+    // cell. Tell the diff so it does not skip the sequence's string width in
+    // following cells (ratatui-core >= 0.1.2 semantics).
+    cell.set_diff_option(ratatui::buffer::CellDiffOption::ForcedWidth(
+        std::num::NonZeroU16::MIN,
+    ));
 }

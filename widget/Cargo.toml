@@ -13,7 +13,7 @@ edition = "2024"
 
 [dependencies]
 base64 = "0.22"
-ratatui-core = "0.1.0"
+ratatui-core = "0.1.2"
 
 [dev-dependencies]
 crossterm = "0.29"
