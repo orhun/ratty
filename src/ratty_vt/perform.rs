@@ -95,6 +95,8 @@ impl<CB: crate::ratty_vt::callbacks::Callbacks> vte::Perform for WrappedScreen<C
                 'F' => self.screen.cpl(canonicalize_params_1(params, 1)),
                 'G' => self.screen.cha(canonicalize_params_1(params, 1)),
                 'H' => self.screen.cup(canonicalize_params_2(params, 1, 1)),
+                // ratty-vt: HVP is CUP with a different final byte.
+                'f' => self.screen.cup(canonicalize_params_2(params, 1, 1)),
                 'J' => self.screen.ed(canonicalize_params_1(params, 0), unhandled),
                 'K' => self.screen.el(canonicalize_params_1(params, 0), unhandled),
                 'L' => self.screen.il(canonicalize_params_1(params, 1)),

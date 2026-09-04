@@ -1012,7 +1012,7 @@ impl Screen {
         self.grid_mut().col_set(col - 1);
     }
 
-    // CSI H
+    // CSI H, and CSI f (HVP; ratty-vt)
     pub(crate) fn cup(&mut self, (row, col): (u16, u16)) {
         self.grid_mut().set_pos(crate::ratty_vt::grid::Pos {
             row: row - 1,
@@ -1301,6 +1301,21 @@ fn u16_to_u8(i: u16) -> Option<u8> {
 mod ratty_tests {
     //! ratty-vt engine patch tests. Upstream's suite lives in `super::super::tests`.
     use crate::ratty_vt::{Blink, Parser};
+
+    #[test]
+    fn hvp_positions_the_cursor_like_cup() {
+        let mut parser = Parser::new(5, 10, 0);
+        parser.process(b"\x1b[3;4fX");
+        assert_eq!(parser.screen().cell(2, 3).unwrap().contents(), "X");
+        assert_eq!(parser.screen().cursor_position(), (2, 4));
+
+        parser.process(b"\x1b[fY");
+        assert_eq!(parser.screen().cell(0, 0).unwrap().contents(), "Y");
+
+        // Origin mode applies to HVP exactly as it does to CUP.
+        parser.process(b"\x1b[2;4r\x1b[?6h\x1b[1;1fZ");
+        assert_eq!(parser.screen().cell(1, 0).unwrap().contents(), "Z");
+    }
 
     #[test]
     fn sgr_blink_is_parsed_and_stored_on_cells() {
