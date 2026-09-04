@@ -9,6 +9,8 @@ use crate::ratty_vt::term::BufWrite as _;
 pub struct Row {
     cells: Vec<crate::ratty_vt::Cell>,
     wrapped: bool,
+    // ratty-vt: see `has_kitty_placeholder`.
+    kitty_placeholder: bool,
 }
 
 impl Row {
@@ -16,6 +18,7 @@ impl Row {
         Self {
             cells: vec![crate::ratty_vt::Cell::new(); usize::from(cols)],
             wrapped: false,
+            kitty_placeholder: false,
         }
     }
 
@@ -32,6 +35,24 @@ impl Row {
             cell.clear(attrs);
         }
         self.wrapped = false;
+        self.kitty_placeholder = false;
+    }
+
+    /// Returns whether a kitty graphics Unicode placeholder (U+10EEEE) may be
+    /// present in this row.
+    ///
+    /// ratty-vt addition. This is a conservative hint for renderers that map
+    /// placeholders back to images: `false` means the row holds none, so the
+    /// per-cell scan can be skipped; `true` means one was written since the
+    /// row was last cleared, and may be stale if it has since been
+    /// overwritten cell by cell.
+    #[must_use]
+    pub fn has_kitty_placeholder(&self) -> bool {
+        self.kitty_placeholder
+    }
+
+    pub(crate) fn mark_kitty_placeholder(&mut self) {
+        self.kitty_placeholder = true;
     }
 
     /// Iterates over the cells in the row, left to right.

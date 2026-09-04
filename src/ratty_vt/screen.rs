@@ -7,6 +7,11 @@ const MODE_HIDE_CURSOR: u8 = 0b0000_0100;
 const MODE_ALTERNATE_SCREEN: u8 = 0b0000_1000;
 const MODE_BRACKETED_PASTE: u8 = 0b0001_0000;
 
+/// The kitty graphics protocol's Unicode placeholder character.
+///
+/// ratty-vt addition; see [`Row::has_kitty_placeholder`](crate::ratty_vt::Row::has_kitty_placeholder).
+const KITTY_PLACEHOLDER: char = '\u{10EEEE}';
+
 /// The xterm mouse handling mode currently in use.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
 pub enum MouseProtocolMode {
@@ -467,6 +472,40 @@ impl Screen {
         (pos.row, pos.col)
     }
 
+    /// Returns the position a renderer should draw the cursor at, as
+    /// `(row, col)`.
+    ///
+    /// ratty-vt addition. [`cursor_position`](Self::cursor_position) reports
+    /// the logical position, whose column can equal the width after a
+    /// character was drawn in the last column (pending wrap). This clamps
+    /// that column onto the grid and, when the cursor sits on the second
+    /// half of a wide character, snaps it to the first half, so the reported
+    /// cell is always one that exists and owns its glyph.
+    #[must_use]
+    pub fn display_cursor_position(&self) -> (u16, u16) {
+        let pos = self.grid().pos();
+        let size = self.grid().size();
+        let mut col = pos.col.min(size.cols.saturating_sub(1));
+        if self
+            .grid()
+            .drawing_cell(crate::ratty_vt::grid::Pos { row: pos.row, col })
+            .is_some_and(crate::ratty_vt::Cell::is_wide_continuation)
+        {
+            col = col.saturating_sub(1);
+        }
+        (pos.row, col)
+    }
+
+    /// Returns whether a renderer should leave the cursor undrawn.
+    ///
+    /// ratty-vt addition. Folds DECTCEM (`hide_cursor`) together with the
+    /// scrollback offset: the cursor belongs to the live screen, so it must
+    /// not be painted over history while the view is scrolled back.
+    #[must_use]
+    pub fn cursor_hidden(&self) -> bool {
+        self.hide_cursor() || self.scrollback() > 0
+    }
+
     /// Returns terminal escape sequences sufficient to set the current
     /// cursor state of the terminal.
     ///
@@ -911,6 +950,11 @@ impl Screen {
                 // that self.grid().pos().col has a valid value.
                 .unwrap();
             cell.set(c, attrs);
+            // ratty-vt: remember that this row holds a kitty graphics
+            // Unicode placeholder so renderers can skip rows without one.
+            if c == KITTY_PLACEHOLDER {
+                self.grid_mut().current_row_mut().mark_kitty_placeholder();
+            }
             self.grid_mut().col_inc(1);
             if width > 1 {
                 let pos = self.grid().pos();
@@ -1648,5 +1692,72 @@ mod ratty_keyboard_tests {
         parser.process(b"\x1b[>1;2m\x1b[>4;2m");
         assert_eq!(parser.callbacks().0, 1);
         assert_eq!(parser.screen().modify_other_keys(), Some(2));
+    }
+}
+
+#[cfg(test)]
+mod ratty_cursor_tests {
+    use crate::ratty_vt::Parser;
+
+    #[test]
+    fn display_cursor_clamps_the_pending_wrap_column() {
+        let mut parser = Parser::new(2, 4, 0);
+        parser.process(b"abcd");
+        assert_eq!(parser.screen().cursor_position(), (0, 4));
+        assert_eq!(parser.screen().display_cursor_position(), (0, 3));
+    }
+
+    #[test]
+    fn display_cursor_snaps_off_a_wide_continuation_cell() {
+        let mut parser = Parser::new(2, 6, 0);
+        parser.process("\u{4f60}\x1b[1;2H".as_bytes());
+        assert_eq!(parser.screen().cursor_position(), (0, 1));
+        assert_eq!(parser.screen().display_cursor_position(), (0, 0));
+    }
+
+    #[test]
+    fn cursor_hides_under_dectcem_and_while_scrolled_back() {
+        let mut parser = Parser::new(3, 20, 100);
+        assert!(!parser.screen().cursor_hidden());
+        parser.process(b"\x1b[?25l");
+        assert!(parser.screen().cursor_hidden());
+        parser.process(b"\x1b[?25h");
+        assert!(!parser.screen().cursor_hidden());
+
+        for line in 0..10 {
+            parser.process(format!("row{line}\r\n").as_bytes());
+        }
+        parser.screen_mut().set_scrollback(3);
+        assert!(parser.screen().cursor_hidden());
+        parser.screen_mut().set_scrollback(0);
+        assert!(!parser.screen().cursor_hidden());
+    }
+
+    #[test]
+    fn rows_remember_kitty_placeholders_until_cleared() {
+        let mut parser = Parser::new(3, 10, 0);
+        parser.process("ab\r\n\u{10EEEE}\r\n".as_bytes());
+        assert!(
+            !parser
+                .screen()
+                .visible_row(0)
+                .unwrap()
+                .has_kitty_placeholder()
+        );
+        assert!(
+            parser
+                .screen()
+                .visible_row(1)
+                .unwrap()
+                .has_kitty_placeholder()
+        );
+        parser.process(b"\x1b[2;1H\x1b[2K");
+        assert!(
+            !parser
+                .screen()
+                .visible_row(1)
+                .unwrap()
+                .has_kitty_placeholder()
+        );
     }
 }
