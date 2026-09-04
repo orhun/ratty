@@ -45,7 +45,6 @@ use crate::scene::{
 use crate::terminal::{
     TerminalRedrawState, TerminalSurface, TerminalWidget, render_scale_for_window,
 };
-use crate::vt;
 use bevy::app::AppExit;
 use bevy::asset::AssetMut;
 use bevy::camera::visibility::NoFrustumCulling;
@@ -170,7 +169,7 @@ pub fn pump_pty_output(
         match runtime.try_recv() {
             Ok(chunk) => {
                 let track_scroll = inline_objects.has_scroll_tracked_anchors();
-                let prev_rows = track_scroll.then(|| vt::visible_row_texts(&runtime.term));
+                let prev_rows = track_scroll.then(|| runtime.visible_row_texts());
                 let mut replies = inline_objects.consume_pty_output(
                     &chunk,
                     &mut runtime,
@@ -185,11 +184,11 @@ pub fn pump_pty_output(
                     runtime.write_input(&reply);
                 }
                 if let Some(prev_rows) = prev_rows {
-                    let next_rows = vt::visible_row_texts(&runtime.term);
+                    let next_rows = runtime.visible_row_texts();
                     let scrolled = infer_upward_scroll(&prev_rows, &next_rows);
                     inline_objects.apply_scroll(scrolled);
                 }
-                inline_objects.refresh_placeholder_anchors(&runtime.term);
+                inline_objects.refresh_placeholder_anchors(runtime.screen());
             }
             Err(TryRecvError::Empty) => break,
             Err(TryRecvError::Disconnected) => {
@@ -389,11 +388,11 @@ pub(crate) fn render_terminal_widget(mut params: RenderWidgetParams) {
         return;
     }
 
-    let term = &runtime.term;
+    let screen = runtime.screen();
     let _ = terminal.tui.draw(|frame| {
         frame.render_widget(
             TerminalWidget {
-                term,
+                screen,
                 selection,
                 theme: &app_config.theme,
                 font_style: app_config.font.style,
@@ -401,8 +400,8 @@ pub(crate) fn render_terminal_widget(mut params: RenderWidgetParams) {
             frame.area(),
         );
 
-        if !app_config.cursor.model.visible && !vt::cursor_hidden(term) {
-            let (cursor_row, cursor_col) = vt::cursor_position(term);
+        if !app_config.cursor.model.visible && !screen.cursor_hidden() {
+            let (cursor_row, cursor_col) = screen.display_cursor_position();
             frame.set_cursor_position((cursor_col, cursor_row));
         }
     });
@@ -459,7 +458,7 @@ pub(crate) fn sync_terminal_materials(mut params: SyncMaterialsParams) {
 
     let in_3d = camera_slots.active().mode.is_3d();
     if in_3d {
-        sync_terminal_debug_image(terminal, images, &runtime.term);
+        sync_terminal_debug_image(terminal, images, runtime.screen());
     }
 
     sync_plane_texture(terminal.image_handle.as_ref(), plane_materials, materials);
@@ -1401,7 +1400,7 @@ fn extrude_mesh(mesh: Mesh, depth: f32) -> Mesh {
     }
 
     let mut out_indices = Vec::<u32>::with_capacity(indices.len() * 4);
-    for triangle in indices.chunks_exact(3) {
+    for triangle in indices.as_chunks::<3>().0 {
         out_indices.extend_from_slice(triangle);
         out_indices.extend_from_slice(&[
             triangle[2] + source_len,
@@ -1411,7 +1410,7 @@ fn extrude_mesh(mesh: Mesh, depth: f32) -> Mesh {
     }
 
     let mut edge_counts = HashMap::<(u32, u32), u32>::new();
-    for triangle in indices.chunks_exact(3) {
+    for triangle in indices.as_chunks::<3>().0 {
         for edge in [
             (triangle[0], triangle[1]),
             (triangle[1], triangle[2]),
@@ -1701,7 +1700,7 @@ fn cursor_pose(
     let cell_height = ctx.viewport.size.y / rows;
     let scale = cell_width.min(cell_height) * app_config.cursor.model.scale_factor;
 
-    let (cursor_row, cursor_col) = vt::cursor_position(&ctx.runtime.term);
+    let (cursor_row, cursor_col) = ctx.runtime.screen().display_cursor_position();
     let cursor_col = cursor_col.min(ctx.terminal.cols.saturating_sub(1)) as f32;
     let cursor_row = cursor_row.min(ctx.terminal.rows.saturating_sub(1)) as f32;
 
@@ -1723,7 +1722,7 @@ fn cursor_pose(
         (
             Vec3::new(local_x, local_y + bob, CURSOR_DEPTH),
             Quat::from_rotation_y(spin) * Quat::from_rotation_x(-0.25),
-            if !app_config.cursor.model.visible || vt::cursor_hidden(&ctx.runtime.term) {
+            if !app_config.cursor.model.visible || ctx.runtime.screen().cursor_hidden() {
                 Visibility::Hidden
             } else {
                 Visibility::Visible

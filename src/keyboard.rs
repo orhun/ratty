@@ -15,13 +15,13 @@ use crate::camera::{
 };
 use crate::config::{AppConfig, BindingAction, FontConfig, KeyBindingConfig};
 use crate::mouse::{TerminalSelection, encode_mouse_wheel};
+use crate::ratty_vt::MouseProtocolMode;
 use crate::runtime::TerminalRuntime;
 use crate::scene::{
     MobiusEnterZoomFloor, MobiusTransition, TerminalPlaneBackLayoutQuery, TerminalPlaneLayoutQuery,
     TerminalPlaneWarp, TerminalPresentationMode, TerminalViewport, sync_terminal_layout,
 };
 use crate::terminal::{TerminalRedrawState, TerminalSurface, render_scale_for_window};
-use crate::vt::{self, MouseProtocolMode};
 
 /// Clipboard bridge for terminal copy and paste.
 pub struct TerminalClipboard {
@@ -401,7 +401,7 @@ pub fn handle_keyboard_input(
         let modifiers = current_modifiers(&params.keys).union(keyboard.modifiers());
         if event.state == ButtonState::Pressed
             && let Some(action) = params.bindings.action_for(binding_key_code, modifiers)
-            && !(is_scroll_action(action) && vt::alternate_screen(&params.runtime.term))
+            && !(is_scroll_action(action) && params.runtime.screen().alternate_screen())
         {
             if event.repeat
                 && !matches!(
@@ -482,12 +482,12 @@ pub fn handle_keyboard_input(
                         _ => unreachable!(),
                     };
 
-                    let mouse_mode = vt::mouse_protocol_mode(&params.runtime.term);
+                    let mouse_mode = params.runtime.screen().mouse_protocol_mode();
                     if params.camera_slots.active().mode == TerminalPresentationMode::Flat2d
                         && mouse_mode != MouseProtocolMode::None
                     {
-                        let encoding = vt::mouse_protocol_encoding(&params.runtime.term);
-                        let (row, col) = vt::cursor_position(&params.runtime.term);
+                        let encoding = params.runtime.screen().mouse_protocol_encoding();
+                        let (row, col) = params.runtime.screen().display_cursor_position();
                         let cell = UVec2::new(col as u32, row as u32);
                         for _ in 0..amount {
                             params.runtime.write_input(&encode_mouse_wheel(
@@ -497,13 +497,13 @@ pub fn handle_keyboard_input(
                             ));
                         }
                     } else {
-                        let current = vt::scrollback(&params.runtime.term);
+                        let current = params.runtime.screen().scrollback();
                         let next = if direction.is_positive() {
                             current.saturating_add(amount)
                         } else {
                             current.saturating_sub(amount)
                         };
-                        vt::set_scrollback(&mut params.runtime.term, next);
+                        params.runtime.screen_mut().set_scrollback(next);
                         params.selection.clear();
                         params.redraw.request();
                     }
@@ -520,7 +520,7 @@ pub fn handle_keyboard_input(
                     continue;
                 }
                 BindingAction::Copy => {
-                    if let Some(text) = params.selection.selected_text(&params.runtime.term)
+                    if let Some(text) = params.selection.selected_text(params.runtime.screen())
                         && !text.is_empty()
                     {
                         params.clipboard.copy(&text);
@@ -532,7 +532,7 @@ pub fn handle_keyboard_input(
                 }
                 BindingAction::Paste => {
                     if let Some(text) = params.clipboard.paste() {
-                        let bracketed = vt::bracketed_paste(&params.runtime.term);
+                        let bracketed = params.runtime.screen().bracketed_paste();
                         params.runtime.write_input(&encode_paste(&text, bracketed));
                     } else {
                         warn!("failed to read clipboard contents for paste");
@@ -602,12 +602,12 @@ pub fn handle_keyboard_input(
 
         if let Some(input) = keyboard.handle_event_with_modes(
             event,
-            vt::application_cursor(&params.runtime.term),
+            params.runtime.screen().application_cursor(),
             params.runtime.kitty_keyboard_flags(),
             params.runtime.modify_other_keys(),
         ) {
-            if vt::scrollback(&params.runtime.term) != 0 {
-                vt::set_scrollback(&mut params.runtime.term, 0);
+            if params.runtime.screen().scrollback() != 0 {
+                params.runtime.screen_mut().set_scrollback(0);
                 params.redraw.request();
             }
             params.runtime.write_input(&input);

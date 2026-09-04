@@ -3,10 +3,9 @@
 use std::collections::HashMap;
 
 use base64::Engine as _;
-use rio_vt::crosswords::pos::Column;
 
 use crate::inline::{InlineAnchor, InlineObject, InlineStyle, KittyInlineObject, RasterObject};
-use crate::vt::{self, CellColor, VtTerminal};
+use crate::ratty_vt::{Color, Screen};
 
 /// Kitty graphics APC prefix.
 pub const KITTY_APC_START: &[u8] = b"\x1b_G";
@@ -249,7 +248,7 @@ impl KittyTransfer {
                     return None;
                 }
                 let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
-                for rgb in self.bytes.chunks_exact(3) {
+                for rgb in self.bytes.as_chunks::<3>().0 {
                     rgba.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
                 }
                 (width, height, rgba)
@@ -279,7 +278,7 @@ impl KittyTransfer {
 pub fn refresh_kitty_placeholder_anchors(
     objects: &HashMap<u32, InlineObject>,
     anchors: &mut HashMap<u32, InlineAnchor>,
-    term: &VtTerminal,
+    screen: &Screen,
 ) -> bool {
     let placeholder_ids = objects
         .iter()
@@ -297,25 +296,26 @@ pub fn refresh_kitty_placeholder_anchors(
         .collect::<HashMap<_, _>>();
 
     let mut bounds = HashMap::<u32, (u16, u16, u16, u16)>::new();
-    let rows = u16::try_from(term.screen_lines()).unwrap_or(u16::MAX);
-    let cols = u16::try_from(term.columns()).unwrap_or(u16::MAX);
-    let styles = vt::styles(term);
+    let (rows, cols) = screen.size();
     for row in 0..rows {
-        let Some(grid_row) = vt::visible_row(term, row) else {
+        let Some(grid_row) = screen.visible_row(row) else {
             continue;
         };
-        // rio-vt flags rows holding a U+10EEEE placeholder, so rows without one
-        // skip the per-cell scan entirely.
-        if !grid_row.kitty_virtual_placeholder {
+        // The engine flags rows holding a U+10EEEE placeholder, so rows
+        // without one skip the per-cell scan entirely.
+        if !grid_row.has_kitty_placeholder() {
             continue;
         }
         for col in 0..cols {
-            let square = grid_row[Column(usize::from(col))];
-            if square.c() != '\u{10EEEE}' {
+            let Some(cell) = grid_row.get(col) else {
+                break;
+            };
+            // Placeholders may carry combining diacritics that encode the
+            // image row and column, so match on the base character.
+            if !cell.contents().starts_with('\u{10EEEE}') {
                 continue;
             }
-            let (fg, _, _) = vt::cell_attributes(styles, square);
-            let CellColor::Rgb(r, g, b) = fg else {
+            let Color::Rgb(r, g, b) = cell.fgcolor() else {
                 continue;
             };
             let placeholder_id = ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);

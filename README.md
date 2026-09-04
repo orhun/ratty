@@ -243,7 +243,7 @@ and [Bevy](https://bevyengine.org/) for scene presentation.
 
 Current workflow:
 
-1. PTY output is parsed by [`rio-vt`](https://crates.io/crates/rio-vt) and drawn into a Ratatui buffer on CPU
+1. PTY output is parsed by `ratty-vt` (ratty's in-tree fork of [`vt100`](https://github.com/doy/vt100-rust), see [`src/ratty_vt/README.md`](src/ratty_vt/README.md)) and drawn into a Ratatui buffer on CPU
 2. `parley_ratatui` shapes the buffer with Parley and records it as a Vello scene
 3. The scene is handed to Bevy's render world through a double-buffered
    exchange (scenes are recycled between frames, never cloned or re-recorded)
