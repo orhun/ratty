@@ -12,6 +12,7 @@ use std::io;
 use crossterm::event::{self, Event, KeyCode};
 use ratatui::{
     DefaultTerminal, Frame,
+    buffer::Buffer,
     layout::{Constraint, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -95,7 +96,49 @@ fn render(frame: &mut Frame<'_>, lines: &[Line<'static>], scroll: u16) -> u16 {
         .centered()
         .render(footer, frame.buffer_mut());
 
+    emit_hidden_sequences(frame.buffer_mut());
+
     page_height
+}
+
+/// Wraps every run of [`Modifier::HIDDEN`] cells in SGR 8 / SGR 28.
+///
+/// Ratatui's crossterm backend does not translate `Modifier::HIDDEN` into an
+/// escape sequence, so the terminal would otherwise never learn the text is
+/// concealed. The sequences ride along in the cell symbols; a forced width of
+/// one keeps the diff from counting the escape bytes as columns.
+fn emit_hidden_sequences(buf: &mut Buffer) {
+    let area = buf.area;
+    for y in area.top()..area.bottom() {
+        let mut run_start = None;
+        for x in area.left()..=area.right() {
+            let hidden = x < area.right()
+                && buf
+                    .cell((x, y))
+                    .is_some_and(|cell| cell.modifier.contains(Modifier::HIDDEN));
+            match (run_start, hidden) {
+                (None, true) => {
+                    run_start = Some(x);
+                    wrap_symbol(buf, x, y, "\x1b[8m", "");
+                }
+                (Some(_), false) => {
+                    wrap_symbol(buf, x - 1, y, "", "\x1b[28m");
+                    run_start = None;
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn wrap_symbol(buf: &mut Buffer, x: u16, y: u16, prefix: &str, suffix: &str) {
+    if let Some(cell) = buf.cell_mut((x, y)) {
+        let symbol = format!("{prefix}{}{suffix}", cell.symbol());
+        cell.set_symbol(&symbol);
+        cell.set_diff_option(ratatui::buffer::CellDiffOption::ForcedWidth(
+            std::num::NonZeroU16::MIN,
+        ));
+    }
 }
 
 fn fidelity_lines() -> Vec<Line<'static>> {
