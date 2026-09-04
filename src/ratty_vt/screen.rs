@@ -110,6 +110,21 @@ impl Screen {
             .set_size(crate::ratty_vt::grid::Size { rows, cols });
     }
 
+    /// Resizes the terminal, reflowing its contents.
+    ///
+    /// ratty-vt addition. Unlike [`set_size`](Self::set_size), which cuts
+    /// lines off at the new width, this re-wraps every logical line of the
+    /// main screen and its scrollback at the new width, moves rows between
+    /// the screen and scrollback when the height changes, keeps the cursor on
+    /// its character, and resets the DECSTBM scroll region. The alternate
+    /// screen is resized without reflow, since full-screen applications
+    /// redraw on resize anyway.
+    pub fn set_size_reflow(&mut self, rows: u16, cols: u16) {
+        let size = crate::ratty_vt::grid::Size { rows, cols };
+        self.grid.set_size_reflow(size);
+        self.alternate_grid.set_size_plain(size);
+    }
+
     /// Returns the current size of the terminal.
     ///
     /// The return value will be (rows, cols).
@@ -787,6 +802,11 @@ impl Screen {
             .try_into()
             // width() can only return 0, 1, or 2
             .unwrap();
+        // ratty-vt: a wide glyph cannot be drawn in a grid narrower than
+        // itself; upstream underflows below and panics in a one-column grid.
+        if width > size.cols {
+            return;
+        }
 
         // it doesn't make any sense to wrap if the last column in a row
         // didn't already have contents. don't try to handle the case where a
@@ -1759,5 +1779,154 @@ mod ratty_cursor_tests {
                 .unwrap()
                 .has_kitty_placeholder()
         );
+    }
+}
+
+#[cfg(test)]
+mod ratty_resize_tests {
+    use crate::ratty_vt::Parser;
+
+    fn rows(parser: &Parser) -> Vec<String> {
+        let (_, cols) = parser.screen().size();
+        parser.screen().rows(0, cols).collect()
+    }
+
+    #[test]
+    fn narrowing_reflows_a_long_line() {
+        let mut parser = Parser::new(4, 20, 100);
+        parser.process(b"0123456789abcdefghij\r\nnext");
+        parser.screen_mut().set_size_reflow(4, 8);
+        assert_eq!(rows(&parser), vec!["01234567", "89abcdef", "ghij", "next"]);
+        assert!(parser.screen().row_wrapped(0));
+        assert!(parser.screen().row_wrapped(1));
+        assert!(!parser.screen().row_wrapped(2));
+        assert_eq!(parser.screen().cursor_position(), (3, 4));
+
+        // Widening joins the pieces back together.
+        parser.screen_mut().set_size_reflow(4, 30);
+        assert_eq!(rows(&parser), vec!["0123456789abcdefghij", "next", "", ""]);
+        assert_eq!(parser.screen().cursor_position(), (1, 4));
+    }
+
+    #[test]
+    fn reflow_keeps_the_cursor_on_its_character() {
+        let mut parser = Parser::new(3, 10, 100);
+        parser.process(b"abcdefghij\x1b[1;7H");
+        assert_eq!(parser.screen().cursor_position(), (0, 6));
+        parser.screen_mut().set_size_reflow(3, 4);
+        // "abcd" / "efgh" / "ij": 'g' is row 1, col 2.
+        assert_eq!(parser.screen().cursor_position(), (1, 2));
+        assert_eq!(parser.screen().cell(1, 2).unwrap().contents(), "g");
+    }
+
+    #[test]
+    fn reflow_pushes_overflow_into_scrollback_and_pulls_it_back() {
+        let mut parser = Parser::new(3, 12, 100);
+        parser.process(b"aaaaaaaaaaaa\r\nbb\r\ncc");
+        assert_eq!(rows(&parser), vec!["aaaaaaaaaaaa", "bb", "cc"]);
+
+        parser.screen_mut().set_size_reflow(3, 6);
+        assert_eq!(rows(&parser), vec!["aaaaaa", "bb", "cc"]);
+        parser.screen_mut().set_scrollback(1);
+        assert_eq!(rows(&parser), vec!["aaaaaa", "aaaaaa", "bb"]);
+        parser.screen_mut().set_scrollback(0);
+
+        parser.screen_mut().set_size_reflow(3, 12);
+        assert_eq!(rows(&parser), vec!["aaaaaaaaaaaa", "bb", "cc"]);
+        assert_eq!(parser.screen().cursor_position(), (2, 2));
+    }
+
+    #[test]
+    fn shrinking_rows_scrolls_into_history_and_growing_recovers_it() {
+        let mut parser = Parser::new(4, 10, 100);
+        parser.process(b"one\r\ntwo\r\nthree\r\nfour");
+        parser.screen_mut().set_size_reflow(2, 10);
+        assert_eq!(rows(&parser), vec!["three", "four"]);
+        assert_eq!(parser.screen().cursor_position(), (1, 4));
+
+        parser.screen_mut().set_size_reflow(5, 10);
+        assert_eq!(rows(&parser), vec!["one", "two", "three", "four", ""]);
+        assert_eq!(parser.screen().cursor_position(), (3, 4));
+    }
+
+    #[test]
+    fn shrinking_rows_drops_blank_rows_below_the_cursor_first() {
+        let mut parser = Parser::new(6, 10, 100);
+        parser.process(b"top\x1b[2;1Hmid");
+        parser.screen_mut().set_size_reflow(3, 10);
+        assert_eq!(rows(&parser), vec!["top", "mid", ""]);
+        assert_eq!(parser.screen().cursor_position(), (1, 3));
+    }
+
+    #[test]
+    fn resize_resets_the_scroll_region() {
+        let mut parser = Parser::new(10, 20, 0);
+        parser.process(b"\x1b[2;5r");
+        parser.screen_mut().set_size_reflow(10, 21);
+        // With the region reset, a linefeed on the last row scrolls the
+        // whole screen rather than rows 2-5.
+        parser.process(b"\x1b[10;1Hlast\r\nafter");
+        assert_eq!(rows(&parser)[8], "last");
+        assert_eq!(rows(&parser)[9], "after");
+    }
+
+    #[test]
+    fn resizing_while_scrolled_back_keeps_every_row_readable() {
+        for (rows_after, cols_after) in [(3_u16, 40_u16), (12, 10), (24, 80), (4, 20)] {
+            let mut parser = Parser::new(6, 40, 100);
+            for line in 0..60 {
+                parser.process(format!("row{line}\r\n").as_bytes());
+            }
+            parser.screen_mut().set_scrollback(usize::MAX);
+            let before = parser.screen().scrollback();
+            assert!(before > 0);
+
+            parser.screen_mut().set_size_reflow(rows_after, cols_after);
+
+            let (rows_now, _) = parser.screen().size();
+            assert_eq!(rows_now, rows_after);
+            for row in 0..rows_now {
+                assert!(
+                    parser.screen().visible_row(row).is_some(),
+                    "row {row} unreadable after resizing to {cols_after}x{rows_after}"
+                );
+            }
+            let _ = rows(&parser);
+        }
+    }
+
+    #[test]
+    fn reflow_does_not_split_wide_glyphs() {
+        let mut parser = Parser::new(2, 10, 100);
+        parser.process("ab\u{4f60}\u{597d}cd".as_bytes());
+        parser.screen_mut().set_size_reflow(4, 3);
+        // "ab" + pad, "你", "好c", "d"
+        assert_eq!(rows(&parser), vec!["ab", "\u{4f60}", "\u{597d}c", "d"]);
+        assert!(parser.screen().cell(1, 0).unwrap().is_wide());
+        assert!(parser.screen().cell(1, 1).unwrap().is_wide_continuation());
+        assert_eq!(parser.screen().cursor_position(), (3, 1));
+    }
+
+    #[test]
+    fn alternate_screen_resizes_without_reflow() {
+        let mut parser = Parser::new(3, 10, 100);
+        parser.process(b"main line\x1b[?1049h0123456789");
+        parser.screen_mut().set_size_reflow(3, 5);
+        assert_eq!(rows(&parser), vec!["01234", "", ""]);
+        parser.process(b"\x1b[?1049l");
+        assert_eq!(rows(&parser), vec!["main ", "line", ""]);
+    }
+
+    #[test]
+    fn degenerate_grids_do_not_panic() {
+        for (rows_n, cols_n) in [(1_u16, 1_u16), (1, 40), (40, 1), (2, 2)] {
+            let mut parser = Parser::new(rows_n, cols_n, 10);
+            parser.process("\u{4f60}\u{597d}ab\r\n\u{1f600}x".as_bytes());
+            parser.screen_mut().set_size_reflow(1, 1);
+            parser.process("\u{4f60}z".as_bytes());
+            parser.screen_mut().set_size_reflow(rows_n, cols_n);
+            let _ = parser.screen().contents_formatted();
+            let _ = parser.screen().display_cursor_position();
+        }
     }
 }

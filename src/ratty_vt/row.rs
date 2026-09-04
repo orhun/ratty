@@ -55,6 +55,20 @@ impl Row {
         self.kitty_placeholder = true;
     }
 
+    // ratty-vt: reflow support.
+    pub(crate) fn from_cells(cells: Vec<crate::ratty_vt::Cell>, wrapped: bool) -> Self {
+        Self {
+            cells,
+            wrapped,
+            kitty_placeholder: false,
+        }
+    }
+
+    pub(crate) fn is_blank(&self) -> bool {
+        let blank = crate::ratty_vt::Cell::new();
+        self.cells.iter().all(|cell| cell == &blank)
+    }
+
     /// Iterates over the cells in the row, left to right.
     ///
     /// ratty-vt: public.

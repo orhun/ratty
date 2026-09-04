@@ -97,6 +97,228 @@ impl Grid {
         }
     }
 
+    // ratty-vt: resize with reflow.
+    //
+    // Upstream `set_size` truncates or pads rows in place: narrowing the grid
+    // cuts every line off at the new width and widening leaves the old wrap
+    // points in place. This variant treats consecutive wrapped rows as one
+    // logical line and re-wraps every line (scrollback included) at the new
+    // width, moves rows between the screen and scrollback when the row count
+    // changes, keeps the cursor on the character it was on, and resets the
+    // DECSTBM scroll region, which is what xterm does on resize.
+    pub fn set_size_reflow(&mut self, size: Size) {
+        let size = Size {
+            rows: size.rows.max(1),
+            cols: size.cols.max(1),
+        };
+        if self.rows.is_empty() {
+            // Never allocated (the alternate grid before first use): there is
+            // nothing to reflow, and `allocate_rows` will use the new size.
+            self.size = size;
+            self.reset_after_resize();
+            return;
+        }
+        if size.cols != self.size.cols {
+            self.reflow_columns(size.cols);
+        }
+        self.set_row_count(size.rows);
+        self.size = size;
+        self.reset_after_resize();
+    }
+
+    // ratty-vt: upstream `set_size` semantics (no reflow) plus the scroll
+    // region reset. Used for the alternate screen, whose applications redraw
+    // from scratch on SIGWINCH and would only be confused by reflowed rows.
+    pub fn set_size_plain(&mut self, size: Size) {
+        let size = Size {
+            rows: size.rows.max(1),
+            cols: size.cols.max(1),
+        };
+        self.set_size(size);
+        self.reset_after_resize();
+    }
+
+    fn reset_after_resize(&mut self) {
+        self.scroll_top = 0;
+        self.scroll_bottom = self.size.rows - 1;
+        self.scrollback_offset = self.scrollback_offset.min(self.scrollback.len());
+        self.row_clamp();
+        // The column may sit one past the last cell after a character was
+        // drawn in the last column (pending wrap); keep that state.
+        if self.pos.col > self.size.cols {
+            self.pos.col = self.size.cols;
+        }
+        if self.saved_pos.row > self.size.rows - 1 {
+            self.saved_pos.row = self.size.rows - 1;
+        }
+        if self.saved_pos.col > self.size.cols - 1 {
+            self.saved_pos.col = self.size.cols - 1;
+        }
+    }
+
+    fn push_scrollback(&mut self, row: crate::ratty_vt::row::Row) {
+        if self.scrollback_len == 0 {
+            return;
+        }
+        self.scrollback.push_back(row);
+        while self.scrollback.len() > self.scrollback_len {
+            self.scrollback.pop_front();
+        }
+    }
+
+    // Changes the number of screen rows. Shrinking first drops blank rows
+    // below the cursor, then moves rows off the top into scrollback so the
+    // cursor stays on screen; growing pulls rows back out of scrollback
+    // before appending blank ones. This mirrors what alacritty does.
+    fn set_row_count(&mut self, rows: u16) {
+        let target = usize::from(rows);
+        while self.rows.len() > target {
+            let last = self.rows.len() - 1;
+            if last > usize::from(self.pos.row) && self.rows[last].is_blank() {
+                self.rows.pop();
+            } else {
+                let removed = self.rows.remove(0);
+                self.push_scrollback(removed);
+                self.pos.row = self.pos.row.saturating_sub(1);
+                self.saved_pos.row = self.saved_pos.row.saturating_sub(1);
+            }
+        }
+        while self.rows.len() < target {
+            if let Some(row) = self.scrollback.pop_back() {
+                self.rows.insert(0, row);
+                self.pos.row = self.pos.row.saturating_add(1);
+                self.saved_pos.row = self.saved_pos.row.saturating_add(1);
+            } else {
+                self.rows
+                    .push(crate::ratty_vt::row::Row::new(self.size.cols));
+            }
+        }
+    }
+
+    // Re-wraps every logical line at `cols` columns.
+    fn reflow_columns(&mut self, cols: u16) {
+        let width = usize::from(cols);
+        let screen_rows = self.rows.len();
+        let cursor_abs = self.scrollback.len() + usize::from(self.pos.row);
+        let cursor_col = usize::from(self.pos.col);
+        let blank = crate::ratty_vt::Cell::new();
+
+        let all: Vec<crate::ratty_vt::row::Row> = self
+            .scrollback
+            .drain(..)
+            .chain(self.rows.drain(..))
+            .collect();
+
+        let mut out: Vec<crate::ratty_vt::row::Row> = Vec::with_capacity(all.len());
+        // (row index in `out`, column)
+        let mut new_cursor: Option<(usize, u16)> = None;
+
+        let mut start = 0;
+        while start < all.len() {
+            // A logical line is a run of wrapped rows plus the row that ends it.
+            let mut end = start;
+            while end + 1 < all.len() && all[end].wrapped() {
+                end += 1;
+            }
+
+            // Flatten the line, trimming the blank tail of its last row.
+            let mut cells: Vec<crate::ratty_vt::Cell> = Vec::new();
+            let mut cursor_offset: Option<usize> = None;
+            let mut has_placeholder = false;
+            for (abs, row) in all.iter().enumerate().take(end + 1).skip(start) {
+                if abs == cursor_abs {
+                    cursor_offset = Some(cells.len() + cursor_col);
+                }
+                has_placeholder |= row.has_kitty_placeholder();
+                cells.extend(row.cells().cloned());
+                if abs == end {
+                    while cells.last().is_some_and(|cell| cell == &blank) {
+                        // Do not trim past the cursor's own row start; an
+                        // all-blank line still yields one empty row below.
+                        cells.pop();
+                    }
+                }
+            }
+            let content_len = cells.len();
+
+            // Re-chunk at the new width without splitting wide glyphs.
+            let mut line_rows: Vec<Vec<crate::ratty_vt::Cell>> = vec![Vec::with_capacity(width)];
+            let mut cursor_in_line: Option<(usize, u16)> = None;
+            for (n, cell) in cells.into_iter().enumerate() {
+                if width < 2 && (cell.is_wide() || cell.is_wide_continuation()) {
+                    // A wide glyph cannot exist in a one-column grid.
+                    continue;
+                }
+                let mut at = line_rows.len() - 1;
+                if line_rows[at].len() >= width {
+                    line_rows.push(Vec::with_capacity(width));
+                    at += 1;
+                } else if cell.is_wide() && line_rows[at].len() == width - 1 {
+                    line_rows[at].push(blank.clone());
+                    line_rows.push(Vec::with_capacity(width));
+                    at += 1;
+                }
+                if cursor_offset == Some(n) {
+                    cursor_in_line = Some((at, u16::try_from(line_rows[at].len()).unwrap()));
+                }
+                line_rows[at].push(cell);
+            }
+            if let Some(offset) = cursor_offset
+                && cursor_in_line.is_none()
+            {
+                // The cursor sat at or past the end of the line's content.
+                // Keep it that far past the end on the last row, clamped so it
+                // is at most one past the last column (pending wrap).
+                let last = line_rows.len() - 1;
+                let col = (line_rows[last].len() + (offset - content_len)).min(width);
+                cursor_in_line = Some((last, u16::try_from(col).unwrap()));
+            }
+
+            let count = line_rows.len();
+            for (k, mut row_cells) in line_rows.into_iter().enumerate() {
+                row_cells.resize(width, blank.clone());
+                let mut row = crate::ratty_vt::row::Row::from_cells(row_cells, k + 1 < count);
+                if has_placeholder {
+                    row.mark_kitty_placeholder();
+                }
+                if cursor_in_line.is_some_and(|(r, _)| r == k) {
+                    new_cursor = Some((out.len(), cursor_in_line.unwrap().1));
+                }
+                out.push(row);
+            }
+
+            start = end + 1;
+        }
+
+        // Split the reflowed rows back into scrollback and screen, keeping
+        // the cursor's row on screen. Blank rows below the cursor are dropped
+        // first so that a mostly empty screen does not push its text into
+        // scrollback just because its lines got longer.
+        let (cursor_row, cursor_col) = new_cursor.unwrap_or((out.len().saturating_sub(1), 0));
+        while out.len() > screen_rows
+            && out.len() - 1 > cursor_row
+            && out.last().is_some_and(crate::ratty_vt::row::Row::is_blank)
+        {
+            out.pop();
+        }
+        let total = out.len();
+        let screen_start = total.saturating_sub(screen_rows).min(cursor_row);
+        let mut screen = out.split_off(screen_start);
+        screen.truncate(screen_rows);
+        while screen.len() < screen_rows {
+            screen.push(crate::ratty_vt::row::Row::new(cols));
+        }
+        for row in out {
+            self.push_scrollback(row);
+        }
+        self.rows = screen;
+        self.size.cols = cols;
+        self.pos = Pos {
+            row: u16::try_from(cursor_row - screen_start).unwrap(),
+            col: cursor_col,
+        };
+    }
+
     pub fn pos(&self) -> Pos {
         self.pos
     }
@@ -655,7 +877,9 @@ impl Grid {
             let mut prev_pos = self.pos;
             self.pos.col = 0;
             let scrolled = self.row_inc_scroll(1);
-            prev_pos.row -= scrolled;
+            // ratty-vt: a one-row grid scrolls its only row away here, so
+            // the subtraction would underflow (upstream #29/#30).
+            prev_pos.row = prev_pos.row.saturating_sub(scrolled);
             let new_pos = self.pos;
             self.drawing_row_mut(prev_pos.row)
                 // we assume self.pos.row is always valid, and so prev_pos.row
