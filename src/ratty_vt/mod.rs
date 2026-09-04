@@ -65,6 +65,9 @@ mod row;
 mod screen;
 mod term;
 
+#[cfg(test)]
+mod tests;
+
 pub use attrs::{Blink, Color};
 pub use callbacks::Callbacks;
 pub use cell::Cell;
