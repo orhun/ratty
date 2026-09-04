@@ -666,6 +666,21 @@ fn toggle_mobius_presentation(
     interaction.reset();
 }
 
+/// Enters Mobius mode without toggling back out when it is already active.
+pub(crate) fn enter_mobius_presentation(
+    camera_slots: &mut TerminalCameraSlots,
+    interaction: &mut TerminalCameraInteraction,
+    mobius_transition: &mut MobiusTransition,
+) {
+    let already_entering_or_active = camera_slots.active().mode
+        == TerminalPresentationMode::Mobius3d
+        && !(mobius_transition.active
+            && mobius_transition.direction == crate::scene::MobiusTransitionDirection::Exiting);
+    if !already_entering_or_active {
+        toggle_mobius_presentation(camera_slots, interaction, mobius_transition);
+    }
+}
+
 fn is_scroll_action(action: BindingAction) -> bool {
     matches!(
         action,

@@ -35,6 +35,10 @@ Inspired by TempleOS | Built with Rust & Ratatui
 
 Ever wondered what's _behind_ the terminal? Press <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Enter</kbd>!
 
+In 3D mode, drag with the left mouse button or one finger on a touchscreen to rotate the terminal.
+Move two fingers together to pan, and pinch them to zoom.
+Swipe diagonally from the bottom-left toward the top-right to enter Mobius mode.
+
 <div>
   <video width="80%" src="https://github.com/user-attachments/assets/173971cc-b6bb-4897-857a-5db8e3c9e161"/>
 </div>

@@ -4,6 +4,7 @@ use bevy::ecs::message::MessageReader;
 use bevy::ecs::system::SystemParam;
 use bevy::input::ButtonState;
 use bevy::input::mouse::{MouseButton, MouseButtonInput, MouseScrollUnit, MouseWheel};
+use bevy::input::touch::{TouchInput, TouchPhase};
 use bevy::prelude::*;
 use bevy::window::{CursorMoved, PrimaryWindow, Window, WindowFocused};
 
@@ -12,6 +13,7 @@ use crate::camera::{
     TerminalCameraSlots,
 };
 use crate::config::AppConfig;
+use crate::keyboard::enter_mobius_presentation;
 use crate::runtime::TerminalRuntime;
 use crate::scene::{MobiusTransition, TerminalPresentationMode, TerminalViewport};
 use crate::terminal::TerminalSurface;
@@ -19,6 +21,15 @@ use crate::vt::{self, MouseProtocolEncoding, MouseProtocolMode, VtTerminal};
 
 /// Distance in pixels the pointer must move with a pending selection to start dragging.
 const SELECTION_DRAG_THRESHOLD: f32 = 4.0;
+
+/// Camera rotation applied per pixel of pointer movement.
+const ROTATION_SENSITIVITY: f32 = 0.005;
+
+/// Camera zoom applied per pixel of change between two fingers.
+const PINCH_ZOOM_SENSITIVITY: f32 = 0.002;
+
+/// Minimum corner-swipe travel as a fraction of the shorter window edge.
+const MOBIUS_SWIPE_FRACTION: f32 = 0.18;
 
 /// Active terminal text selection.
 #[derive(Resource, Clone, Default)]
@@ -42,6 +53,134 @@ pub(crate) struct ForwardedMouseState {
 #[derive(Default)]
 pub(crate) struct LocalScrollState {
     pixel_remainder: f32,
+}
+
+/// Camera movement produced by a touch event.
+#[derive(Debug, PartialEq)]
+enum TouchGesture {
+    Rotate(Vec2),
+    PanAndZoom { pan: Vec2, zoom: f32 },
+    EnterMobius,
+}
+
+/// Tracks up to two fingers used for camera gestures.
+#[derive(Default)]
+pub(crate) struct TouchGestureState {
+    primary: Option<(u64, Vec2)>,
+    secondary: Option<(u64, Vec2)>,
+    pinch_distance: Option<f32>,
+    mobius_swipe_start: Option<Vec2>,
+}
+
+impl TouchGestureState {
+    fn reset(&mut self) {
+        self.primary = None;
+        self.secondary = None;
+        self.pinch_distance = None;
+        self.mobius_swipe_start = None;
+    }
+
+    /// Updates the active gesture and returns its rotation or pinch movement.
+    fn update(
+        &mut self,
+        id: u64,
+        phase: TouchPhase,
+        position: Vec2,
+        window_size: Vec2,
+    ) -> Option<TouchGesture> {
+        match phase {
+            TouchPhase::Started => {
+                if self.primary.is_none() {
+                    self.primary = Some((id, position));
+                    let corner_size = mobius_swipe_threshold(window_size);
+                    if position.x <= corner_size && position.y >= window_size.y - corner_size {
+                        self.mobius_swipe_start = Some(position);
+                    }
+                } else if self.secondary.is_none()
+                    && self.primary.is_some_and(|(primary_id, _)| primary_id != id)
+                {
+                    self.secondary = Some((id, position));
+                    self.pinch_distance = self.finger_distance();
+                    self.mobius_swipe_start = None;
+                }
+                None
+            }
+            TouchPhase::Moved => {
+                let previous_primary = self.primary;
+                let previous_center = self.finger_center();
+                if self.primary.is_some_and(|(primary_id, _)| primary_id == id) {
+                    self.primary = Some((id, position));
+                } else if self
+                    .secondary
+                    .is_some_and(|(secondary_id, _)| secondary_id == id)
+                {
+                    self.secondary = Some((id, position));
+                } else {
+                    return None;
+                }
+
+                if self.secondary.is_none()
+                    && let Some(start) = self.mobius_swipe_start
+                {
+                    let travel = position - start;
+                    let threshold = mobius_swipe_threshold(window_size);
+                    if travel.x >= threshold && travel.y <= -threshold {
+                        self.reset();
+                        return Some(TouchGesture::EnterMobius);
+                    }
+
+                    // Reserve a valid corner swipe for the mode gesture rather
+                    // than rotating the camera underneath the user's finger.
+                    if travel.x >= -24.0 && travel.y <= 24.0 {
+                        return None;
+                    }
+                    self.mobius_swipe_start = None;
+                }
+
+                if let Some(distance) = self.finger_distance() {
+                    let zoom = self.pinch_distance.map(|last| distance - last);
+                    self.pinch_distance = Some(distance);
+                    zoom.zip(previous_center).and_then(|(zoom, center)| {
+                        self.finger_center().map(|next| TouchGesture::PanAndZoom {
+                            pan: next - center,
+                            zoom,
+                        })
+                    })
+                } else {
+                    previous_primary.map(|(_, last)| TouchGesture::Rotate(position - last))
+                }
+            }
+            TouchPhase::Ended | TouchPhase::Canceled => {
+                if self
+                    .secondary
+                    .is_some_and(|(secondary_id, _)| secondary_id == id)
+                {
+                    self.secondary = None;
+                    self.pinch_distance = None;
+                } else if self.primary.is_some_and(|(primary_id, _)| primary_id == id) {
+                    self.primary = self.secondary.take();
+                    self.pinch_distance = None;
+                    self.mobius_swipe_start = None;
+                }
+                None
+            }
+        }
+    }
+
+    fn finger_distance(&self) -> Option<f32> {
+        Some(self.primary?.1.distance(self.secondary?.1))
+    }
+
+    fn finger_center(&self) -> Option<Vec2> {
+        Some((self.primary?.1 + self.secondary?.1) * 0.5)
+    }
+}
+
+fn mobius_swipe_threshold(window_size: Vec2) -> f32 {
+    window_size
+        .min_element()
+        .mul_add(MOBIUS_SWIPE_FRACTION, 0.0)
+        .clamp(72.0, 180.0)
 }
 
 /// Normalized selection bounds.
@@ -252,7 +391,7 @@ pub struct MouseSystemParams<'w, 's> {
     viewport: Res<'w, TerminalViewport>,
     camera_slots: ResMut<'w, TerminalCameraSlots>,
     camera_interaction: ResMut<'w, TerminalCameraInteraction>,
-    mobius_transition: Res<'w, MobiusTransition>,
+    mobius_transition: ResMut<'w, MobiusTransition>,
     selection: ResMut<'w, TerminalSelection>,
     redraw: ResMut<'w, crate::terminal::TerminalRedrawState>,
     app_config: Res<'w, AppConfig>,
@@ -263,10 +402,12 @@ pub(crate) fn handle_mouse_input(
     mut cursor_events: MessageReader<CursorMoved>,
     mut button_events: MessageReader<MouseButtonInput>,
     mut wheel_events: MessageReader<MouseWheel>,
+    mut touch_events: MessageReader<TouchInput>,
     mut focus_events: MessageReader<WindowFocused>,
     mut params: MouseSystemParams,
     mut forwarded_mouse: Local<ForwardedMouseState>,
     mut local_scroll: Local<LocalScrollState>,
+    mut touch_gesture: Local<TouchGestureState>,
 ) {
     let MouseSystemParams {
         primary_window,
@@ -310,6 +451,7 @@ pub(crate) fn handle_mouse_input(
                 }
             }
             release_pointer_drags(camera_interaction, selection, &mut forwarded_mouse);
+            touch_gesture.reset();
         }
     }
     let mode = camera_slots.active().mode;
@@ -332,21 +474,14 @@ pub(crate) fn handle_mouse_input(
                 if let Some(last) = camera_interaction.last_rotate_cursor {
                     let delta = event.position - last;
                     let pose = &mut camera_slots.active_mut().pose;
-                    pose.yaw += delta.x * 0.005;
-                    pose.pitch -= delta.y * 0.005;
+                    pose.yaw += delta.x * ROTATION_SENSITIVITY;
+                    pose.pitch -= delta.y * ROTATION_SENSITIVITY;
                 }
                 camera_interaction.last_rotate_cursor = Some(event.position);
             } else if camera_interaction.panning {
                 if let Some(last) = camera_interaction.last_pan_cursor {
                     let delta = event.position - last;
-                    let pose = &mut camera_slots.active_mut().pose;
-                    let movement_scale = if mode == TerminalPresentationMode::Perspective3d {
-                        pose.perspective_fov
-                    } else {
-                        pose.orthographic_scale
-                    };
-                    pose.translation.x -= delta.x * movement_scale;
-                    pose.translation.y += delta.y * movement_scale;
+                    apply_pan(&mut camera_slots.active_mut().pose, mode, delta);
                 }
                 camera_interaction.last_pan_cursor = Some(event.position);
             }
@@ -385,6 +520,31 @@ pub(crate) fn handle_mouse_input(
             && selection.update_from_cursor(cell, event.position)
         {
             redraw.request();
+        }
+    }
+
+    for event in touch_events.read() {
+        if event.window != primary_window {
+            continue;
+        }
+
+        match touch_gesture.update(event.id, event.phase, event.position, window_size) {
+            Some(TouchGesture::Rotate(delta)) if mode.is_3d() && !mobius_animating => {
+                let pose = &mut camera_slots.active_mut().pose;
+                pose.yaw += delta.x * ROTATION_SENSITIVITY;
+                pose.pitch -= delta.y * ROTATION_SENSITIVITY;
+            }
+            Some(TouchGesture::PanAndZoom { pan, zoom }) if mode.is_3d() && !mobius_animating => {
+                let pose = &mut camera_slots.active_mut().pose;
+                apply_pan(pose, mode, pan);
+                apply_wheel_zoom(pose, mode, mobius_animating, zoom * PINCH_ZOOM_SENSITIVITY);
+            }
+            Some(TouchGesture::EnterMobius) => {
+                enter_mobius_presentation(camera_slots, camera_interaction, mobius_transition);
+                selection.clear();
+            }
+            None => {}
+            _ => {}
         }
     }
 
@@ -648,6 +808,21 @@ fn release_pointer_drags(
     forwarded_mouse.last_cell = None;
 }
 
+/// Applies camera translation using the same movement as a right-button drag.
+fn apply_pan(
+    pose: &mut crate::camera::TerminalCameraPose,
+    mode: TerminalPresentationMode,
+    delta: Vec2,
+) {
+    let movement_scale = if mode == TerminalPresentationMode::Perspective3d {
+        pose.perspective_fov
+    } else {
+        pose.orthographic_scale
+    };
+    pose.translation.x -= delta.x * movement_scale;
+    pose.translation.y += delta.y * movement_scale;
+}
+
 /// Largest orthographic scale reachable by wheel zoom alone.
 const MAX_WHEEL_ORTHOGRAPHIC_SCALE: f32 = 4.0;
 
@@ -687,6 +862,64 @@ fn apply_wheel_zoom(
 mod wheel_zoom_tests {
     use super::*;
     use crate::camera::TerminalCameraPose;
+
+    #[test]
+    fn one_finger_rotates_and_two_fingers_pan_and_pinch() {
+        let mut state = TouchGestureState::default();
+        let window_size = Vec2::new(1000.0, 600.0);
+
+        assert_eq!(
+            state.update(7, TouchPhase::Started, Vec2::new(10.0, 20.0), window_size),
+            None
+        );
+        assert_eq!(
+            state.update(7, TouchPhase::Moved, Vec2::new(14.0, 17.0), window_size),
+            Some(TouchGesture::Rotate(Vec2::new(4.0, -3.0)))
+        );
+        assert_eq!(
+            state.update(8, TouchPhase::Started, Vec2::new(4.0, 17.0), window_size),
+            None
+        );
+        assert_eq!(
+            state.update(8, TouchPhase::Moved, Vec2::new(0.0, 17.0), window_size),
+            Some(TouchGesture::PanAndZoom {
+                pan: Vec2::new(-2.0, 0.0),
+                zoom: 4.0,
+            })
+        );
+
+        state.update(7, TouchPhase::Ended, Vec2::new(14.0, 17.0), window_size);
+        assert_eq!(state.primary, Some((8, Vec2::new(0.0, 17.0))));
+        assert_eq!(
+            state.update(8, TouchPhase::Moved, Vec2::new(3.0, 19.0), window_size),
+            Some(TouchGesture::Rotate(Vec2::new(3.0, 2.0)))
+        );
+    }
+
+    #[test]
+    fn bottom_left_swipe_enters_mobius() {
+        let mut state = TouchGestureState::default();
+        let window_size = Vec2::new(1000.0, 600.0);
+
+        state.update(1, TouchPhase::Started, Vec2::new(40.0, 560.0), window_size);
+        assert_eq!(
+            state.update(1, TouchPhase::Moved, Vec2::new(160.0, 440.0), window_size),
+            Some(TouchGesture::EnterMobius)
+        );
+        assert_eq!(state.primary, None);
+    }
+
+    #[test]
+    fn canceled_touch_rotation_can_restart() {
+        let mut state = TouchGestureState::default();
+        let window_size = Vec2::splat(500.0);
+        state.update(1, TouchPhase::Started, Vec2::ONE, window_size);
+        state.update(1, TouchPhase::Canceled, Vec2::ONE, window_size);
+        state.update(2, TouchPhase::Started, Vec2::new(3.0, 4.0), window_size);
+
+        assert_eq!(state.primary, Some((2, Vec2::new(3.0, 4.0))));
+        assert_eq!(state.secondary, None);
+    }
 
     #[test]
     fn focus_loss_releases_every_pointer_drag() {
