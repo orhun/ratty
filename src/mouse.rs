@@ -14,10 +14,10 @@ use crate::camera::{
 };
 use crate::config::AppConfig;
 use crate::keyboard::enter_mobius_presentation;
+use crate::ratty_vt::{MouseProtocolEncoding, MouseProtocolMode, Screen};
 use crate::runtime::TerminalRuntime;
 use crate::scene::{MobiusTransition, TerminalPresentationMode, TerminalViewport};
 use crate::terminal::TerminalSurface;
-use crate::vt::{self, MouseProtocolEncoding, MouseProtocolMode, VtTerminal};
 
 /// Distance in pixels the pointer must move with a pending selection to start dragging.
 const SELECTION_DRAG_THRESHOLD: f32 = 4.0;
@@ -328,14 +328,13 @@ impl TerminalSelection {
 
     /// Returns the selected screen text.
     ///
-    /// Kept hand-rolled rather than delegating to rio-vt's `selection_to_string`:
+    /// Kept hand-rolled rather than using the engine's `contents_between`:
     /// ratty's selection is a plain rectangular row/column range driven by the
-    /// 3D viewport, not rio-vt's `Selection` (which models linewise and
-    /// semantic modes over absolute grid positions).
-    pub fn selected_text(&self, term: &VtTerminal) -> Option<String> {
+    /// 3D viewport, and it must keep interior blank cells as spaces.
+    pub fn selected_text(&self, screen: &Screen) -> Option<String> {
         let bounds = self.normalized_bounds()?;
 
-        let cols = u16::try_from(term.columns()).unwrap_or(u16::MAX);
+        let (_, cols) = screen.size();
         let mut out = String::new();
 
         let start_row = bounds.start_row as u16;
@@ -351,20 +350,19 @@ impl TerminalSelection {
                 cols.saturating_sub(1)
             };
 
-            if vt::visible_row(term, row).is_some() {
+            if let Some(grid_row) = screen.visible_row(row) {
                 for col in row_start..=row_end {
-                    if usize::from(col) >= term.columns() {
+                    let Some(cell) = grid_row.get(col) else {
                         break;
-                    }
-                    let pos = vt::visible_pos(term, row, col);
-                    if vt::is_wide_spacer(&term.grid, pos) {
+                    };
+                    // The second half of a wide glyph is padding, not an
+                    // empty cell; a space there would split every CJK glyph.
+                    if cell.is_wide_continuation() {
                         continue;
                     }
-
-                    let before = out.len();
-                    vt::push_cell_text(&mut out, &term.grid, pos);
-                    if out.len() == before {
-                        // Blank cell: rio-vt stores it as NUL, not a space.
+                    if cell.has_contents() {
+                        out.push_str(cell.contents());
+                    } else {
                         out.push(' ');
                     }
                 }
@@ -398,6 +396,9 @@ pub struct MouseSystemParams<'w, 's> {
 }
 
 /// Handles terminal mouse input.
+// Bevy systems take one parameter per resource; the touch-gesture state added
+// in #146 pushed this past clippy's threshold.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_mouse_input(
     mut cursor_events: MessageReader<CursorMoved>,
     mut button_events: MessageReader<MouseButtonInput>,
@@ -426,8 +427,8 @@ pub(crate) fn handle_mouse_input(
     };
 
     let window_size = window.resolution.size().max(Vec2::ONE);
-    let mouse_mode = vt::mouse_protocol_mode(&runtime.term);
-    let mouse_encoding = vt::mouse_protocol_encoding(&runtime.term);
+    let mouse_mode = runtime.screen().mouse_protocol_mode();
+    let mouse_encoding = runtime.screen().mouse_protocol_encoding();
 
     // Button releases delivered while the window is unfocused never reach the
     // handlers below, so losing focus mid-drag would otherwise leave held
@@ -684,7 +685,7 @@ pub(crate) fn handle_mouse_input(
                     mouse_encoding,
                 ));
             }
-        } else if mode == TerminalPresentationMode::Flat2d && !vt::alternate_screen(&runtime.term) {
+        } else if mode == TerminalPresentationMode::Flat2d && !runtime.screen().alternate_screen() {
             let amount = match event.unit {
                 MouseScrollUnit::Line => {
                     app_config.terminal.mouse_scroll_lines as isize
@@ -700,9 +701,9 @@ pub(crate) fn handle_mouse_input(
             };
 
             if amount != 0 {
-                let current = vt::scrollback(&runtime.term) as isize;
+                let current = runtime.screen().scrollback() as isize;
                 let next = (current + amount).max(0) as usize;
-                vt::set_scrollback(&mut runtime.term, next);
+                runtime.screen_mut().set_scrollback(next);
                 selection.clear();
                 redraw.request();
             }
@@ -1003,24 +1004,12 @@ mod wheel_zoom_tests {
 mod tests {
     use super::*;
 
-    use rio_vt::ansi::CursorShape;
-    use rio_vt::crosswords::{Crosswords, CrosswordsSize};
-    use rio_vt::event::WindowId;
-    use rio_vt::performer::handler::Processor;
+    use crate::ratty_vt::Parser;
 
-    use crate::vt::TerminalEventSink;
-
-    fn terminal(rows: u16, cols: u16, input: &str) -> VtTerminal {
-        let mut term = Crosswords::new(
-            CrosswordsSize::new(usize::from(cols), usize::from(rows)),
-            CursorShape::Block,
-            TerminalEventSink::default(),
-            WindowId::from(0),
-            0,
-            1000,
-        );
-        Processor::default().advance(&mut term, input.as_bytes());
-        term
+    fn terminal(rows: u16, cols: u16, input: &str) -> Parser {
+        let mut parser = Parser::new(rows, cols, 1000);
+        parser.process(input.as_bytes());
+        parser
     }
 
     fn select(start: (u32, u32), end: (u32, u32)) -> TerminalSelection {
@@ -1035,7 +1024,7 @@ mod tests {
         let term = terminal(3, 20, "hello world");
         let selection = select((0, 0), (10, 0));
         assert_eq!(
-            selection.selected_text(&term).as_deref(),
+            selection.selected_text(term.screen()).as_deref(),
             Some("hello world")
         );
     }
@@ -1045,7 +1034,7 @@ mod tests {
         let term = terminal(3, 20, "first\r\nsecond");
         let selection = select((0, 0), (5, 1));
         assert_eq!(
-            selection.selected_text(&term).as_deref(),
+            selection.selected_text(term.screen()).as_deref(),
             Some("first\nsecond")
         );
     }
@@ -1055,7 +1044,7 @@ mod tests {
         let term = terminal(3, 20, "你好e\u{0301}z");
         let selection = select((0, 0), (5, 0));
         assert_eq!(
-            selection.selected_text(&term).as_deref(),
+            selection.selected_text(term.screen()).as_deref(),
             Some("你好e\u{0301}z")
         );
     }
@@ -1063,6 +1052,9 @@ mod tests {
     #[test]
     fn selection_without_a_drag_is_empty() {
         let term = terminal(3, 20, "hello");
-        assert_eq!(TerminalSelection::default().selected_text(&term), None);
+        assert_eq!(
+            TerminalSelection::default().selected_text(term.screen()),
+            None
+        );
     }
 }
