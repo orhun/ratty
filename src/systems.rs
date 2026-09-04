@@ -1400,7 +1400,7 @@ fn extrude_mesh(mesh: Mesh, depth: f32) -> Mesh {
     }
 
     let mut out_indices = Vec::<u32>::with_capacity(indices.len() * 4);
-    for triangle in indices.chunks_exact(3) {
+    for triangle in indices.as_chunks::<3>().0 {
         out_indices.extend_from_slice(triangle);
         out_indices.extend_from_slice(&[
             triangle[2] + source_len,
@@ -1410,7 +1410,7 @@ fn extrude_mesh(mesh: Mesh, depth: f32) -> Mesh {
     }
 
     let mut edge_counts = HashMap::<(u32, u32), u32>::new();
-    for triangle in indices.chunks_exact(3) {
+    for triangle in indices.as_chunks::<3>().0 {
         for edge in [
             (triangle[0], triangle[1]),
             (triangle[1], triangle[2]),

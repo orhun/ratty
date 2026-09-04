@@ -1036,7 +1036,7 @@ impl MeshPrimitive {
                 normal[0], normal[1], normal[2],
             ));
         }
-        for triangle in self.indices.chunks_exact(3) {
+        for triangle in self.indices.as_chunks::<3>().0 {
             let a = usize::from(triangle[0]);
             let b = usize::from(triangle[1]);
             let c = usize::from(triangle[2]);

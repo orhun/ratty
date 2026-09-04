@@ -506,7 +506,7 @@ fn build_meshes(
         let mut positions = Vec::<[f32; 3]>::with_capacity(source_mesh.positions.len() / 3);
         let mut min = Vec3::splat(f32::INFINITY);
         let mut max = Vec3::splat(f32::NEG_INFINITY);
-        for pos in source_mesh.positions.chunks_exact(3) {
+        for pos in source_mesh.positions.as_chunks::<3>().0 {
             let point = Vec3::new(pos[0], pos[1], pos[2]);
             min = min.min(point);
             max = max.max(point);
@@ -534,7 +534,9 @@ fn build_meshes(
         if !source_mesh.vertex_color.is_empty() {
             let colors = source_mesh
                 .vertex_color
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .map(|color| [color[0], color[1], color[2], 1.0])
                 .collect::<Vec<[f32; 4]>>();
             if colors.len() == source_mesh.positions.len() / 3 {
@@ -545,7 +547,9 @@ fn build_meshes(
         if !source_mesh.normals.is_empty() {
             let normals = source_mesh
                 .normals
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .map(|normal| [normal[0], normal[1], normal[2]])
                 .collect::<Vec<[f32; 3]>>();
             mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
@@ -554,7 +558,9 @@ fn build_meshes(
         if !source_mesh.texcoords.is_empty() {
             let uvs = source_mesh
                 .texcoords
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|uv| [uv[0], 1.0 - uv[1]])
                 .collect::<Vec<[f32; 2]>>();
             if uvs.len() == position_count {

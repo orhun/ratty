@@ -248,7 +248,7 @@ impl KittyTransfer {
                     return None;
                 }
                 let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
-                for rgb in self.bytes.chunks_exact(3) {
+                for rgb in self.bytes.as_chunks::<3>().0 {
                     rgba.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
                 }
                 (width, height, rgba)

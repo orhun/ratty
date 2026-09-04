@@ -182,8 +182,8 @@ impl<'a> CellDebugImageRenderer<'a> {
     }
 
     fn fill(&mut self, color: Rgba) {
-        for pixel in self.data.chunks_exact_mut(4) {
-            pixel.copy_from_slice(&color);
+        for pixel in self.data.as_chunks_mut::<4>().0 {
+            *pixel = color;
         }
     }
 
