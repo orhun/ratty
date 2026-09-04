@@ -43,6 +43,7 @@ bevy = { version = "0.19.0", default-features = false, features = [
 clap = { version = "4.5", features = ["derive"] }
 etcetera = "0.11"
 image = { version = "0.25", default-features = false, features = ["png", "ico"] }
+itoa = "1.0"
 parley_ratatui = "0.3.4"
 portable-pty = "0.8"
 ratatui = "0.30"
@@ -53,6 +54,8 @@ shellexpand = "3.1"
 stl_io = "0.11.0"
 tobj = "4.0"
 toml = "0.8"
+unicode-width = "0.2"
+vte = "0.15"
 winit = { version = "0.30", default-features = false }
 
 [build-dependencies]
