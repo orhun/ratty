@@ -19,4 +19,4 @@ ratatui-core = "0.1.2"
 crossterm = "0.29"
 image = "0.25.10"
 ratatui = "0.30"
-ratatui-image = { version = "11.0.1", default-features = false, features = ["crossterm", "image-defaults"] }
+ratatui-image = { version = "11.0.6", default-features = false, features = ["crossterm", "image-defaults"] }

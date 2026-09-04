@@ -1645,16 +1645,18 @@ dependencies = [
 
 [[package]]
 name = "ratatui"
-version = "0.30.0"
+version = "0.30.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d1ce67fb8ba4446454d1c8dbaeda0557ff5e94d39d5e5ed7f10a65eb4c8266bc"
+checksum = "3274ba0a2c5e1bcad2a2005d20f4dc59dad26b2eb0940fb094500dba4099d57d"
 dependencies = [
  "instability",
  "ratatui-core",
  "ratatui-crossterm",
  "ratatui-macros",
+ "ratatui-termina",
  "ratatui-termwiz",
  "ratatui-widgets",
+ "serde",
 ]
 
 [[package]]
@@ -1672,7 +1674,7 @@ dependencies = [
  "lru",
  "palette",
  "serde",
- "strum 0.28.0",
+ "strum",
  "thiserror 2.0.18",
  "unicode-segmentation",
  "unicode-truncate",
@@ -1681,9 +1683,9 @@ dependencies = [
 
 [[package]]
 name = "ratatui-crossterm"
-version = "0.1.0"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "577c9b9f652b4c121fb25c6a391dd06406d3b092ba68827e6d2f09550edc54b3"
+checksum = "567584a3b0e6a8203c23de40b4861497266725eb5363dbfd18a1edd603cca9f0"
 dependencies = [
  "cfg-if",
  "crossterm",
@@ -1693,9 +1695,9 @@ dependencies = [
 
 [[package]]
 name = "ratatui-image"
-version = "11.0.1"
+version = "11.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f91458ac9dca7d54e0b6220141f984babed54b651cec4674e25865067b7dbbd"
+checksum = "03b7a5dadade9d8a0243267ad40fd1ace6f369cc8f0c5f9f8a0ebd67bfb95f5b"
 dependencies = [
  "base64-simd",
  "icy_sixel",
@@ -1710,9 +1712,9 @@ dependencies = [
 
 [[package]]
 name = "ratatui-macros"
-version = "0.7.0"
+version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7f1342a13e83e4bb9d0b793d0ea762be633f9582048c892ae9041ef39c936f4"
+checksum = "ed7dc68daa7498a43e4d68e0eb078427e10c38fbcfbb1e42d955f1fa2140d814"
 dependencies = [
  "ratatui-core",
  "ratatui-widgets",
@@ -1731,10 +1733,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "ratatui-termwiz"
+name = "ratatui-termina"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f76fe0bd0ed4295f0321b1676732e2454024c15a35d01904ddb315afd3d545c"
+checksum = "c0bf912d9e66f057a759d92e386a280ea886b352ab757d6ac4d653c7ed2c43c2"
+dependencies = [
+ "instability",
+ "ratatui-core",
+ "termina",
+]
+
+[[package]]
+name = "ratatui-termwiz"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "faf03e0380b7744054d6cb74224fe3adf062a029754933f575ca1e3b4c2ce977"
 dependencies = [
  "ratatui-core",
  "termwiz",
@@ -1742,18 +1755,19 @@ dependencies = [
 
 [[package]]
 name = "ratatui-widgets"
-version = "0.3.0"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7dbfa023cd4e604c2553483820c5fe8aa9d71a42eea5aa77c6e7f35756612db"
+checksum = "66e3d19bcc9130ca376277d93b60767ff121ace3be06f5f95f81dd68956407d1"
 dependencies = [
  "bitflags 2.13.1",
- "hashbrown 0.16.1",
+ "hashbrown 0.17.0",
  "indoc",
  "instability",
  "itertools",
  "line-clipping",
  "ratatui-core",
- "strum 0.27.2",
+ "serde",
+ "strum",
  "time",
  "unicode-segmentation",
  "unicode-width",
@@ -2105,32 +2119,11 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
 name = "strum"
-version = "0.27.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af23d6f6c1a224baef9d3f61e287d2761385a5b88fdab4eb4c6f11aeb54c4bcf"
-dependencies = [
- "strum_macros 0.27.2",
-]
-
-[[package]]
-name = "strum"
 version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9628de9b8791db39ceda2b119bbe13134770b56c138ec1d3af810d045c04f9bd"
 dependencies = [
- "strum_macros 0.28.0",
-]
-
-[[package]]
-name = "strum_macros"
-version = "0.27.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7695ce3845ea4b33927c055a39dc438a45b059f7c1b3d91d38d10355fb8cbca7"
-dependencies = [
- "heck",
- "proc-macro2",
- "quote",
- "syn 2.0.117",
+ "strum_macros",
 ]
 
 [[package]]
@@ -2172,6 +2165,19 @@ name = "tap"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
+
+[[package]]
+name = "termina"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9048a889effe34a5cddee0af7f53285198b16dca3be510858d38dfdb3e62a04e"
+dependencies = [
+ "bitflags 2.13.1",
+ "parking_lot",
+ "rustix 1.1.4",
+ "signal-hook",
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "terminfo"
