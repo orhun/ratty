@@ -68,18 +68,7 @@ jobs:
         uses: actions/checkout@v4
       - name: Install system dependencies
         if: startsWith(matrix.os, 'ubuntu-')
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            pkg-config \
-            libasound2-dev \
-            libfontconfig1-dev \
-            libudev-dev \
-            libwayland-dev \
-            libxkbcommon-dev \
-            libxkbcommon-x11-dev \
-            libxcb-shape0-dev \
-            libxcb-xfixes0-dev
+        uses: ./.github/actions/install-linux-deps
       - name: Install Rust stable with target
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -96,18 +85,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            pkg-config \
-            libasound2-dev \
-            libfontconfig1-dev \
-            libudev-dev \
-            libwayland-dev \
-            libxkbcommon-dev \
-            libxkbcommon-x11-dev \
-            libxcb-shape0-dev \
-            libxcb-xfixes0-dev
+        uses: ./.github/actions/install-linux-deps
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
       - name: Cache Cargo dependencies
@@ -128,18 +106,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            pkg-config \
-            libasound2-dev \
-            libfontconfig1-dev \
-            libudev-dev \
-            libwayland-dev \
-            libxkbcommon-dev \
-            libxkbcommon-x11-dev \
-            libxcb-shape0-dev \
-            libxcb-xfixes0-dev
+        uses: ./.github/actions/install-linux-deps
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
