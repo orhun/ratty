@@ -2,9 +2,9 @@
 //
 // A fullscreen (clip-space) quad covers the viewport; each fragment samples the
 // terminal texture by its own physical pixel coordinate via `textureLoad`, so
-// every texel maps to exactly one screen pixel with no resampling — the crisp
-// presentation pattern from linebender/bevy_vello, specialized to a centered,
-// pixel-aligned sub-rect (the terminal grid does not always fill the window).
+// every texel maps to exactly one screen pixel with no resampling, specialized
+// to a centered, pixel-aligned sub-rect (the terminal grid does not always fill
+// the window).
 #import bevy_render::view::View
 #import bevy_sprite::mesh2d_vertex_output::VertexOutput
 
@@ -41,6 +41,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         // Outside the terminal: transparent, so the camera clear shows through.
         return vec4<f32>(0.0, 0.0, 0.0, 0.0);
     }
-    // Exact texel fetch (the texture's sRGB view decodes to linear on load).
+    // Exact texel fetch: the renderer's `Rgba8UnormSrgb` texture decodes to
+    // linear on load, so no manual conversion is needed.
     return textureLoad(terminal_texture, vec2<i32>(p), 0);
 }

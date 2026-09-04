@@ -21,6 +21,12 @@ TERM = "xterm-256color"
 
 [font]
 family = "DejaVu Sans Mono"
+# To guarantee the exact face on every platform, set `regular` and optionally
+# the other three face files. Relative paths are resolved from this config.
+# regular = "fonts/IosevkaFixed-Regular.ttf"
+# bold = "fonts/IosevkaFixed-Bold.ttf"
+# italic = "fonts/IosevkaFixed-Italic.ttf"
+# bold_italic = "fonts/IosevkaFixed-BoldItalic.ttf"
 style = "Regular"
 size = 12
 

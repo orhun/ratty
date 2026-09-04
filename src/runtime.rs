@@ -192,7 +192,18 @@ pub struct TerminalRuntime {
     /// Indicates PTY shutdown.
     pub pty_disconnected: bool,
     shutdown_started: bool,
+    /// Last dimensions successfully applied to the PTY.
+    last_pty_size: PtyDimensions,
+    /// Last column and row dimensions applied to the VT parser.
+    last_parser_size: ParserDimensions,
+    /// Desired dimensions retained until both the PTY and parser accept them.
+    pending_resize: Option<PtyDimensions>,
 }
+
+/// `(cols, rows, pixel_width, pixel_height)` as sent to the PTY.
+type PtyDimensions = (u16, u16, u16, u16);
+/// `(cols, rows)` as applied to the parser grid.
+type ParserDimensions = (u16, u16);
 
 /// Returns the default shell for the current platform.
 ///
@@ -360,6 +371,9 @@ impl TerminalRuntime {
             parser,
             pty_disconnected: false,
             shutdown_started: false,
+            last_pty_size: (cols, rows, 0, 0),
+            last_parser_size: (cols, rows),
+            pending_resize: None,
         })
     }
 
@@ -413,23 +427,67 @@ impl TerminalRuntime {
     }
 
     /// Resizes the PTY and parser screen.
-    pub fn resize(&mut self, cols: u16, rows: u16, pw: u16, ph: u16) {
+    ///
+    /// The parser adopts the new grid immediately so local rendering, the
+    /// viewport, and mouse mapping always track the committed layout. Only
+    /// the operating-system PTY resize is cached for retry after a failure,
+    /// so until it succeeds the child still holds the previous geometry.
+    /// Dimensions equal to the last applied ones are not resent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operating system fails to resize the PTY.
+    pub fn resize(&mut self, cols: u16, rows: u16, pw: u16, ph: u16) -> anyhow::Result<()> {
         if cols == 0 || rows == 0 {
-            return;
+            return Ok(());
         }
 
-        if let Some(master) = self.master.get().as_ref() {
-            let _ = master.resize(PtySize {
-                rows,
-                cols,
-                pixel_width: pw,
-                pixel_height: ph,
-            });
+        self.pending_resize = Some((cols, rows, pw, ph));
+        self.retry_pending_resize().map(drop)
+    }
+
+    /// Retries the most recently requested resize, if one remains pending.
+    ///
+    /// Returns `true` when a pending resize was applied.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operating system fails to resize the PTY;
+    /// the request stays pending for the next attempt.
+    pub(crate) fn retry_pending_resize(&mut self) -> anyhow::Result<bool> {
+        let Some(pty_size @ (cols, rows, pw, ph)) = self.pending_resize else {
+            return Ok(false);
+        };
+
+        // The caller has already committed the surface, viewport, and mouse
+        // mapping to the new grid, so the local parser must follow even when
+        // the OS notification below fails. Only the child-facing ioctl is
+        // retried.
+        let parser_size = (cols, rows);
+        if self.last_parser_size != parser_size {
+            // The engine reflows content and resets the scrolling region
+            // itself, so the grid resize is the whole operation: no snapshot
+            // and replay.
+            self.parser.screen_mut().set_size_reflow(rows, cols);
+            self.last_parser_size = parser_size;
         }
 
-        // The engine reflows content and resets the scrolling region itself,
-        // so the grid resize is the whole operation: no snapshot and replay.
-        self.parser.screen_mut().set_size_reflow(rows, cols);
+        if self.last_pty_size != pty_size {
+            if let Some(master) = self.master.get().as_ref() {
+                master
+                    .resize(PtySize {
+                        rows,
+                        cols,
+                        pixel_width: pw,
+                        pixel_height: ph,
+                    })
+                    .context("failed to resize PTY")?;
+            }
+            self.last_pty_size = pty_size;
+        }
+
+        self.pending_resize = None;
+        Ok(true)
     }
 
     /// Returns the active kitty keyboard enhancement flags.
@@ -573,5 +631,123 @@ mod tests {
         let mut parser = parser(5, 20);
         parser.process(b"\x1b[?7h\x1b[?7l\x1b[>1;2m");
         assert!(replies(&mut parser).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod resize_tests {
+    use std::io;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    struct FailOnceMaster {
+        attempts: Arc<AtomicUsize>,
+        applied_size: Arc<Mutex<Option<PtyDimensions>>>,
+    }
+
+    impl MasterPty for FailOnceMaster {
+        fn resize(&self, size: PtySize) -> anyhow::Result<()> {
+            if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                anyhow::bail!("injected resize failure");
+            }
+            *self.applied_size.lock().expect("resize state lock") =
+                Some((size.cols, size.rows, size.pixel_width, size.pixel_height));
+            Ok(())
+        }
+
+        fn get_size(&self) -> anyhow::Result<PtySize> {
+            Ok(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+        }
+
+        fn try_clone_reader(&self) -> anyhow::Result<Box<dyn Read + Send>> {
+            Ok(Box::new(io::empty()))
+        }
+
+        fn take_writer(&self) -> anyhow::Result<Box<dyn Write + Send>> {
+            Ok(Box::new(io::sink()))
+        }
+
+        #[cfg(unix)]
+        fn process_group_leader(&self) -> Option<i32> {
+            None
+        }
+
+        #[cfg(unix)]
+        fn as_raw_fd(&self) -> Option<std::os::fd::RawFd> {
+            None
+        }
+    }
+
+    fn test_runtime(master: Box<dyn MasterPty + Send>) -> TerminalRuntime {
+        let (_tx, rx) = mpsc::sync_channel(1);
+        TerminalRuntime {
+            rx: SyncCell::new(rx),
+            writer: Arc::new(Mutex::new(None)),
+            master: SyncCell::new(Some(master)),
+            child: None,
+            reader_thread: None,
+            parser: Parser::new_with_callbacks(24, 80, 100, TerminalParserCallbacks::default()),
+            pty_disconnected: false,
+            shutdown_started: false,
+            last_pty_size: (80, 24, 0, 0),
+            last_parser_size: (80, 24),
+            pending_resize: None,
+        }
+    }
+
+    #[test]
+    fn scheduled_retry_applies_a_retained_resize_after_the_parser_reflowed() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let applied_size = Arc::new(Mutex::new(None));
+        let master = FailOnceMaster {
+            attempts: attempts.clone(),
+            applied_size: applied_size.clone(),
+        };
+        let mut runtime = test_runtime(Box::new(master));
+
+        let first = runtime.resize(100, 30, 800, 600);
+        assert!(first.is_err());
+        // The parser follows the committed layout immediately; only the
+        // child-facing PTY notification is retried.
+        assert_eq!(runtime.last_pty_size, (80, 24, 0, 0));
+        assert_eq!(runtime.last_parser_size, (100, 30));
+        assert_eq!(runtime.screen().size(), (30, 100));
+        assert_eq!(runtime.pending_resize, Some((100, 30, 800, 600)));
+
+        let mut app = bevy::prelude::App::new();
+        app.init_resource::<crate::terminal::TerminalRedrawState>();
+        app.insert_resource(runtime).add_systems(
+            bevy::prelude::Update,
+            crate::systems::retry_pending_terminal_resize,
+        );
+        app.update();
+
+        let mut runtime = app.world_mut().resource_mut::<TerminalRuntime>();
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(runtime.last_pty_size, (100, 30, 800, 600));
+        assert_eq!(runtime.pending_resize, None);
+        assert_eq!(
+            *applied_size.lock().expect("resize state lock"),
+            Some((100, 30, 800, 600))
+        );
+
+        // Identical dimensions are not resent to the PTY.
+        runtime
+            .resize(100, 30, 800, 600)
+            .expect("no-op resize succeeds");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+
+        runtime
+            .resize(100, 30, 900, 600)
+            .expect("pixel-only resize should reach the PTY");
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        assert_eq!(runtime.last_pty_size, (100, 30, 900, 600));
+        assert_eq!(runtime.last_parser_size, (100, 30));
     }
 }
