@@ -26,7 +26,8 @@ subject, so the fork can be rebased onto a future upstream release.
 - SGR 8 / 28 (hidden), SGR 9 / 29 (strikeout), and SGR 58 / 59 (underline
   color) are parsed, stored on cells, and round-trip through the formatted
   output.
-- `CSI f` (HVP) is handled like `CSI H` (CUP).
+- `CSI f` (HVP) is handled like `CSI H` (CUP); `CSI s` / `CSI u` (SCOSC /
+  SCORC) save and restore the cursor position.
 - Resize reflows wrapped lines, moves lines between the screen and scrollback,
   and resets the DECSTBM scroll region.
 - Grids with a single row or column no longer panic on wide glyphs.

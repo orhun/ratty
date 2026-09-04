@@ -337,14 +337,14 @@ impl TerminalSurface {
     ///
     /// This is the template pushed to the renderer entity; the font faces may
     /// be swapped for explicit files or a fallback family before the push.
-    pub(crate) const fn render_config(&self) -> &TerminalRenderConfig {
+    pub const fn render_config(&self) -> &TerminalRenderConfig {
         &self.render_config
     }
 
     /// Adopts the metrics and stable image handle produced by the Bevy
     /// renderer, comparing first and writing only on change; returns whether
     /// anything changed.
-    pub(crate) fn update_render_output(&mut self, texture: &TerminalTexture) -> bool {
+    pub fn update_render_output(&mut self, texture: &TerminalTexture) -> bool {
         let cell_size = texture.cell_size.max(Vec2::ONE);
         let render_scale = texture.raster_scale.max(1.0);
         let changed = self.image_handle.as_ref() != Some(&texture.image)
@@ -429,6 +429,9 @@ fn points_to_logical_pixels(points: i32) -> f32 {
     (points as f32 * LOGICAL_PIXELS_PER_INCH / POINTS_PER_INCH).max(1.0)
 }
 
+/// Leading character of a Kitty graphics Unicode placeholder cell.
+const KITTY_PLACEHOLDER: char = '\u{10EEEE}';
+
 /// Ratatui widget backed by the terminal screen.
 pub struct TerminalWidget<'a> {
     /// Terminal state to render.
@@ -486,7 +489,15 @@ impl Widget for TerminalWidget<'_> {
                     continue;
                 }
 
-                let symbol = vt_cell.contents();
+                // Kitty Unicode placeholders (U+10EEEE plus row/column
+                // diacritics) only mark where an image goes; the image is
+                // drawn as a separate scene object, so the cell must stay a
+                // blank instead of rendering the placeholder as a glyph.
+                let symbol = if vt_cell.contents().starts_with(KITTY_PLACEHOLDER) {
+                    " "
+                } else {
+                    vt_cell.contents()
+                };
                 let mut style = cell_style(vt_cell, &theme_palette, theme_fg, self.font_style);
                 let is_wide = vt_cell.is_wide();
                 // A wide glyph renders as one unit: a selection touching
@@ -865,6 +876,14 @@ mod tests {
                 .style
                 .has(bevy_terminal_ratatui::prelude::StyleFlags::HIDDEN)
         );
+    }
+
+    #[test]
+    fn widget_blanks_kitty_placeholder_cells() {
+        let rendered = render_cells(1, 4, "a\u{10EEEE}\u{0305}\u{0305}b".as_bytes());
+        assert_eq!(rendered[0].symbol(), "a");
+        assert_eq!(rendered[1].symbol(), " ");
+        assert_eq!(rendered[2].symbol(), "b");
     }
 
     #[test]

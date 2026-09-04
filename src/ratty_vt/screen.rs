@@ -1099,6 +1099,19 @@ impl Screen {
         self.restore_cursor();
     }
 
+    // CSI s
+    //
+    // ratty-vt: SCOSC saves only the cursor position, sharing the slot with
+    // DECSC the way xterm does; text attributes are left alone.
+    pub(crate) fn scosc(&mut self) {
+        self.grid_mut().save_cursor();
+    }
+
+    // CSI u
+    pub(crate) fn scorc(&mut self) {
+        self.grid_mut().restore_cursor();
+    }
+
     // ESC =
     pub(crate) fn deckpam(&mut self) {
         self.set_mode(MODE_APPLICATION_KEYPAD);
@@ -1601,6 +1614,17 @@ mod ratty_tests {
         assert_eq!(cell(3), Blink::None);
         assert_eq!(cell(4), Blink::None, "SGR 0 resets blink");
         assert_eq!(parser.screen().blink(), Blink::None);
+    }
+
+    #[test]
+    fn scosc_and_scorc_save_and_restore_the_cursor_position() {
+        let mut parser = Parser::new(5, 20, 0);
+        parser.process(b"\x1b[2;3H\x1b[s\x1b[1mtext\x1b[4;10Hmore\x1b[u");
+        assert_eq!(parser.screen().cursor_position(), (1, 2));
+        // Unlike DECRC, SCORC leaves the attributes alone.
+        assert!(parser.screen().bold());
+        parser.process(b"X");
+        assert_eq!(parser.screen().cell(1, 2).unwrap().contents(), "X");
     }
 
     #[test]
