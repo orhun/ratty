@@ -176,4 +176,12 @@ impl Cell {
     pub fn inverse(&self) -> bool {
         self.attrs.inverse()
     }
+
+    /// Returns the blink attribute the cell should be rendered with.
+    ///
+    /// ratty-vt addition: upstream vt100 does not parse SGR 5/6/25.
+    #[must_use]
+    pub fn blink(&self) -> crate::ratty_vt::Blink {
+        self.attrs.blink()
+    }
 }

@@ -120,6 +120,8 @@ pub struct Attrs {
     italic: Option<bool>,
     underline: Option<bool>,
     inverse: Option<bool>,
+    // ratty-vt: blink.
+    blink: Option<crate::ratty_vt::attrs::Blink>,
 }
 
 impl Attrs {
@@ -152,6 +154,12 @@ impl Attrs {
         self.inverse = Some(inverse);
         self
     }
+
+    // ratty-vt: blink.
+    pub fn blink(mut self, blink: crate::ratty_vt::attrs::Blink) -> Self {
+        self.blink = Some(blink);
+        self
+    }
 }
 
 impl BufWrite for Attrs {
@@ -164,6 +172,7 @@ impl BufWrite for Attrs {
             && self.italic.is_none()
             && self.underline.is_none()
             && self.inverse.is_none()
+            && self.blink.is_none()
         {
             return;
         }
@@ -263,6 +272,15 @@ impl BufWrite for Attrs {
                 write_param!(7);
             } else {
                 write_param!(27);
+            }
+        }
+
+        // ratty-vt: blink.
+        if let Some(blink) = self.blink {
+            match blink {
+                crate::ratty_vt::attrs::Blink::None => write_param!(25),
+                crate::ratty_vt::attrs::Blink::Slow => write_param!(5),
+                crate::ratty_vt::attrs::Blink::Rapid => write_param!(6),
             }
         }
 

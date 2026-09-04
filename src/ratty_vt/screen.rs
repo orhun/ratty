@@ -421,6 +421,7 @@ impl Screen {
     /// * italic
     /// * underline
     /// * inverse
+    /// * blink
     ///
     /// This is not typically necessary, since
     /// [`contents_formatted`](Self::contents_formatted) will leave
@@ -590,6 +591,14 @@ impl Screen {
     #[must_use]
     pub fn inverse(&self) -> bool {
         self.attrs.inverse()
+    }
+
+    /// Returns the blink attribute newly drawn text should be rendered with.
+    ///
+    /// ratty-vt addition: upstream vt100 does not parse SGR 5/6/25.
+    #[must_use]
+    pub fn blink(&self) -> crate::ratty_vt::Blink {
+        self.attrs.blink()
     }
 
     pub(crate) fn grid(&self) -> &crate::ratty_vt::grid::Grid {
@@ -1196,10 +1205,15 @@ impl Screen {
                 [2] => self.attrs.set_dim(),
                 [3] => self.attrs.set_italic(true),
                 [4] => self.attrs.set_underline(true),
+                // ratty-vt: blink.
+                [5] => self.attrs.set_blink(crate::ratty_vt::Blink::Slow),
+                [6] => self.attrs.set_blink(crate::ratty_vt::Blink::Rapid),
                 [7] => self.attrs.set_inverse(true),
                 [22] => self.attrs.set_normal_intensity(),
                 [23] => self.attrs.set_italic(false),
                 [24] => self.attrs.set_underline(false),
+                // ratty-vt: blink.
+                [25] => self.attrs.set_blink(crate::ratty_vt::Blink::None),
                 [27] => self.attrs.set_inverse(false),
                 [n] if (30..=37).contains(n) => {
                     self.attrs.fgcolor = crate::ratty_vt::Color::Idx(to_u8!(*n) - 30);
@@ -1280,5 +1294,63 @@ fn u16_to_u8(i: u16) -> Option<u8> {
     } else {
         // safe because we just ensured that the value fits in a u8
         Some(i.try_into().unwrap())
+    }
+}
+
+#[cfg(test)]
+mod ratty_tests {
+    //! ratty-vt engine patch tests. Upstream's suite lives in `super::super::tests`.
+    use crate::ratty_vt::{Blink, Parser};
+
+    #[test]
+    fn sgr_blink_is_parsed_and_stored_on_cells() {
+        let mut parser = Parser::new(2, 10, 0);
+        parser.process(b"a\x1b[5mb\x1b[6mc\x1b[25md\x1b[5m\x1b[me");
+        let cell = |col| parser.screen().cell(0, col).unwrap().blink();
+        assert_eq!(cell(0), Blink::None);
+        assert_eq!(cell(1), Blink::Slow);
+        assert_eq!(cell(2), Blink::Rapid);
+        assert_eq!(cell(3), Blink::None);
+        assert_eq!(cell(4), Blink::None, "SGR 0 resets blink");
+        assert_eq!(parser.screen().blink(), Blink::None);
+    }
+
+    #[test]
+    fn blink_round_trips_through_contents_formatted() {
+        let mut parser = Parser::new(2, 10, 0);
+        parser.process(b"\x1b[5mab\x1b[6mc\x1b[25md");
+        let formatted = parser.screen().contents_formatted();
+        assert!(
+            formatted.windows(4).any(|w| w == b"\x1b[5m"),
+            "{formatted:?}"
+        );
+        assert!(
+            formatted.windows(4).any(|w| w == b"\x1b[6m"),
+            "{formatted:?}"
+        );
+
+        let mut replay = Parser::new(2, 10, 0);
+        replay.process(&formatted);
+        for col in 0..5 {
+            assert_eq!(
+                replay.screen().cell(0, col).unwrap().blink(),
+                parser.screen().cell(0, col).unwrap().blink(),
+                "column {col}"
+            );
+        }
+        assert_eq!(replay.screen().blink(), parser.screen().blink());
+    }
+
+    #[test]
+    fn blink_diff_emits_reset_when_cleared() {
+        let mut parser = Parser::new(2, 10, 0);
+        parser.process(b"\x1b[5ma");
+        let prev = parser.screen().clone();
+        // Bold keeps the attributes off the all-default fast path, which
+        // emits a bare SGR 0 instead of a per-attribute reset.
+        parser.process(b"\x1b[1;25mb");
+        let diff = parser.screen().contents_diff(&prev);
+        let text = String::from_utf8_lossy(&diff);
+        assert!(text.contains("\x1b[1;25m"), "{text:?}");
     }
 }

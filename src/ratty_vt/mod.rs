@@ -65,7 +65,7 @@ mod row;
 mod screen;
 mod term;
 
-pub use attrs::Color;
+pub use attrs::{Blink, Color};
 pub use callbacks::Callbacks;
 pub use cell::Cell;
 pub use parser::Parser;

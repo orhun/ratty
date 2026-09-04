@@ -20,6 +20,23 @@ const TEXT_MODE_DIM: u8 = 0b0000_0010;
 const TEXT_MODE_ITALIC: u8 = 0b0000_0100;
 const TEXT_MODE_UNDERLINE: u8 = 0b0000_1000;
 const TEXT_MODE_INVERSE: u8 = 0b0001_0000;
+// ratty-vt: SGR 5 (slow blink) and SGR 6 (rapid blink). Mutually exclusive,
+// like the intensity bits; SGR 25 clears both.
+const TEXT_MODE_BLINK: u8 = 0b0110_0000;
+const TEXT_MODE_BLINK_SLOW: u8 = 0b0010_0000;
+const TEXT_MODE_BLINK_RAPID: u8 = 0b0100_0000;
+
+/// The blink attribute of a cell or of newly drawn text.
+#[derive(Eq, PartialEq, Debug, Copy, Clone, Default)]
+pub enum Blink {
+    /// Not blinking (SGR 25).
+    #[default]
+    None,
+    /// Slow blink (SGR 5).
+    Slow,
+    /// Rapid blink (SGR 6).
+    Rapid,
+}
 
 #[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Attrs {
@@ -91,6 +108,24 @@ impl Attrs {
         }
     }
 
+    // ratty-vt: blink attribute.
+    pub fn blink(&self) -> Blink {
+        match self.mode & TEXT_MODE_BLINK {
+            TEXT_MODE_BLINK_SLOW => Blink::Slow,
+            TEXT_MODE_BLINK_RAPID => Blink::Rapid,
+            _ => Blink::None,
+        }
+    }
+
+    pub fn set_blink(&mut self, blink: Blink) {
+        self.mode &= !TEXT_MODE_BLINK;
+        self.mode |= match blink {
+            Blink::None => 0,
+            Blink::Slow => TEXT_MODE_BLINK_SLOW,
+            Blink::Rapid => TEXT_MODE_BLINK_RAPID,
+        };
+    }
+
     pub fn write_escape_code_diff(&self, contents: &mut Vec<u8>, other: &Self) {
         if self != other && self == &Self::default() {
             crate::ratty_vt::term::ClearAttrs.write_buf(contents);
@@ -133,6 +168,12 @@ impl Attrs {
             attrs
         } else {
             attrs.inverse(self.inverse())
+        };
+        // ratty-vt: blink.
+        let attrs = if self.blink() == other.blink() {
+            attrs
+        } else {
+            attrs.blink(self.blink())
         };
 
         attrs.write_buf(contents);
