@@ -47,7 +47,6 @@ itoa = "1.0"
 parley_ratatui = "0.3.4"
 portable-pty = "0.8"
 ratatui = "0.30"
-rio-vt = { version = "0.5.19", default-features = false }
 rust-embed = "8.5"
 serde = { version = "1.0", features = ["derive"] }
 shellexpand = "3.1"

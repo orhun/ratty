@@ -2,12 +2,9 @@
 
 use bevy::prelude::*;
 use bevy::render::render_resource::Extent3d;
-use rio_vt::crosswords::pos::Column;
-use rio_vt::crosswords::square::Wide;
-use rio_vt::crosswords::style::StyleFlags;
 
+use crate::ratty_vt::{Cell, Color, Screen};
 use crate::terminal::TerminalSurface;
-use crate::vt::{self, CellColor, VtTerminal};
 
 type Rgba = [u8; 4];
 const DEBUG_BG: Rgba = [18, 20, 28, 255];
@@ -21,7 +18,7 @@ const DEBUG_BG_FALLBACK: Rgba = [31, 31, 40, 255];
 pub fn sync_terminal_debug_image(
     terminal: &TerminalSurface,
     images: &mut Assets<Image>,
-    term: &VtTerminal,
+    screen: &Screen,
 ) {
     let Some(handle) = terminal.back_image_handle.as_ref() else {
         return;
@@ -46,7 +43,7 @@ pub fn sync_terminal_debug_image(
         data.resize(rgba_len, 0);
     }
 
-    CellDebugImageRenderer::new(data, width, height, terminal.cols, terminal.rows).render(term);
+    CellDebugImageRenderer::new(data, width, height, terminal.cols, terminal.rows).render(screen);
 }
 
 /// Synchronizes an image handle across plane materials.
@@ -103,40 +100,29 @@ impl<'a> CellDebugImageRenderer<'a> {
         }
     }
 
-    fn render(&mut self, term: &VtTerminal) {
+    fn render(&mut self, screen: &Screen) {
         self.fill(DEBUG_BG);
-
-        let styles = vt::styles(term);
-        let columns = term.columns();
-        let mut text = String::new();
 
         for row in 0..self.rows {
             let grid_row = u16::try_from(row)
                 .ok()
-                .and_then(|row| vt::visible_row(term, row));
+                .and_then(|row| screen.visible_row(row));
 
             for col in 0..self.cols {
                 let rect = self.cell_rect(row, col);
                 self.draw_rect(rect, DEBUG_GRID);
                 self.draw_rect_outline(rect, DEBUG_GRID_OUTLINE);
 
-                let Some(grid_row) = grid_row else {
+                let Some(cell) = grid_row
+                    .and_then(|grid_row| u16::try_from(col).ok().and_then(|col| grid_row.get(col)))
+                else {
                     continue;
                 };
-                if col as usize >= columns {
-                    continue;
-                }
-                let square = grid_row[Column(col as usize)];
 
-                let (fg, bg, flags) = vt::cell_attributes(styles, square);
-                let bg = debug_color(bg).unwrap_or(DEBUG_BG_FALLBACK);
-                let fg = debug_color(fg).unwrap_or(DEBUG_FG_FALLBACK);
+                let bg = debug_color(cell.bgcolor()).unwrap_or(DEBUG_BG_FALLBACK);
+                let fg = debug_color(cell.fgcolor()).unwrap_or(DEBUG_FG_FALLBACK);
 
-                text.clear();
-                if let (Ok(row), Ok(col)) = (u16::try_from(row), u16::try_from(col)) {
-                    vt::push_cell_text(&mut text, &term.grid, vt::visible_pos(term, row, col));
-                }
-                let active = cell_is_active(&text, square.wide());
+                let active = cell_is_active(cell);
                 let fill = if active {
                     bg
                 } else {
@@ -151,7 +137,7 @@ impl<'a> CellDebugImageRenderer<'a> {
                     self.draw_rect(indicator, fg);
                 }
 
-                if flags.intersects(StyleFlags::ALL_UNDERLINES) {
+                if cell.underline() {
                     let underline = CellRect {
                         x0: rect.x0.saturating_add(2),
                         y0: rect.y1.saturating_sub(2),
@@ -161,14 +147,14 @@ impl<'a> CellDebugImageRenderer<'a> {
                     self.draw_rect(underline, fg);
                 }
 
-                if flags.contains(StyleFlags::BOLD) {
+                if cell.bold() {
                     self.draw_rect_outline(rect.inset(1), [255, 255, 255, 90]);
                 }
             }
         }
 
-        if !vt::cursor_hidden(term) {
-            let (cursor_row, cursor_col) = vt::cursor_position(term);
+        if !screen.cursor_hidden() {
+            let (cursor_row, cursor_col) = screen.display_cursor_position();
             self.draw_rect_outline(
                 self.cell_rect(u32::from(cursor_row), u32::from(cursor_col)),
                 DEBUG_CURSOR,
@@ -258,8 +244,8 @@ impl<'a> CellDebugImageRenderer<'a> {
     }
 }
 
-fn cell_is_active(text: &str, wide: Wide) -> bool {
-    !text.is_empty() && !matches!(wide, Wide::Spacer | Wide::LeadingSpacer)
+fn cell_is_active(cell: &Cell) -> bool {
+    cell.has_contents() && !cell.is_wide_continuation()
 }
 
 #[derive(Clone, Copy)]
@@ -310,11 +296,11 @@ fn blend_rgba(top: Rgba, bottom: Rgba, top_mix: f32) -> Rgba {
     ]
 }
 
-fn debug_color(color: CellColor) -> Option<Rgba> {
+fn debug_color(color: Color) -> Option<Rgba> {
     match color {
-        CellColor::Default => None,
-        CellColor::Indexed(index) => Some(ansi_index_to_rgba(index)),
-        CellColor::Rgb(r, g, b) => Some([r, g, b, 255]),
+        Color::Default => None,
+        Color::Idx(index) => Some(ansi_index_to_rgba(index)),
+        Color::Rgb(r, g, b) => Some([r, g, b, 255]),
     }
 }
 
@@ -355,31 +341,22 @@ fn ansi_index_to_rgba(index: u8) -> Rgba {
 mod tests {
     use super::*;
 
-    use rio_vt::ansi::CursorShape;
-    use rio_vt::crosswords::{Crosswords, CrosswordsSize};
-    use rio_vt::event::WindowId;
-    use rio_vt::performer::handler::Processor;
+    use crate::ratty_vt::Parser;
 
-    use crate::vt::TerminalEventSink;
-
+    /// A wide glyph that does not fit at the end of a row wraps and leaves
+    /// the skipped cell blank; the debug image must not paint it as content.
     #[test]
     fn wrapped_wide_character_padding_is_not_active_content() {
-        let mut term = Crosswords::new(
-            CrosswordsSize::new(14, 2),
-            CursorShape::Block,
-            TerminalEventSink::default(),
-            WindowId::from(0),
-            0,
-            1000,
-        );
-        Processor::default().advance(&mut term, "abcdefghijklm\u{4f60}".as_bytes());
+        let mut parser = Parser::new(2, 14, 1000);
+        parser.process("abcdefghijklm\u{4f60}".as_bytes());
 
-        let row = vt::visible_row(&term, 0).expect("row 0");
-        let square = row[Column(13)];
-        assert!(matches!(square.wide(), Wide::LeadingSpacer));
+        let row = parser.screen().visible_row(0).expect("row 0");
+        let pad = row.get(13).expect("column 13");
+        assert!(!pad.has_contents());
+        assert!(!cell_is_active(pad));
 
-        let mut text = String::new();
-        vt::push_cell_text(&mut text, &term.grid, vt::visible_pos(&term, 0, 13));
-        assert!(!cell_is_active(&text, square.wide()));
+        let next = parser.screen().visible_row(1).expect("row 1");
+        assert!(cell_is_active(next.get(0).expect("column 0")));
+        assert!(!cell_is_active(next.get(1).expect("column 1")));
     }
 }

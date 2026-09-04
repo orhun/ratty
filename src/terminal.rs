@@ -11,9 +11,6 @@ use parley_ratatui::ratatui::widgets::Widget;
 use parley_ratatui::{
     CellQuantization, FontOptions, ParleyBackend, TerminalRenderer, TexturePresentation,
 };
-use rio_vt::crosswords::pos::Column;
-use rio_vt::crosswords::square::{Square, Wide};
-use rio_vt::crosswords::style::{Style as VtStyle, StyleFlags};
 
 use crate::config::{AppConfig, FontConfig, FontStyleConfig, ThemeConfig};
 use crate::direct_render::{
@@ -21,7 +18,7 @@ use crate::direct_render::{
     update_direct_terminal_frame,
 };
 use crate::mouse::TerminalSelection;
-use crate::vt::{self, CellColor, VtTerminal};
+use crate::ratty_vt::{Blink, Cell as VtCell, Color as VtColor, Screen};
 
 /// Terminal grid and presentation dimensions.
 #[derive(Clone, Copy, Debug)]
@@ -369,10 +366,10 @@ fn build_terminal_renderer(
     )
 }
 
-/// Ratatui widget backed by the rio-vt grid.
+/// Ratatui widget backed by the terminal screen.
 pub struct TerminalWidget<'a> {
     /// Terminal state to render.
-    pub term: &'a VtTerminal,
+    pub screen: &'a Screen,
     /// Active selection.
     pub selection: &'a TerminalSelection,
     /// Terminal theme.
@@ -389,19 +386,18 @@ impl Widget for TerminalWidget<'_> {
         buf.set_style(area, Style::default().fg(theme_fg));
 
         let selection = self.selection.normalized_bounds();
-        let rows = u16::try_from(self.term.screen_lines()).unwrap_or(u16::MAX);
-        let cols = u16::try_from(self.term.columns()).unwrap_or(u16::MAX);
+        let (rows, cols) = self.screen.size();
         let draw_rows = rows.min(area.height);
         let draw_cols = cols.min(area.width);
-        let styles = vt::styles(self.term);
-        let mut symbol = String::new();
 
         for row in 0..draw_rows {
-            let Some(grid_row) = vt::visible_row(self.term, row) else {
+            let Some(grid_row) = self.screen.visible_row(row) else {
                 continue;
             };
             for col in 0..draw_cols {
-                let square = grid_row[Column(usize::from(col))];
+                let Some(vt_cell) = grid_row.get(col) else {
+                    break;
+                };
                 let cell = &mut buf[(area.x + col, area.y + row)];
 
                 // Ratatui normally skips the trailing buffer cell when diffing
@@ -410,11 +406,19 @@ impl Widget for TerminalWidget<'_> {
                 // an in-memory cell buffer: skipping the update leaves whatever
                 // symbol occupied the continuation cell in an earlier frame.
                 // Keep the owner visually wide for Parley while forcing Ratatui
-                // to diff it as one cell, which lets its spacer participate in
-                // the normal diff instead of being skipped.
-                if matches!(square.wide(), Wide::Spacer) {
-                    let mut style =
-                        square_style(styles, square, &theme_palette, theme_fg, self.font_style);
+                // to diff it as one cell, which lets its continuation cell
+                // participate in the normal diff instead of being skipped.
+                //
+                // The engine stores the continuation half with default
+                // attributes, so it borrows the owner's style: a background
+                // must cover both halves of the glyph.
+                if vt_cell.is_wide_continuation() {
+                    let owner = col
+                        .checked_sub(1)
+                        .and_then(|left| grid_row.get(left))
+                        .filter(|left| left.is_wide())
+                        .unwrap_or(vt_cell);
+                    let mut style = cell_style(owner, &theme_palette, theme_fg, self.font_style);
                     if selection.is_some_and(|bounds| bounds.contains(row, col)) {
                         style = style.add_modifier(Modifier::REVERSED);
                     }
@@ -422,31 +426,15 @@ impl Widget for TerminalWidget<'_> {
                     continue;
                 }
 
-                // A leading spacer is the end-of-line pad Rio writes before a
-                // wide glyph wraps. It is not part of the glyph and must remain
-                // an unstyled blank so the normal diff clears content left by
-                // a previous frame.
-                if matches!(square.wide(), Wide::LeadingSpacer) {
-                    cell.set_symbol(" ");
-                    continue;
-                }
-
-                symbol.clear();
-                vt::push_cell_text(
-                    &mut symbol,
-                    &self.term.grid,
-                    vt::visible_pos(self.term, row, col),
-                );
-
-                let mut style =
-                    square_style(styles, square, &theme_palette, theme_fg, self.font_style);
+                let symbol = vt_cell.contents();
+                let mut style = cell_style(vt_cell, &theme_palette, theme_fg, self.font_style);
                 if selection.is_some_and(|bounds| bounds.contains(row, col)) {
                     style = style.add_modifier(Modifier::REVERSED);
                 }
 
-                cell.set_symbol(if symbol.is_empty() { " " } else { &symbol })
+                cell.set_symbol(if symbol.is_empty() { " " } else { symbol })
                     .set_style(style);
-                if matches!(square.wide(), Wide::Wide) {
+                if vt_cell.is_wide() {
                     cell.set_diff_option(CellDiffOption::ForcedWidth(NonZeroU16::MIN));
                 }
             }
@@ -454,17 +442,15 @@ impl Widget for TerminalWidget<'_> {
     }
 }
 
-fn square_style(
-    styles: &[VtStyle],
-    square: Square,
+fn cell_style(
+    cell: &VtCell,
     theme_palette: &[TuiColor; 16],
     theme_fg: TuiColor,
     font_style: FontStyleConfig,
 ) -> Style {
-    let (fg, bg, flags) = vt::cell_attributes(styles, square);
-
-    let mut style = Style::default().fg(cell_color_to_tui(fg, theme_palette).unwrap_or(theme_fg));
-    if let Some(bg) = cell_color_to_tui(bg, theme_palette) {
+    let mut style =
+        Style::default().fg(cell_color_to_tui(cell.fgcolor(), theme_palette).unwrap_or(theme_fg));
+    if let Some(bg) = cell_color_to_tui(cell.bgcolor(), theme_palette) {
         style = style.bg(bg);
     }
 
@@ -474,34 +460,35 @@ fn square_style(
         FontStyleConfig::Italic => Modifier::ITALIC,
         FontStyleConfig::BoldItalic => Modifier::BOLD | Modifier::ITALIC,
     };
-    if flags.contains(StyleFlags::BOLD) {
+    if cell.bold() {
         modifiers |= Modifier::BOLD;
     }
-    if flags.contains(StyleFlags::DIM) {
+    if cell.dim() {
         modifiers |= Modifier::DIM;
     }
-    if flags.contains(StyleFlags::ITALIC) {
+    if cell.italic() {
         modifiers |= Modifier::ITALIC;
     }
-    // Ratatui has a single underline modifier, so every underline style
-    // rio-vt distinguishes (straight, double, curly, dotted, dashed) collapses
-    // onto it.
-    if flags.intersects(StyleFlags::ALL_UNDERLINES) {
+    if cell.underline() {
         modifiers |= Modifier::UNDERLINED;
     }
-    if flags.contains(StyleFlags::INVERSE) {
+    if cell.inverse() {
         modifiers |= Modifier::REVERSED;
     }
+    match cell.blink() {
+        Blink::None => {}
+        Blink::Slow => modifiers |= Modifier::SLOW_BLINK,
+        Blink::Rapid => modifiers |= Modifier::RAPID_BLINK,
+    }
 
-    style = style.add_modifier(modifiers);
-    style
+    style.add_modifier(modifiers)
 }
 
-fn cell_color_to_tui(color: CellColor, theme_palette: &[TuiColor; 16]) -> Option<TuiColor> {
+fn cell_color_to_tui(color: VtColor, theme_palette: &[TuiColor; 16]) -> Option<TuiColor> {
     match color {
-        CellColor::Default => None,
-        CellColor::Indexed(index) => Some(ansi_index_to_tui(index, theme_palette)),
-        CellColor::Rgb(r, g, b) => Some(TuiColor::Rgb(r, g, b)),
+        VtColor::Default => None,
+        VtColor::Idx(index) => Some(ansi_index_to_tui(index, theme_palette)),
+        VtColor::Rgb(r, g, b) => Some(TuiColor::Rgb(r, g, b)),
     }
 }
 
@@ -528,60 +515,40 @@ mod tests {
     use super::*;
 
     use parley_ratatui::ratatui::buffer::Cell;
-    use rio_vt::ansi::CursorShape;
-    use rio_vt::crosswords::{Crosswords, CrosswordsSize};
-    use rio_vt::event::WindowId;
-    use rio_vt::performer::handler::Processor;
 
-    use crate::vt::TerminalEventSink;
+    use crate::ratty_vt::Parser;
 
-    /// Renders `input` through [`TerminalWidget`] and returns row 0's cells.
-    fn render_cells(rows: u16, cols: u16, input: &[u8]) -> Vec<Cell> {
-        let mut term = Crosswords::new(
-            CrosswordsSize::new(usize::from(cols), usize::from(rows)),
-            CursorShape::Block,
-            TerminalEventSink::default(),
-            WindowId::from(0),
-            0,
-            1000,
-        );
-        Processor::default().advance(&mut term, input);
+    fn parse(rows: u16, cols: u16, input: &[u8]) -> Parser {
+        let mut parser = Parser::new(rows, cols, 1000);
+        parser.process(input);
+        parser
+    }
 
+    fn render_buffer(screen: &Screen) -> Buffer {
+        let (rows, cols) = screen.size();
         let area = Rect::new(0, 0, cols, rows);
         let mut buffer = Buffer::empty(area);
         TerminalWidget {
-            term: &term,
+            screen,
             selection: &TerminalSelection::default(),
             theme: &ThemeConfig::default(),
             font_style: FontStyleConfig::Regular,
         }
         .render(area, &mut buffer);
+        buffer
+    }
 
+    /// Renders `input` through [`TerminalWidget`] and returns row 0's cells.
+    fn render_cells(rows: u16, cols: u16, input: &[u8]) -> Vec<Cell> {
+        let parser = parse(rows, cols, input);
+        let buffer = render_buffer(parser.screen());
         (0..cols).map(|col| buffer[(col, 0)].clone()).collect()
     }
 
     /// Renders `input` through [`TerminalWidget`] and returns the drawn rows.
     fn render_rows(rows: u16, cols: u16, input: &[u8]) -> Vec<String> {
-        let mut term = Crosswords::new(
-            CrosswordsSize::new(usize::from(cols), usize::from(rows)),
-            CursorShape::Block,
-            TerminalEventSink::default(),
-            WindowId::from(0),
-            0,
-            1000,
-        );
-        Processor::default().advance(&mut term, input);
-
-        let area = Rect::new(0, 0, cols, rows);
-        let mut buffer = Buffer::empty(area);
-        TerminalWidget {
-            term: &term,
-            selection: &TerminalSelection::default(),
-            theme: &ThemeConfig::default(),
-            font_style: FontStyleConfig::Regular,
-        }
-        .render(area, &mut buffer);
-
+        let parser = parse(rows, cols, input);
+        let buffer = render_buffer(parser.screen());
         (0..rows)
             .map(|row| {
                 (0..cols)
@@ -595,11 +562,11 @@ mod tests {
 
     /// Draws a terminal state through Ratatui's differential update path into
     /// the persistent Parley backend buffer.
-    fn draw_term(tui: &mut Terminal<ParleyBackend>, term: &Crosswords<TerminalEventSink>) {
+    fn draw_screen(tui: &mut Terminal<ParleyBackend>, screen: &Screen) {
         tui.draw(|frame| {
             frame.render_widget(
                 TerminalWidget {
-                    term,
+                    screen,
                     selection: &TerminalSelection::default(),
                     theme: &ThemeConfig::default(),
                     font_style: FontStyleConfig::Regular,
@@ -610,24 +577,14 @@ mod tests {
         .expect("draw terminal frame");
     }
 
-    /// Builds and draws a fresh terminal state through [`draw_term`].
+    /// Builds and draws a fresh terminal state through [`draw_screen`].
     fn draw_input(tui: &mut Terminal<ParleyBackend>, rows: u16, cols: u16, input: &[u8]) {
-        let mut term = Crosswords::new(
-            CrosswordsSize::new(usize::from(cols), usize::from(rows)),
-            CursorShape::Block,
-            TerminalEventSink::default(),
-            WindowId::from(0),
-            0,
-            1000,
-        );
-        Processor::default().advance(&mut term, input);
-        draw_term(tui, &term);
+        let parser = parse(rows, cols, input);
+        draw_screen(tui, parser.screen());
     }
 
-    /// End-to-end guard for the defect that motivated this engine port: older
-    /// rio-vt releases bound `visible_rows` to the DECSTBM scroll region, so a
-    /// widget built on it drew the grid shifted up with blank rows at the bottom
-    /// the moment an application narrowed the region.
+    /// A narrowed DECSTBM region must not shift or blank the drawn grid: the
+    /// widget reads visible rows, never the scroll region.
     #[test]
     fn widget_draws_every_row_with_a_scroll_region_set() {
         let mut input = Vec::new();
@@ -647,15 +604,14 @@ mod tests {
         );
     }
 
-    /// When a wide glyph does not fit, rio-vt pads end-of-line with a space
-    /// carrying the active SGR style. Drawing that pad paints a styled block at
-    /// the line end and breaks the renderer's wide-cell heuristic, which only
+    /// When a wide glyph does not fit at the end of a line it wraps, and the
+    /// cell it skipped must stay an unstyled blank. Painting the active
+    /// background there breaks the renderer's wide-cell heuristic, which only
     /// treats a trailing space as a continuation when it has no background.
-    /// vt100 had no equivalent cell, so this guards buffer parity with it.
     #[test]
     fn wrapped_wide_characters_leave_an_unstyled_pad() {
         // Green background, then thirteen narrow cells so the wide glyph cannot
-        // fit in the one remaining column and Rio writes a LeadingSpacer there.
+        // fit in the one remaining column.
         let rendered = render_cells(2, 14, b"\x1b[42mabcdefghijklm\xe4\xbd\xa0\x1b[0m");
 
         let pad = &rendered[13];
@@ -707,22 +663,15 @@ mod tests {
     fn scrollback_redraws_wide_graphemes_without_artifacts() {
         let (rows, cols) = (2, 8);
         let mut tui = Terminal::new(ParleyBackend::new(cols, rows)).expect("terminal");
-        let mut term = Crosswords::new(
-            CrosswordsSize::new(usize::from(cols), usize::from(rows)),
-            CursorShape::Block,
-            TerminalEventSink::default(),
-            WindowId::from(0),
-            0,
-            1000,
-        );
-        Processor::default().advance(
-            &mut term,
+        let mut parser = parse(
+            rows,
+            cols,
             "\x1b[42m\u{4f60}\u{1f600}\x1b[0m\r\nsecond\r\nthird\r\nfourth".as_bytes(),
         );
 
         for offset in [1, 2, 0, 2, 1, 2] {
-            crate::vt::set_scrollback(&mut term, offset);
-            draw_term(&mut tui, &term);
+            parser.screen_mut().set_scrollback(offset);
+            draw_screen(&mut tui, parser.screen());
 
             let buffer = tui.backend().buffer();
             if offset == 2 {
@@ -743,10 +692,9 @@ mod tests {
         }
     }
 
-    /// Earlier rio-vt releases aborted placing a double-width glyph in a
-    /// single-column grid, which is why the grid floor used to be two columns.
-    /// Window managers and drag-resize routinely produce very narrow grids, so
-    /// keep a guard on the sizes that used to panic.
+    /// Window managers and drag-resize routinely produce very narrow grids;
+    /// the engine used to underflow placing a double-width glyph in a
+    /// single-column grid, which is why the grid floor was two columns.
     #[test]
     fn degenerate_grids_render_without_panicking() {
         for (rows, cols) in [(1_u16, 1_u16), (1, 40), (40, 1), (2, 2)] {
@@ -759,8 +707,50 @@ mod tests {
     fn widget_draws_wide_characters_and_combining_marks() {
         let rendered = render_rows(2, 10, "你好e\u{0301}z".as_bytes());
 
-        // The spacer cell after a wide glyph stays blank rather than repeating it.
+        // The continuation cell after a wide glyph stays blank rather than
+        // repeating it.
         assert_eq!(rendered[0], "你 好 e\u{0301}z");
+    }
+
+    #[test]
+    fn widget_maps_attributes_to_ratatui_modifiers() {
+        // Bold and dim are one exclusive intensity attribute, so they go on
+        // separate cells.
+        let rendered = render_cells(1, 8, b"\x1b[1;3;4;5;7mA\x1b[0;2;6mB\x1b[25mC");
+        let a = rendered[0].modifier;
+        for expected in [
+            Modifier::BOLD,
+            Modifier::ITALIC,
+            Modifier::UNDERLINED,
+            Modifier::SLOW_BLINK,
+            Modifier::REVERSED,
+        ] {
+            assert!(a.contains(expected), "{expected:?} missing from {a:?}");
+        }
+        let b = rendered[1].modifier;
+        assert!(b.contains(Modifier::DIM));
+        assert!(b.contains(Modifier::RAPID_BLINK));
+        assert!(!b.contains(Modifier::SLOW_BLINK));
+        assert!(
+            !rendered[2]
+                .modifier
+                .intersects(Modifier::SLOW_BLINK | Modifier::RAPID_BLINK)
+        );
+    }
+
+    #[test]
+    fn widget_resolves_colours_through_the_theme() {
+        let rendered = render_cells(1, 8, b"\x1b[31;48;5;99mA\x1b[0;38;2;1;2;3mB");
+        let theme = ThemeConfig::default();
+        let [r, g, b] = theme.palette()[1];
+        assert_eq!(rendered[0].fg, TuiColor::Rgb(r, g, b));
+        assert_eq!(
+            rendered[0].bg,
+            ansi_index_to_tui(99, &[TuiColor::Reset; 16])
+        );
+        assert_eq!(rendered[1].fg, TuiColor::Rgb(1, 2, 3));
+        let [fr, fg, fb] = theme.foreground;
+        assert_eq!(rendered[2].fg, TuiColor::Rgb(fr, fg, fb));
     }
 
     /// Regression test for vertical-only zoom steps (#97): with fractional
