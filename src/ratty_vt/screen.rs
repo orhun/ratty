@@ -62,7 +62,20 @@ pub struct Screen {
     modes: u8,
     mouse_protocol_mode: MouseProtocolMode,
     mouse_protocol_encoding: MouseProtocolEncoding,
+
+    // ratty-vt: keyboard protocol state.
+    //
+    // The kitty keyboard protocol keeps one flag stack per screen (main and
+    // alternate), so an application that pushes flags on the alternate
+    // screen and exits without popping does not leave the shell with
+    // enhanced key reporting.
+    kitty_keyboard_flags: [Vec<u8>; 2],
+    modify_other_keys: Option<u8>,
 }
+
+// ratty-vt: `CSI > u` pushes a flag set; kitty caps the stack so a runaway
+// application cannot grow it without bound.
+const KITTY_KEYBOARD_STACK_LIMIT: usize = 32;
 
 impl Screen {
     pub(crate) fn new(size: crate::ratty_vt::grid::Size, scrollback_len: usize) -> Self {
@@ -78,6 +91,9 @@ impl Screen {
             modes: 0,
             mouse_protocol_mode: MouseProtocolMode::default(),
             mouse_protocol_encoding: MouseProtocolEncoding::default(),
+
+            kitty_keyboard_flags: [vec![], vec![]],
+            modify_other_keys: None,
         }
     }
 
@@ -562,6 +578,34 @@ impl Screen {
     #[must_use]
     pub fn mouse_protocol_encoding(&self) -> MouseProtocolEncoding {
         self.mouse_protocol_encoding
+    }
+
+    /// Returns the active kitty keyboard protocol enhancement flags.
+    ///
+    /// ratty-vt addition. The flags are the top of the current screen's
+    /// stack, as set by `CSI > flags u` (push), `CSI = flags ; mode u` (set),
+    /// and `CSI < n u` (pop); `0` means legacy key reporting.
+    #[must_use]
+    pub fn kitty_keyboard_flags(&self) -> u8 {
+        self.kitty_keyboard_stack().last().copied().unwrap_or(0)
+    }
+
+    /// Returns the active xterm `modifyOtherKeys` level, or `None` when the
+    /// mode is disabled.
+    ///
+    /// ratty-vt addition. Set by `CSI > 4 ; level m`; level `0`, or a bare
+    /// `CSI > 4 m`, disables the mode.
+    #[must_use]
+    pub fn modify_other_keys(&self) -> Option<u8> {
+        self.modify_other_keys
+    }
+
+    fn kitty_keyboard_stack(&self) -> &Vec<u8> {
+        &self.kitty_keyboard_flags[usize::from(self.mode(MODE_ALTERNATE_SCREEN))]
+    }
+
+    fn kitty_keyboard_stack_mut(&mut self) -> &mut Vec<u8> {
+        &mut self.kitty_keyboard_flags[usize::from(self.mode(MODE_ALTERNATE_SCREEN))]
     }
 
     /// Returns the currently active foreground color.
@@ -1304,6 +1348,55 @@ impl Screen {
     pub(crate) fn decstbm(&mut self, (top, bottom): (u16, u16)) {
         self.grid_mut().set_scroll_region(top - 1, bottom - 1);
     }
+
+    // ratty-vt: kitty keyboard protocol.
+    //
+    // Only the first parameter carries flags; kitty defines the value as a
+    // bit set below 32 but tolerates larger values, so saturate rather than
+    // reject.
+
+    // CSI > flags u
+    pub(crate) fn kitty_keyboard_push(&mut self, flags: u16) {
+        let flags = u8::try_from(flags).unwrap_or(u8::MAX);
+        let stack = self.kitty_keyboard_stack_mut();
+        if stack.len() >= KITTY_KEYBOARD_STACK_LIMIT {
+            stack.remove(0);
+        }
+        stack.push(flags);
+    }
+
+    // CSI < n u
+    pub(crate) fn kitty_keyboard_pop(&mut self, count: u16) {
+        let stack = self.kitty_keyboard_stack_mut();
+        for _ in 0..count.max(1) {
+            if stack.pop().is_none() {
+                break;
+            }
+        }
+    }
+
+    // CSI = flags ; mode u
+    pub(crate) fn kitty_keyboard_set(&mut self, flags: u16, mode: u16) {
+        let flags = u8::try_from(flags).unwrap_or(u8::MAX);
+        let stack = self.kitty_keyboard_stack_mut();
+        if stack.is_empty() {
+            stack.push(0);
+        }
+        let current = stack.last_mut().unwrap();
+        *current = match mode {
+            2 => *current | flags,
+            3 => *current & !flags,
+            _ => flags,
+        };
+    }
+
+    // CSI > 4 ; level m
+    pub(crate) fn modify_other_keys_set(&mut self, level: Option<u16>) {
+        self.modify_other_keys = match level {
+            None | Some(0) => None,
+            Some(level) => Some(u8::try_from(level).unwrap_or(u8::MAX)),
+        };
+    }
 }
 
 fn u16_to_u8(i: u16) -> Option<u8> {
@@ -1425,5 +1518,135 @@ mod ratty_tests {
         let diff = parser.screen().contents_diff(&prev);
         let text = String::from_utf8_lossy(&diff);
         assert!(text.contains("\x1b[1;25m"), "{text:?}");
+    }
+}
+
+#[cfg(test)]
+mod ratty_keyboard_tests {
+    use crate::ratty_vt::Parser;
+
+    #[test]
+    fn kitty_keyboard_flags_push_set_and_pop() {
+        let mut parser = Parser::new(5, 20, 0);
+        assert_eq!(parser.screen().kitty_keyboard_flags(), 0);
+
+        for (requested, expected) in [(1_u16, 1_u8), (3, 3), (31, 31)] {
+            parser.process(format!("\x1b[>{requested}u").as_bytes());
+            assert_eq!(parser.screen().kitty_keyboard_flags(), expected);
+            parser.process(b"\x1b[<1u");
+        }
+        assert_eq!(parser.screen().kitty_keyboard_flags(), 0);
+
+        // Nested pushes pop back to the previous level, and `CSI < u` with no
+        // parameter pops one entry.
+        parser.process(b"\x1b[>1u\x1b[>5u");
+        assert_eq!(parser.screen().kitty_keyboard_flags(), 5);
+        parser.process(b"\x1b[<u");
+        assert_eq!(parser.screen().kitty_keyboard_flags(), 1);
+        parser.process(b"\x1b[<10u");
+        assert_eq!(parser.screen().kitty_keyboard_flags(), 0);
+
+        // `CSI = flags ; mode u`: 1 sets, 2 ors in, 3 masks out.
+        parser.process(b"\x1b[=3;1u");
+        assert_eq!(parser.screen().kitty_keyboard_flags(), 3);
+        parser.process(b"\x1b[=4;2u");
+        assert_eq!(parser.screen().kitty_keyboard_flags(), 7);
+        parser.process(b"\x1b[=1;3u");
+        assert_eq!(parser.screen().kitty_keyboard_flags(), 6);
+        parser.process(b"\x1b[=8u");
+        assert_eq!(parser.screen().kitty_keyboard_flags(), 8);
+    }
+
+    #[test]
+    fn kitty_keyboard_stacks_are_per_screen() {
+        let mut parser = Parser::new(5, 20, 0);
+        parser.process(b"\x1b[>1u");
+        parser.process(b"\x1b[?1049h\x1b[>15u");
+        assert_eq!(parser.screen().kitty_keyboard_flags(), 15);
+        parser.process(b"\x1b[?1049l");
+        assert_eq!(
+            parser.screen().kitty_keyboard_flags(),
+            1,
+            "leaving the alternate screen restores the main screen's flags"
+        );
+    }
+
+    #[test]
+    fn kitty_keyboard_query_reaches_the_callbacks() {
+        #[derive(Default)]
+        struct Seen(Vec<(Option<u8>, char, Vec<Vec<u16>>)>);
+        impl crate::ratty_vt::Callbacks for Seen {
+            fn unhandled_csi(
+                &mut self,
+                _: &mut crate::ratty_vt::Screen,
+                i1: Option<u8>,
+                _: Option<u8>,
+                params: &[&[u16]],
+                c: char,
+            ) {
+                self.0
+                    .push((i1, c, params.iter().map(|p| p.to_vec()).collect()));
+            }
+        }
+        let mut parser = Parser::new_with_callbacks(5, 20, 0, Seen::default());
+        parser.process(b"\x1b[>3u\x1b[?u");
+        assert_eq!(parser.screen().kitty_keyboard_flags(), 3);
+        assert_eq!(parser.callbacks().0, vec![(Some(b'?'), 'u', vec![vec![0]])]);
+    }
+
+    /// Level 0 means disabled and must read as `None`; a key encoder that
+    /// treats any `Some` as enabled would otherwise mis-encode Ctrl+Enter.
+    #[test]
+    fn modify_other_keys_levels() {
+        let mut parser = Parser::new(5, 20, 0);
+        assert_eq!(parser.screen().modify_other_keys(), None);
+        parser.process(b"\x1b[>4;2m");
+        assert_eq!(parser.screen().modify_other_keys(), Some(2));
+        parser.process(b"\x1b[>4;0m");
+        assert_eq!(parser.screen().modify_other_keys(), None);
+        parser.process(b"\x1b[>4;1m");
+        assert_eq!(parser.screen().modify_other_keys(), Some(1));
+        parser.process(b"\x1b[>4m");
+        assert_eq!(parser.screen().modify_other_keys(), None);
+    }
+
+    /// Split across PTY reads, which a byte sniffer could not handle.
+    #[test]
+    fn modify_other_keys_survives_a_split_sequence() {
+        let sequence = b"\x1b[>4;2m";
+        for split in 1..sequence.len() {
+            let mut parser = Parser::new(5, 20, 0);
+            parser.process(&sequence[..split]);
+            parser.process(&sequence[split..]);
+            assert_eq!(
+                parser.screen().modify_other_keys(),
+                Some(2),
+                "split at {split} was missed"
+            );
+        }
+    }
+
+    /// Other `CSI > ... m` resources (e.g. xterm's `CSI > 1 m`) are not ours
+    /// and must still reach the callbacks.
+    #[test]
+    fn other_private_sgr_resources_stay_unhandled() {
+        #[derive(Default)]
+        struct Count(usize);
+        impl crate::ratty_vt::Callbacks for Count {
+            fn unhandled_csi(
+                &mut self,
+                _: &mut crate::ratty_vt::Screen,
+                _: Option<u8>,
+                _: Option<u8>,
+                _: &[&[u16]],
+                _: char,
+            ) {
+                self.0 += 1;
+            }
+        }
+        let mut parser = Parser::new_with_callbacks(5, 20, 0, Count::default());
+        parser.process(b"\x1b[>1;2m\x1b[>4;2m");
+        assert_eq!(parser.callbacks().0, 1);
+        assert_eq!(parser.screen().modify_other_keys(), Some(2));
     }
 }

@@ -162,6 +162,29 @@ impl<CB: crate::ratty_vt::callbacks::Callbacks> vte::Perform for WrappedScreen<C
                     );
                 }
             },
+            // ratty-vt: kitty keyboard protocol and xterm modifyOtherKeys.
+            // Queries (`CSI ? u`) are left to the callbacks, which own the
+            // terminal's replies.
+            Some(b'>') if c == 'u' && intermediates.len() == 1 => {
+                let flags = params.iter().next().and_then(|p| p.first().copied());
+                self.screen.kitty_keyboard_push(flags.unwrap_or(0));
+            }
+            Some(b'<') if c == 'u' && intermediates.len() == 1 => {
+                self.screen
+                    .kitty_keyboard_pop(canonicalize_params_1(params, 1));
+            }
+            Some(b'=') if c == 'u' && intermediates.len() == 1 => {
+                let (flags, mode) = canonicalize_params_2(params, 0, 1);
+                self.screen.kitty_keyboard_set(flags, mode);
+            }
+            Some(b'>')
+                if c == 'm'
+                    && intermediates.len() == 1
+                    && params.iter().next().is_some_and(|p| p.first() == Some(&4)) =>
+            {
+                let level = params.iter().nth(1).and_then(|p| p.first().copied());
+                self.screen.modify_other_keys_set(level);
+            }
             Some(i) => {
                 self.callbacks.unhandled_csi(
                     &mut self.screen,
