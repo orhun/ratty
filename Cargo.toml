@@ -45,7 +45,7 @@ clap = { version = "4.5", features = ["derive"] }
 etcetera = "0.11"
 image = { version = "0.25", default-features = false, features = ["png", "ico"] }
 itoa = "1.0"
-bevy_terminal_ratatui = { version = "0.7.2", default-features = false, features = ["system_fonts"] }
+bevy_terminal_ratatui = { git = "https://github.com/gold-silver-copper/bevy_terminal.git", branch = "fix/box-drawing-overshoot", default-features = false, features = ["system_fonts"] }
 portable-pty = "0.8"
 ratatui = "0.30"
 rust-embed = "8.5"
