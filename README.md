@@ -91,6 +91,29 @@ The default configuration file is available in [`config/ratty.toml`](config/ratt
 
 You can copy this file to `$HOME/.config/ratty/ratty.toml` and customize it.
 
+### Font rendering
+
+Ratty can resolve a system font by family name or load exact font files. Explicit
+faces are the most predictable choice for box drawing, Braille, CJK, emoji-width,
+bold, and italic rendering because the renderer does not have to guess which
+installed face belongs to each style:
+
+```toml
+[font]
+regular = "/path/to/IosevkaFixed-Regular.ttf"
+bold = "/path/to/IosevkaFixed-Bold.ttf"
+italic = "/path/to/IosevkaFixed-Italic.ttf"
+bold_italic = "/path/to/IosevkaFixed-BoldItalic.ttf"
+size = 12
+```
+
+`size` is interpreted in points. Ratty measures the loaded font's glyph advance
+and line box to derive the cell dimensions before sizing the PTY; users do not
+configure cell width or line height. If the configured family is not installed,
+Ratty falls back to the generic monospace family and logs a warning. Leave
+`window.scale_factor` unset for automatic framebuffer/DPI scaling; set it only
+as an explicit override.
+
 ### Changing the cursor
 
 ```toml
@@ -238,23 +261,20 @@ A blazingly fast serial monitor with plotter TUI and 3D telemetry
 ### Rendering pipeline
 
 The terminal surface currently uses [`ratatui`](https://github.com/ratatui/ratatui) for the UI buffer,
-[`parley_ratatui`](https://github.com/gold-silver-copper/parley_ratatui) for text shaping/rendering
+[`bevy_terminal_ratatui`](https://github.com/gold-silver-copper/bevy_terminal) for text shaping/rendering
 and [Bevy](https://bevyengine.org/) for scene presentation.
 
 Current workflow:
 
 1. PTY output is parsed by `ratty-vt` (ratty's in-tree fork of [`vt100`](https://github.com/doy/vt100-rust), see [`src/ratty_vt/README.md`](src/ratty_vt/README.md)) and drawn into a Ratatui buffer on CPU
-2. `parley_ratatui` shapes the buffer with Parley and records it as a Vello scene
-3. The scene is handed to Bevy's render world through a double-buffered
-   exchange (scenes are recycled between frames, never cloned or re-recorded)
-4. Vello renders the scene on Bevy's render-world device into a plain
-   `Rgba8Unorm` storage texture, with no CPU readback in between
-5. That storage texture is copied into an `Rgba8UnormSrgb` present texture
-   (sampled through an sRGB view, so Vello's sRGB-encoded output is decoded on
-   sample instead of re-encoded), which Bevy presents in the 2D and 3D scenes
+2. `bevy_terminal_ratatui` translates Ratatui's changed cells into a retained terminal surface
+3. `bevy_terminal` shapes text with Bevy's font system and incrementally builds compact background,
+   decoration, cursor, and glyph quads
+4. Bevy's render world draws those quads into a renderer-owned `Rgba8UnormSrgb` texture
+5. Ratty presents that stable texture handle in its flat, plane, perspective, and Mobius scenes
 
 The terminal image is fully GPU-resident: the only data crossing from the main
-world to the render world each frame is the recorded scene, not pixels.
+world to the render world each frame is compact scene data, not pixels.
 
 ## Touchscreen
 
