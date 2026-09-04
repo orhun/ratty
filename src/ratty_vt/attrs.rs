@@ -14,17 +14,20 @@ pub enum Color {
     Rgb(u8, u8, u8),
 }
 
-const TEXT_MODE_INTENSITY: u8 = 0b0000_0011;
-const TEXT_MODE_BOLD: u8 = 0b0000_0001;
-const TEXT_MODE_DIM: u8 = 0b0000_0010;
-const TEXT_MODE_ITALIC: u8 = 0b0000_0100;
-const TEXT_MODE_UNDERLINE: u8 = 0b0000_1000;
-const TEXT_MODE_INVERSE: u8 = 0b0001_0000;
+const TEXT_MODE_INTENSITY: u16 = 0b0000_0011;
+const TEXT_MODE_BOLD: u16 = 0b0000_0001;
+const TEXT_MODE_DIM: u16 = 0b0000_0010;
+const TEXT_MODE_ITALIC: u16 = 0b0000_0100;
+const TEXT_MODE_UNDERLINE: u16 = 0b0000_1000;
+const TEXT_MODE_INVERSE: u16 = 0b0001_0000;
 // ratty-vt: SGR 5 (slow blink) and SGR 6 (rapid blink). Mutually exclusive,
 // like the intensity bits; SGR 25 clears both.
-const TEXT_MODE_BLINK: u8 = 0b0110_0000;
-const TEXT_MODE_BLINK_SLOW: u8 = 0b0010_0000;
-const TEXT_MODE_BLINK_RAPID: u8 = 0b0100_0000;
+const TEXT_MODE_BLINK: u16 = 0b0110_0000;
+const TEXT_MODE_BLINK_SLOW: u16 = 0b0010_0000;
+const TEXT_MODE_BLINK_RAPID: u16 = 0b0100_0000;
+// ratty-vt: SGR 8 (hidden / conceal) and SGR 9 (strikeout).
+const TEXT_MODE_HIDDEN: u16 = 0b1000_0000;
+const TEXT_MODE_STRIKEOUT: u16 = 0b0001_0000_0000;
 
 /// The blink attribute of a cell or of newly drawn text.
 #[derive(Eq, PartialEq, Debug, Copy, Clone, Default)]
@@ -42,7 +45,10 @@ pub enum Blink {
 pub struct Attrs {
     pub fgcolor: Color,
     pub bgcolor: Color,
-    pub mode: u8,
+    /// ratty-vt: SGR 58 underline color; `Color::Default` follows the
+    /// foreground (SGR 59).
+    pub underline_color: Color,
+    pub mode: u16,
 }
 
 impl Attrs {
@@ -54,7 +60,7 @@ impl Attrs {
         self.mode & TEXT_MODE_DIM != 0
     }
 
-    fn intensity(&self) -> u8 {
+    fn intensity(&self) -> u16 {
         self.mode & TEXT_MODE_INTENSITY
     }
 
@@ -126,6 +132,32 @@ impl Attrs {
         };
     }
 
+    // ratty-vt: hidden (SGR 8 / 28).
+    pub fn hidden(&self) -> bool {
+        self.mode & TEXT_MODE_HIDDEN != 0
+    }
+
+    pub fn set_hidden(&mut self, hidden: bool) {
+        if hidden {
+            self.mode |= TEXT_MODE_HIDDEN;
+        } else {
+            self.mode &= !TEXT_MODE_HIDDEN;
+        }
+    }
+
+    // ratty-vt: strikeout (SGR 9 / 29).
+    pub fn strikeout(&self) -> bool {
+        self.mode & TEXT_MODE_STRIKEOUT != 0
+    }
+
+    pub fn set_strikeout(&mut self, strikeout: bool) {
+        if strikeout {
+            self.mode |= TEXT_MODE_STRIKEOUT;
+        } else {
+            self.mode &= !TEXT_MODE_STRIKEOUT;
+        }
+    }
+
     pub fn write_escape_code_diff(&self, contents: &mut Vec<u8>, other: &Self) {
         if self != other && self == &Self::default() {
             crate::ratty_vt::term::ClearAttrs.write_buf(contents);
@@ -143,6 +175,12 @@ impl Attrs {
             attrs
         } else {
             attrs.bgcolor(self.bgcolor)
+        };
+        // ratty-vt: underline color.
+        let attrs = if self.underline_color == other.underline_color {
+            attrs
+        } else {
+            attrs.underline_color(self.underline_color)
         };
         let attrs = if self.intensity() == other.intensity() {
             attrs
@@ -174,6 +212,17 @@ impl Attrs {
             attrs
         } else {
             attrs.blink(self.blink())
+        };
+        // ratty-vt: hidden and strikeout.
+        let attrs = if self.hidden() == other.hidden() {
+            attrs
+        } else {
+            attrs.hidden(self.hidden())
+        };
+        let attrs = if self.strikeout() == other.strikeout() {
+            attrs
+        } else {
+            attrs.strikeout(self.strikeout())
         };
 
         attrs.write_buf(contents);

@@ -522,6 +522,9 @@ fn cell_style(
     if let Some(bg) = cell_color_to_tui(cell.bgcolor(), theme_palette) {
         style = style.bg(bg);
     }
+    if let Some(underline) = cell_color_to_tui(cell.underline_color(), theme_palette) {
+        style = style.underline_color(underline);
+    }
 
     let mut modifiers = match font_style {
         FontStyleConfig::Regular => Modifier::empty(),
@@ -543,6 +546,12 @@ fn cell_style(
     }
     if cell.inverse() {
         modifiers |= Modifier::REVERSED;
+    }
+    if cell.hidden() {
+        modifiers |= Modifier::HIDDEN;
+    }
+    if cell.strikeout() {
+        modifiers |= Modifier::CROSSED_OUT;
     }
     match cell.blink() {
         Blink::None => {}
@@ -817,6 +826,44 @@ mod tests {
             !rendered[2]
                 .modifier
                 .intersects(Modifier::SLOW_BLINK | Modifier::RAPID_BLINK)
+        );
+    }
+
+    #[test]
+    fn widget_preserves_hidden_strikeout_and_underline_color() {
+        let rendered = render_cells(1, 3, b"\x1b[4;8;9;58;2;1;2;3mX\x1b[28;29;59mY");
+        let cell = &rendered[0];
+        assert!(cell.modifier.contains(Modifier::UNDERLINED));
+        assert!(cell.modifier.contains(Modifier::HIDDEN));
+        assert!(cell.modifier.contains(Modifier::CROSSED_OUT));
+        assert_eq!(cell.underline_color, TuiColor::Rgb(1, 2, 3));
+        let cell = &rendered[1];
+        assert!(
+            !cell
+                .modifier
+                .intersects(Modifier::HIDDEN | Modifier::CROSSED_OUT)
+        );
+        assert_eq!(cell.underline_color, TuiColor::Reset);
+    }
+
+    /// Hidden text must reach the renderer concealed: the backend translates
+    /// `Modifier::HIDDEN` to `StyleFlags::HIDDEN`, which the renderer skips.
+    #[test]
+    fn hidden_text_reaches_the_renderer_concealed() {
+        let (mut tui, _) = RatatuiTerminal::new(20, 2);
+        draw_input(&mut tui, 2, 20, b"ab\x1b[8mXY\x1b[28mcd");
+        let snapshot = tui.snapshot();
+        let hidden = snapshot.cell((2, 0)).expect("cell");
+        assert!(
+            hidden
+                .style
+                .has(bevy_terminal_ratatui::prelude::StyleFlags::HIDDEN)
+        );
+        let visible = snapshot.cell((4, 0)).expect("cell");
+        assert!(
+            !visible
+                .style
+                .has(bevy_terminal_ratatui::prelude::StyleFlags::HIDDEN)
         );
     }
 

@@ -122,6 +122,10 @@ pub struct Attrs {
     inverse: Option<bool>,
     // ratty-vt: blink.
     blink: Option<crate::ratty_vt::attrs::Blink>,
+    // ratty-vt: hidden, strikeout, underline color.
+    hidden: Option<bool>,
+    strikeout: Option<bool>,
+    underline_color: Option<crate::ratty_vt::Color>,
 }
 
 impl Attrs {
@@ -160,6 +164,22 @@ impl Attrs {
         self.blink = Some(blink);
         self
     }
+
+    // ratty-vt: hidden, strikeout, underline color.
+    pub fn hidden(mut self, hidden: bool) -> Self {
+        self.hidden = Some(hidden);
+        self
+    }
+
+    pub fn strikeout(mut self, strikeout: bool) -> Self {
+        self.strikeout = Some(strikeout);
+        self
+    }
+
+    pub fn underline_color(mut self, color: crate::ratty_vt::Color) -> Self {
+        self.underline_color = Some(color);
+        self
+    }
 }
 
 impl BufWrite for Attrs {
@@ -173,6 +193,9 @@ impl BufWrite for Attrs {
             && self.underline.is_none()
             && self.inverse.is_none()
             && self.blink.is_none()
+            && self.hidden.is_none()
+            && self.strikeout.is_none()
+            && self.underline_color.is_none()
         {
             return;
         }
@@ -281,6 +304,43 @@ impl BufWrite for Attrs {
                 crate::ratty_vt::attrs::Blink::None => write_param!(25),
                 crate::ratty_vt::attrs::Blink::Slow => write_param!(5),
                 crate::ratty_vt::attrs::Blink::Rapid => write_param!(6),
+            }
+        }
+
+        // ratty-vt: hidden, strikeout, underline color.
+        if let Some(hidden) = self.hidden {
+            if hidden {
+                write_param!(8);
+            } else {
+                write_param!(28);
+            }
+        }
+
+        if let Some(strikeout) = self.strikeout {
+            if strikeout {
+                write_param!(9);
+            } else {
+                write_param!(29);
+            }
+        }
+
+        if let Some(underline_color) = self.underline_color {
+            match underline_color {
+                crate::ratty_vt::Color::Default => {
+                    write_param!(59);
+                }
+                crate::ratty_vt::Color::Idx(i) => {
+                    write_param!(58);
+                    write_param!(5);
+                    write_param!(i);
+                }
+                crate::ratty_vt::Color::Rgb(r, g, b) => {
+                    write_param!(58);
+                    write_param!(2);
+                    write_param!(r);
+                    write_param!(g);
+                    write_param!(b);
+                }
             }
         }
 

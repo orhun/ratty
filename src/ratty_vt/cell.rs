@@ -1,7 +1,9 @@
 use unicode_width::UnicodeWidthChar as _;
 
-// chosen to make the size of the cell struct 32 bytes
-const CONTENT_BYTES: usize = 22;
+// chosen to make the size of the cell struct 32 bytes: `Attrs` is 14 bytes
+// (three colors and a u16 mode) plus the one-byte length.
+// ratty-vt: upstream reserves 22 bytes with its 9-byte `Attrs`.
+const CONTENT_BYTES: usize = 17;
 
 const IS_WIDE: u8 = 0b1000_0000;
 const IS_WIDE_CONTINUATION: u8 = 0b0100_0000;
@@ -183,5 +185,30 @@ impl Cell {
     #[must_use]
     pub fn blink(&self) -> crate::ratty_vt::Blink {
         self.attrs.blink()
+    }
+
+    /// Returns whether the cell should be concealed (SGR 8).
+    ///
+    /// ratty-vt addition.
+    #[must_use]
+    pub fn hidden(&self) -> bool {
+        self.attrs.hidden()
+    }
+
+    /// Returns whether the cell should be struck through (SGR 9).
+    ///
+    /// ratty-vt addition.
+    #[must_use]
+    pub fn strikeout(&self) -> bool {
+        self.attrs.strikeout()
+    }
+
+    /// Returns the cell's underline color (SGR 58); `Color::Default` means
+    /// the foreground color.
+    ///
+    /// ratty-vt addition.
+    #[must_use]
+    pub fn underline_color(&self) -> crate::ratty_vt::Color {
+        self.attrs.underline_color
     }
 }

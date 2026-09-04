@@ -23,6 +23,9 @@ subject, so the fork can be rebased onto a future upstream release.
 - Vendored as an in-package module (`ratty::ratty_vt`) rather than a crate.
 - SGR 5 / 6 / 25 (slow blink, rapid blink, blink off) are parsed, stored on
   cells, and round-tripped by `contents_formatted`.
+- SGR 8 / 28 (hidden), SGR 9 / 29 (strikeout), and SGR 58 / 59 (underline
+  color) are parsed, stored on cells, and round-trip through the formatted
+  output.
 - `CSI f` (HVP) is handled like `CSI H` (CUP).
 - Resize reflows wrapped lines, moves lines between the screen and scrollback,
   and resets the DECSTBM scroll region.

@@ -717,6 +717,31 @@ impl Screen {
         self.attrs.blink()
     }
 
+    /// Returns whether newly drawn text should be concealed (SGR 8).
+    ///
+    /// ratty-vt addition.
+    #[must_use]
+    pub fn hidden(&self) -> bool {
+        self.attrs.hidden()
+    }
+
+    /// Returns whether newly drawn text should be struck through (SGR 9).
+    ///
+    /// ratty-vt addition.
+    #[must_use]
+    pub fn strikeout(&self) -> bool {
+        self.attrs.strikeout()
+    }
+
+    /// Returns the underline color of newly drawn text (SGR 58);
+    /// `Color::Default` means the foreground color.
+    ///
+    /// ratty-vt addition.
+    #[must_use]
+    pub fn underline_color(&self) -> crate::ratty_vt::Color {
+        self.attrs.underline_color
+    }
+
     pub(crate) fn grid(&self) -> &crate::ratty_vt::grid::Grid {
         if self.mode(MODE_ALTERNATE_SCREEN) {
             &self.alternate_grid
@@ -1335,12 +1360,18 @@ impl Screen {
                 [5] => self.attrs.set_blink(crate::ratty_vt::Blink::Slow),
                 [6] => self.attrs.set_blink(crate::ratty_vt::Blink::Rapid),
                 [7] => self.attrs.set_inverse(true),
+                // ratty-vt: hidden and strikeout.
+                [8] => self.attrs.set_hidden(true),
+                [9] => self.attrs.set_strikeout(true),
                 [22] => self.attrs.set_normal_intensity(),
                 [23] => self.attrs.set_italic(false),
                 [24] => self.attrs.set_underline(false),
                 // ratty-vt: blink.
                 [25] => self.attrs.set_blink(crate::ratty_vt::Blink::None),
                 [27] => self.attrs.set_inverse(false),
+                // ratty-vt: hidden and strikeout.
+                [28] => self.attrs.set_hidden(false),
+                [29] => self.attrs.set_strikeout(false),
                 [n] if (30..=37).contains(n) => {
                     self.attrs.fgcolor = crate::ratty_vt::Color::Idx(to_u8!(*n) - 30);
                 }
@@ -1396,6 +1427,33 @@ impl Screen {
                 },
                 [49] => {
                     self.attrs.bgcolor = crate::ratty_vt::Color::Default;
+                }
+                // ratty-vt: underline color (SGR 58 / 59), same parameter
+                // shapes as SGR 38 / 48.
+                [58, 2, r, g, b] => {
+                    self.attrs.underline_color =
+                        crate::ratty_vt::Color::Rgb(to_u8!(*r), to_u8!(*g), to_u8!(*b));
+                }
+                [58, 5, i] => {
+                    self.attrs.underline_color = crate::ratty_vt::Color::Idx(to_u8!(*i));
+                }
+                [58] => match next_param!() {
+                    [2] => {
+                        let r = next_param_u8!();
+                        let g = next_param_u8!();
+                        let b = next_param_u8!();
+                        self.attrs.underline_color = crate::ratty_vt::Color::Rgb(r, g, b);
+                    }
+                    [5] => {
+                        self.attrs.underline_color = crate::ratty_vt::Color::Idx(next_param_u8!());
+                    }
+                    _ => {
+                        unhandled(self);
+                        return;
+                    }
+                },
+                [59] => {
+                    self.attrs.underline_color = crate::ratty_vt::Color::Default;
                 }
                 [n] if (90..=97).contains(n) => {
                     self.attrs.fgcolor = crate::ratty_vt::Color::Idx(to_u8!(*n) - 82);
@@ -1543,6 +1601,46 @@ mod ratty_tests {
         assert_eq!(cell(3), Blink::None);
         assert_eq!(cell(4), Blink::None, "SGR 0 resets blink");
         assert_eq!(parser.screen().blink(), Blink::None);
+    }
+
+    #[test]
+    fn sgr_hidden_strikeout_and_underline_color_are_stored_on_cells() {
+        let mut parser = Parser::new(2, 12, 0);
+        parser.process(b"a\x1b[8mb\x1b[28m\x1b[9mc\x1b[29m\x1b[58;2;1;2;3md\x1b[58;5;9me\x1b[59mf\x1b[8;9;58:2:4:5:6mg\x1b[mh");
+        use crate::ratty_vt::Color;
+        let cell = |col| parser.screen().cell(0, col).unwrap();
+        assert!(!cell(0).hidden() && !cell(0).strikeout());
+        assert!(cell(1).hidden());
+        assert!(!cell(2).hidden() && cell(2).strikeout());
+        assert!(!cell(3).strikeout());
+        assert_eq!(cell(3).underline_color(), Color::Rgb(1, 2, 3));
+        assert_eq!(cell(4).underline_color(), Color::Idx(9));
+        assert_eq!(cell(5).underline_color(), Color::Default);
+        assert!(cell(6).hidden() && cell(6).strikeout());
+        assert_eq!(cell(6).underline_color(), Color::Rgb(4, 5, 6));
+        assert!(!cell(7).hidden() && !cell(7).strikeout(), "SGR 0 resets");
+        assert_eq!(cell(7).underline_color(), Color::Default);
+        assert!(!parser.screen().hidden());
+    }
+
+    #[test]
+    fn hidden_strikeout_and_underline_color_round_trip_through_contents_formatted() {
+        let mut parser = Parser::new(2, 10, 0);
+        parser.process(b"\x1b[8ma\x1b[28;9mb\x1b[29;58;2;1;2;3mc\x1b[59md");
+        let formatted = parser.screen().contents_formatted();
+        let mut replay = Parser::new(2, 10, 0);
+        replay.process(&formatted);
+        use crate::ratty_vt::Color;
+        let cell = |col| replay.screen().cell(0, col).unwrap();
+        assert!(cell(0).hidden());
+        assert!(!cell(1).hidden() && cell(1).strikeout());
+        assert!(!cell(2).strikeout());
+        assert_eq!(cell(2).underline_color(), Color::Rgb(1, 2, 3));
+        assert_eq!(cell(3).underline_color(), Color::Default);
+        assert!(
+            formatted.windows(4).any(|w| w == b"\x1b[8m"),
+            "{formatted:?}"
+        );
     }
 
     #[test]
