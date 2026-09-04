@@ -488,6 +488,24 @@ impl Screen {
         // straightforward.
     }
 
+    /// Returns the visible row at `row`, if it exists, after taking the
+    /// scrollback offset into account.
+    ///
+    /// ratty-vt addition. Borrows the row in O(1) so renderers can walk the
+    /// screen every frame without copying it.
+    #[must_use]
+    pub fn visible_row(&self, row: u16) -> Option<&crate::ratty_vt::Row> {
+        self.grid().visible_row(row)
+    }
+
+    /// Iterates over the visible rows, top to bottom, after taking the
+    /// scrollback offset into account.
+    ///
+    /// ratty-vt addition.
+    pub fn visible_rows(&self) -> impl Iterator<Item = &crate::ratty_vt::Row> {
+        self.grid().visible_rows()
+    }
+
     /// Returns the [`Cell`](crate::ratty_vt::Cell) object at the given location in the
     /// terminal, if it exists.
     #[must_use]
@@ -1301,6 +1319,46 @@ fn u16_to_u8(i: u16) -> Option<u8> {
 mod ratty_tests {
     //! ratty-vt engine patch tests. Upstream's suite lives in `super::super::tests`.
     use crate::ratty_vt::{Blink, Parser};
+
+    #[test]
+    fn visible_row_matches_the_iterator_at_every_scrollback_offset() {
+        let mut parser = Parser::new(3, 10, 20);
+        for line in 0..12 {
+            parser.process(format!("row{line}\r\n").as_bytes());
+        }
+        for offset in 0..=parser.screen().scrollback() + 5 {
+            parser.screen_mut().set_scrollback(offset);
+            let expected: Vec<String> = parser
+                .screen()
+                .visible_rows()
+                .map(|row| row.get(0).unwrap().contents().to_string())
+                .collect();
+            for (index, text) in expected.iter().enumerate() {
+                let row = parser.screen().visible_row(index as u16).unwrap();
+                assert_eq!(
+                    row.get(0).unwrap().contents(),
+                    text,
+                    "offset {offset} row {index}"
+                );
+            }
+            assert!(parser.screen().visible_row(3).is_none());
+            assert_eq!(expected.len(), 3);
+        }
+        // The last screen row after scrolling all the way back is scrollback.
+        parser.screen_mut().set_scrollback(usize::MAX);
+        assert_eq!(parser.screen().scrollback(), 10);
+        assert_eq!(
+            parser
+                .screen()
+                .visible_row(0)
+                .unwrap()
+                .get(0)
+                .unwrap()
+                .contents(),
+            "r"
+        );
+        assert_eq!(parser.screen().visible_row(0).unwrap().cells().count(), 10);
+    }
 
     #[test]
     fn hvp_positions_the_cursor_like_cup() {

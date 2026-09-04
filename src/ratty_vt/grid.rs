@@ -149,8 +149,22 @@ impl Grid {
         self.rows.iter_mut()
     }
 
+    // ratty-vt: index the scrollback ring and the drawing rows directly
+    // instead of walking `visible_rows` with `nth`, which is O(row) and runs
+    // once per row per frame in the renderers.
     pub fn visible_row(&self, row: u16) -> Option<&crate::ratty_vt::row::Row> {
-        self.visible_rows().nth(usize::from(row))
+        let row = usize::from(row);
+        if row >= self.rows.len() {
+            return None;
+        }
+        let offset = self.scrollback_offset;
+        if row < offset {
+            // `scrollback_offset` is clamped to `scrollback.len()`, so the
+            // subtraction cannot underflow.
+            self.scrollback.get(self.scrollback.len() - offset + row)
+        } else {
+            self.rows.get(row - offset)
+        }
     }
 
     pub fn drawing_row(&self, row: u16) -> Option<&crate::ratty_vt::row::Row> {

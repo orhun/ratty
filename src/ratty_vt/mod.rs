@@ -69,4 +69,5 @@ pub use attrs::{Blink, Color};
 pub use callbacks::Callbacks;
 pub use cell::Cell;
 pub use parser::Parser;
+pub use row::Row;
 pub use screen::{MouseProtocolEncoding, MouseProtocolMode, Screen};

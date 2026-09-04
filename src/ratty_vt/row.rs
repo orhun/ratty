@@ -1,5 +1,10 @@
 use crate::ratty_vt::term::BufWrite as _;
 
+/// A single row of the terminal grid.
+///
+/// ratty-vt addition: upstream keeps rows private and hands out cells one at a
+/// time through `Screen::cell`. Renderers that walk the whole screen every
+/// frame want to borrow a row once and index it.
 #[derive(Clone, Debug)]
 pub struct Row {
     cells: Vec<crate::ratty_vt::Cell>,
@@ -7,7 +12,7 @@ pub struct Row {
 }
 
 impl Row {
-    pub fn new(cols: u16) -> Self {
+    pub(crate) fn new(cols: u16) -> Self {
         Self {
             cells: vec![crate::ratty_vt::Cell::new(); usize::from(cols)],
             wrapped: false,
@@ -22,37 +27,44 @@ impl Row {
             .unwrap()
     }
 
-    pub fn clear(&mut self, attrs: crate::ratty_vt::attrs::Attrs) {
+    pub(crate) fn clear(&mut self, attrs: crate::ratty_vt::attrs::Attrs) {
         for cell in &mut self.cells {
             cell.clear(attrs);
         }
         self.wrapped = false;
     }
 
-    fn cells(&self) -> impl Iterator<Item = &crate::ratty_vt::Cell> {
+    /// Iterates over the cells in the row, left to right.
+    ///
+    /// ratty-vt: public.
+    pub fn cells(&self) -> impl Iterator<Item = &crate::ratty_vt::Cell> {
         self.cells.iter()
     }
 
+    /// Returns the cell at `col`, if the row has that many columns.
+    ///
+    /// ratty-vt: public.
+    #[must_use]
     pub fn get(&self, col: u16) -> Option<&crate::ratty_vt::Cell> {
         self.cells.get(usize::from(col))
     }
 
-    pub fn get_mut(&mut self, col: u16) -> Option<&mut crate::ratty_vt::Cell> {
+    pub(crate) fn get_mut(&mut self, col: u16) -> Option<&mut crate::ratty_vt::Cell> {
         self.cells.get_mut(usize::from(col))
     }
 
-    pub fn insert(&mut self, i: u16, cell: crate::ratty_vt::Cell) {
+    pub(crate) fn insert(&mut self, i: u16, cell: crate::ratty_vt::Cell) {
         self.cells.insert(usize::from(i), cell);
         self.wrapped = false;
     }
 
-    pub fn remove(&mut self, i: u16) {
+    pub(crate) fn remove(&mut self, i: u16) {
         self.clear_wide(i);
         self.cells.remove(usize::from(i));
         self.wrapped = false;
     }
 
-    pub fn erase(&mut self, i: u16, attrs: crate::ratty_vt::attrs::Attrs) {
+    pub(crate) fn erase(&mut self, i: u16, attrs: crate::ratty_vt::attrs::Attrs) {
         let wide = self.cells[usize::from(i)].is_wide();
         self.clear_wide(i);
         self.cells[usize::from(i)].clear(attrs);
@@ -61,7 +73,7 @@ impl Row {
         }
     }
 
-    pub fn truncate(&mut self, len: u16) {
+    pub(crate) fn truncate(&mut self, len: u16) {
         self.cells.truncate(usize::from(len));
         self.wrapped = false;
         let last_cell = &mut self.cells[usize::from(len) - 1];
@@ -70,20 +82,24 @@ impl Row {
         }
     }
 
-    pub fn resize(&mut self, len: u16, cell: crate::ratty_vt::Cell) {
+    pub(crate) fn resize(&mut self, len: u16, cell: crate::ratty_vt::Cell) {
         self.cells.resize(usize::from(len), cell);
         self.wrapped = false;
     }
 
-    pub fn wrap(&mut self, wrap: bool) {
+    pub(crate) fn wrap(&mut self, wrap: bool) {
         self.wrapped = wrap;
     }
 
+    /// Returns whether the text in this row continues onto the next row.
+    ///
+    /// ratty-vt: public.
+    #[must_use]
     pub fn wrapped(&self) -> bool {
         self.wrapped
     }
 
-    pub fn clear_wide(&mut self, col: u16) {
+    pub(crate) fn clear_wide(&mut self, col: u16) {
         let cell = &self.cells[usize::from(col)];
         let other = if cell.is_wide() {
             &mut self.cells[usize::from(col + 1)]
@@ -95,7 +111,13 @@ impl Row {
         other.clear(*other.attrs());
     }
 
-    pub fn write_contents(&self, contents: &mut String, start: u16, width: u16, wrapping: bool) {
+    pub(crate) fn write_contents(
+        &self,
+        contents: &mut String,
+        start: u16,
+        width: u16,
+        wrapping: bool,
+    ) {
         let mut prev_was_wide = false;
 
         let mut prev_col = start;
@@ -128,7 +150,7 @@ impl Row {
         }
     }
 
-    pub fn write_contents_formatted(
+    pub(crate) fn write_contents_formatted(
         &self,
         contents: &mut Vec<u8>,
         start: u16,
@@ -261,7 +283,7 @@ impl Row {
     // while it's true that most of the logic in this is identical to
     // write_contents_formatted, i can't figure out how to break out the
     // common parts without making things noticeably slower.
-    pub fn write_contents_diff(
+    pub(crate) fn write_contents_diff(
         &self,
         contents: &mut Vec<u8>,
         prev: &Self,
