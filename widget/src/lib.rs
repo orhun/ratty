@@ -3,7 +3,7 @@
 use base64::Engine as _;
 use ratatui_core::{
     buffer::{Buffer, CellDiffOption},
-    layout::Rect,
+    layout::{Position, Rect},
     widgets::Widget,
 };
 use std::borrow::Cow;
@@ -414,27 +414,75 @@ impl Widget for &RattyGraphic<'_> {
         }
 
         let place = self.place_sequence(area);
-
-        if let Some(cell) = buf.cell_mut((area.x, area.y)) {
-            let existing = cell.symbol();
-            let mut symbol = String::with_capacity(place.len() + existing.len());
-            symbol.push_str(&place);
-            symbol.push_str(existing);
-            cell.set_symbol(&symbol);
-            // The escape prefix prints nothing; only the retained symbol
-            // occupies the cell. Without this, the diff computes the raw
-            // string width and skips that many following cells, scrambling
-            // everything after the anchor (ratatui-core >= 0.1.2 semantics).
-            cell.set_diff_option(forced_width(1));
-        }
+        emit_sequence(buf, (area.x, area.y), &place);
     }
 }
 
-/// A [`CellDiffOption::ForcedWidth`] for escape-carrying cells whose visible
-/// content is `width` columns.
-fn forced_width(width: u16) -> CellDiffOption {
-    match core::num::NonZeroU16::new(width.max(1)) {
-        Some(width) => CellDiffOption::ForcedWidth(width),
-        None => CellDiffOption::None,
+/// Prepends `sequence` to the cell at `position` and marks the cell one
+/// column wide, so the escape bytes reach the terminal but never count as
+/// display width in Ratatui's diff.
+///
+/// Ratatui's backend prints a cell's symbol verbatim, which is how an escape
+/// sequence carried in a symbol reaches the terminal. Since `ratatui-core`
+/// 0.1.2 the diff derives a cell's width from its symbol string, and a base64
+/// image payload would be counted as thousands of columns, skipping every cell
+/// after it in the row. The forced width keeps the cell at the one column its
+/// visible symbol occupies (`ratatui-image` marks its placeholder cells the
+/// same way). A position outside the buffer is ignored.
+pub fn emit_sequence(buf: &mut Buffer, position: impl Into<Position>, sequence: &str) {
+    let Some(cell) = buf.cell_mut(position.into()) else {
+        return;
+    };
+    let existing = cell.symbol();
+    let mut symbol = String::with_capacity(sequence.len() + existing.len());
+    symbol.push_str(sequence);
+    symbol.push_str(existing);
+    cell.set_symbol(&symbol);
+    cell.set_diff_option(CellDiffOption::ForcedWidth(core::num::NonZeroU16::MIN));
+}
+
+#[cfg(test)]
+mod emit_sequence_tests {
+    use super::*;
+    use ratatui_core::buffer::CellWidth as _;
+
+    #[test]
+    fn escape_carrying_cell_stays_one_column_wide_in_the_diff() {
+        let area = Rect::new(0, 0, 2, 1);
+        let mut original = Buffer::empty(area);
+        original[(0, 0)].set_symbol("a");
+        original[(1, 0)].set_symbol("b");
+        let mut updated = original.clone();
+
+        let sequence = "\x1b_x\x1b\\";
+        emit_sequence(&mut updated, (0, 0), sequence);
+
+        let symbol = updated[(0, 0)].symbol();
+        assert!(
+            symbol.starts_with(sequence) && symbol.ends_with('a'),
+            "{symbol:?}"
+        );
+        assert_eq!(updated[(0, 0)].cell_width(), 1);
+
+        let updates: Vec<(u16, u16)> = original
+            .diff(&updated)
+            .into_iter()
+            .map(|(x, y, _)| (x, y))
+            .collect();
+        assert_eq!(updates, vec![(0, 0)], "only the anchor cell changes");
+
+        // The next frame repaints (1, 0); the anchor's payload must not
+        // swallow it.
+        let mut next = updated.clone();
+        next[(1, 0)].set_symbol("c");
+        let updates: Vec<(u16, u16)> = updated
+            .diff(&next)
+            .into_iter()
+            .map(|(x, y, _)| (x, y))
+            .collect();
+        assert_eq!(updates, vec![(1, 0)]);
+
+        // Out-of-bounds positions are ignored.
+        emit_sequence(&mut updated, (5, 5), sequence);
     }
 }

@@ -42,6 +42,12 @@ The widget emits RGP APC sequences into the target buffer cell. Ratty then
 resolves the asset and renders it as an inline 3D object anchored to that
 terminal region.
 
+To write one of the sequence strings (`register_sequence`, `place_sequence`,
+`update_sequence`, `delete_sequence`) into a buffer yourself, use
+`emit_sequence(buf, position, &sequence)`: it prepends the bytes to the cell's
+symbol and marks the cell one column wide so Ratatui's diff does not count the
+payload as display width.
+
 ## Payload Registration
 
 If the object data is already in memory, register it directly instead of

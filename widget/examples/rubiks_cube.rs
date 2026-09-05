@@ -20,7 +20,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Paragraph, Widget},
 };
-use ratatui_ratty::{ObjectFormat, RattyGraphic, RattyGraphicSettings};
+use ratatui_ratty::{ObjectFormat, RattyGraphic, RattyGraphicSettings, emit_sequence};
 
 const TICK: Duration = Duration::from_millis(33);
 const TURN_DURATION: f32 = 0.26;
@@ -166,12 +166,15 @@ impl RubiksApp {
         }
 
         let place_objects = self.view.placed_area != Some(area);
-        emit_sequence(buf, area.x, area.y, &self.object.graphic.update_sequence());
+        emit_sequence(
+            buf,
+            (area.x, area.y),
+            &self.object.graphic.update_sequence(),
+        );
         if place_objects {
             emit_sequence(
                 buf,
-                area.x,
-                area.y,
+                (area.x, area.y),
                 &self.object.graphic.place_sequence(area),
             );
         }
@@ -1068,21 +1071,4 @@ fn terminal_cell_pixels() -> (f32, f32) {
         18.0
     };
     (width.max(1.0), height.max(1.0))
-}
-
-fn emit_sequence(buf: &mut Buffer, x: u16, y: u16, sequence: &str) {
-    let Some(cell) = buf.cell_mut((x, y)) else {
-        return;
-    };
-    let existing = cell.symbol();
-    let mut symbol = String::with_capacity(sequence.len() + existing.len());
-    symbol.push_str(sequence);
-    symbol.push_str(existing);
-    cell.set_symbol(&symbol);
-    // The escape prefix prints nothing; only the retained symbol occupies the
-    // cell. Tell the diff so it does not skip the sequence's string width in
-    // following cells (ratatui-core >= 0.1.2 semantics).
-    cell.set_diff_option(ratatui::buffer::CellDiffOption::ForcedWidth(
-        std::num::NonZeroU16::MIN,
-    ));
 }
