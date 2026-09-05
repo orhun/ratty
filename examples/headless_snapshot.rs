@@ -21,6 +21,7 @@ use std::time::Duration;
 
 use bevy::app::ScheduleRunnerPlugin;
 use bevy::camera::RenderTarget;
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::render::RenderPlugin;
 use bevy::render::gpu_readback::{Readback, ReadbackComplete};
@@ -29,7 +30,9 @@ use bevy::render::settings::RenderCreation;
 use bevy::window::{PrimaryWindow, WindowResolution};
 use bevy::winit::WinitPlugin;
 use bevy_terminal_ratatui::TerminalRenderer;
-use bevy_terminal_ratatui::prelude::{TerminalPlugin, TerminalReady, TerminalTexture};
+use bevy_terminal_ratatui::prelude::{
+    TerminalPlugin, TerminalReady, TerminalStats, TerminalSystems, TerminalTexture,
+};
 use clap::Parser;
 
 use ratty::config::AppConfig;
@@ -66,6 +69,10 @@ struct Args {
     /// Seconds between successive `--send` values.
     #[arg(long, default_value_t = 0.25)]
     send_interval: f32,
+    /// Seconds after which to capture even if the terminal never goes idle
+    /// (a program that redraws every frame).
+    #[arg(long, default_value_t = 30.0)]
+    timeout: f32,
     /// At capture time, log diagnostics: cells whose Ratatui surface content
     /// differs from the VT screen (stale or missing cells), and each row's
     /// foreground-colour runs. `--check-stale` is accepted as an alias.
@@ -85,7 +92,55 @@ struct Options {
     after: f32,
     send: Vec<Vec<u8>>,
     send_interval: f32,
+    timeout: f32,
     diagnose: bool,
+}
+
+/// Consecutive renderer syncs with no changed rows before a capture is
+/// requested. The renderer submits a payload the frame after the sync that
+/// built it, and the GPU readback returns the frame after that, so three idle
+/// frames guarantee the texture holds the last payload.
+const IDLE_FRAMES_BEFORE_CAPTURE: u32 = 3;
+
+/// How many consecutive syncs left the terminal unchanged.
+#[derive(Resource, Default)]
+struct CaptureGate {
+    idle_frames: u32,
+}
+
+/// Counts idle syncs from the renderer's per-frame statistics.
+fn track_idle_frames(
+    stats: Query<&TerminalStats, With<TerminalRenderer>>,
+    mut gate: ResMut<CaptureGate>,
+) {
+    let Ok(stats) = stats.single() else {
+        return;
+    };
+    if stats.changed_rows == 0 {
+        gate.idle_frames = gate.idle_frames.saturating_add(1);
+    } else {
+        gate.idle_frames = 0;
+    }
+}
+
+/// Whether a capture may be requested: after `--after`, once the terminal has
+/// been idle long enough, or once `--timeout` has elapsed regardless.
+fn capture_due(time: &Time<Real>, options: &Options, gate: &CaptureGate) -> bool {
+    let elapsed = time.elapsed_secs();
+    if elapsed < options.after {
+        return false;
+    }
+    if gate.idle_frames >= IDLE_FRAMES_BEFORE_CAPTURE {
+        return true;
+    }
+    if elapsed >= options.timeout {
+        warn!(
+            "terminal never went idle within {}s; capturing anyway",
+            options.timeout
+        );
+        return true;
+    }
+    false
 }
 
 /// Compares the retained Ratatui surface with the VT screen and logs every
@@ -281,8 +336,11 @@ fn main() -> anyhow::Result<()> {
         after: args.after,
         send: args.send.iter().map(|text| decode_input(text)).collect(),
         send_interval: args.send_interval,
+        timeout: args.timeout,
         diagnose: args.diagnose,
     })
+    .init_resource::<CaptureGate>()
+    .add_systems(Update, track_idle_frames.after(TerminalSystems::Sync))
     .add_systems(Update, send_input);
 
     if args.scene {
@@ -408,11 +466,12 @@ fn pump_and_draw(
 fn request_texture_capture(
     time: Res<Time<Real>>,
     options: Res<Options>,
+    gate: Res<CaptureGate>,
     mut state: ResMut<CaptureState>,
     textures: Query<&TerminalTexture, With<Target>>,
     commands: Commands,
 ) {
-    if state.requested || time.elapsed_secs() < options.after {
+    if state.requested || !capture_due(&time, &options, &gate) {
         return;
     }
     let Ok(texture) = textures.single() else {
@@ -422,16 +481,30 @@ fn request_texture_capture(
     schedule_readback(commands, texture.image.clone(), texture.size);
 }
 
-fn request_scene_capture(
-    time: Res<Time<Real>>,
-    options: Res<Options>,
-    mut state: ResMut<CaptureState>,
-    target: Option<Res<SceneTarget>>,
-    terminal: Res<TerminalSurface>,
-    runtime: Res<TerminalRuntime>,
-    commands: Commands,
-) {
-    if state.requested || time.elapsed_secs() < options.after {
+#[derive(SystemParam)]
+struct SceneCaptureParams<'w, 's> {
+    time: Res<'w, Time<Real>>,
+    options: Res<'w, Options>,
+    gate: Res<'w, CaptureGate>,
+    state: ResMut<'w, CaptureState>,
+    target: Option<Res<'w, SceneTarget>>,
+    terminal: Res<'w, TerminalSurface>,
+    runtime: Res<'w, TerminalRuntime>,
+    commands: Commands<'w, 's>,
+}
+
+fn request_scene_capture(params: SceneCaptureParams) {
+    let SceneCaptureParams {
+        time,
+        options,
+        gate,
+        mut state,
+        target,
+        terminal,
+        runtime,
+        commands,
+    } = params;
+    if state.requested || !capture_due(&time, &options, &gate) {
         return;
     }
     let Some(target) = target else {
@@ -445,15 +518,13 @@ fn request_scene_capture(
 }
 
 fn schedule_readback(mut commands: Commands, image: Handle<Image>, size: UVec2) {
+    // The capture gate already waited for the renderer to be idle, so the
+    // first readback holds the final frame.
     commands.spawn(Readback::texture(image)).observe(
         move |done: On<ReadbackComplete>,
               options: Res<Options>,
-              mut state: ResMut<CaptureState>,
-              mut frames: Local<u32>| {
-            // The scene reaches the GPU a couple of frames after the
-            // readback is scheduled.
-            *frames += 1;
-            if *frames < 4 || state.done {
+              mut state: ResMut<CaptureState>| {
+            if state.done {
                 return;
             }
             state.done = true;
