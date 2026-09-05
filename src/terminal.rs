@@ -400,8 +400,11 @@ fn build_terminal_render_config(
 
     TerminalRenderConfig {
         // Cell width and height come from the loaded face's measured advance
-        // and line box; Ratty supplies no independent geometry estimate.
-        cell_size: CellSizing::FROM_FONT,
+        // and line box; Ratty supplies no independent geometry estimate, only
+        // the user's line-height multiplier.
+        cell_size: CellSizing::FromFont {
+            line_height: line_height_multiplier(font.line_height),
+        },
         font: FontFaces::regular(font_family(&font.family)),
         font_size: FontSizing::Px(points_to_logical_pixels(font.size)),
         theme,
@@ -418,6 +421,16 @@ fn build_terminal_render_config(
             scale: TerminalRenderScale::Fixed(render_scale.max(1.0)),
             ..default()
         },
+    }
+}
+
+/// Clamps the configured line height to a sane multiplier; non-finite or
+/// non-positive values fall back to the font's natural row.
+fn line_height_multiplier(line_height: f32) -> f32 {
+    if line_height.is_finite() && line_height > 0.0 {
+        line_height.clamp(0.5, 3.0)
+    } else {
+        1.0
     }
 }
 
@@ -909,6 +922,29 @@ mod tests {
         assert_eq!(rendered[0].cell_width(), 2);
         assert_eq!(rendered[1].cell_width(), 1);
         assert_eq!(rendered[2].cell_width(), 1);
+    }
+
+    #[test]
+    fn line_height_reaches_the_render_config() {
+        let mut config = AppConfig::default();
+        assert_eq!(
+            TerminalSurface::new(&config)
+                .expect("surface")
+                .render_config()
+                .cell_size,
+            CellSizing::FromFont { line_height: 1.0 }
+        );
+        config.font.line_height = 0.85;
+        assert_eq!(
+            TerminalSurface::new(&config)
+                .expect("surface")
+                .render_config()
+                .cell_size,
+            CellSizing::FromFont { line_height: 0.85 }
+        );
+        assert_eq!(line_height_multiplier(0.0), 1.0);
+        assert_eq!(line_height_multiplier(f32::NAN), 1.0);
+        assert_eq!(line_height_multiplier(10.0), 3.0);
     }
 
     #[test]

@@ -358,6 +358,11 @@ pub struct FontConfig {
     pub style: FontStyleConfig,
     /// Font size in points (1pt = 4/3 logical pixels).
     pub size: i32,
+    /// Row height as a multiple of the font's natural line box: `1.0` keeps
+    /// the font's own spacing, `0.9` packs rows tighter (useful for tall
+    /// fonts such as Iosevka), `1.2` spaces them out. Below `1.0` the
+    /// outermost ascender and descender pixels are clipped.
+    pub line_height: f32,
 }
 
 impl Default for FontConfig {
@@ -370,6 +375,7 @@ impl Default for FontConfig {
             bold_italic: None,
             style: FontStyleConfig::Regular,
             size: 18,
+            line_height: 1.0,
         }
     }
 }

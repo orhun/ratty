@@ -29,6 +29,10 @@ family = "DejaVu Sans Mono"
 # bold_italic = "fonts/IosevkaFixed-BoldItalic.ttf"
 style = "Regular"
 size = 12
+# Row height as a multiple of the font's natural line box. Tall fonts such as
+# Iosevka (2.5:1 cells) look better around 0.85; below 1.0 the outermost
+# ascender and descender pixels are clipped.
+# line_height = 1.0
 
 [cursor.model]
 path = "CairoSpinyMouse.obj"

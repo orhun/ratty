@@ -108,8 +108,12 @@ size = 12
 ```
 
 `size` is interpreted in points. Ratty measures the loaded font's glyph advance
-and line box to derive the cell dimensions before sizing the PTY; users do not
-configure cell width or line height. If the configured family is not installed,
+and line box to derive the cell dimensions before sizing the PTY; the only
+geometry setting is `line_height`, a multiplier on the font's natural row
+(`1.0` default). Iosevka's rows are 2.5 times its column width, so cell art such
+as the fastfetch logo looks stretched at `1.0`; `line_height = 0.85` brings it
+close to 2:1 at the cost of clipping the outermost ascender and descender
+pixels. If the configured family is not installed,
 Ratty falls back to the generic monospace family and logs a warning. Leave
 `window.scale_factor` unset for automatic framebuffer/DPI scaling; set it only
 as an explicit override.
