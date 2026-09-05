@@ -18,7 +18,7 @@ use ratatui_image::{
     picker::{Picker, ProtocolType},
     protocol::Protocol,
 };
-use ratatui_ratty::{RattyGraphic, RattyGraphicSettings};
+use ratatui_ratty::{RattyGraphic, RattyGraphicSettings, emit_sequence};
 
 fn main() -> io::Result<()> {
     let mut terminal = ratatui::init();
@@ -224,11 +224,15 @@ impl<'a> TempleEditor<'a> {
                 );
 
                 if !object.visible {
-                    emit_sequence(buf, anchor_x, anchor_y, &place);
-                    emit_sequence(buf, anchor_x, anchor_y, &object.graphic.register_sequence());
+                    emit_sequence(buf, (anchor_x, anchor_y), &place);
+                    emit_sequence(
+                        buf,
+                        (anchor_x, anchor_y),
+                        &object.graphic.register_sequence(),
+                    );
                     object.visible = true;
                 } else {
-                    emit_sequence(buf, anchor_x, anchor_y, &place);
+                    emit_sequence(buf, (anchor_x, anchor_y), &place);
                 }
             }
         }
@@ -249,7 +253,7 @@ impl<'a> TempleEditor<'a> {
                 continue;
             };
             if object.visible && !keep_visible.get(index).copied().unwrap_or(false) {
-                emit_sequence(buf, inner.x, inner.y, &object.graphic.delete_sequence());
+                emit_sequence(buf, (inner.x, inner.y), &object.graphic.delete_sequence());
                 object.visible = false;
             }
         }
@@ -576,17 +580,6 @@ fn initial_lines() -> Vec<Vec<DocCell>> {
     .into_iter()
     .map(|line| line.chars().map(DocCell::Char).collect())
     .collect()
-}
-
-fn emit_sequence(buf: &mut Buffer, x: u16, y: u16, sequence: &str) {
-    let Some(cell) = buf.cell_mut((x, y)) else {
-        return;
-    };
-    let existing = cell.symbol();
-    let mut symbol = String::with_capacity(sequence.len() + existing.len());
-    symbol.push_str(sequence);
-    symbol.push_str(existing);
-    cell.set_symbol(&symbol);
 }
 
 fn place_at_anchor(

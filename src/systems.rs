@@ -9,6 +9,9 @@
 //! - `scene::apply_terminal_presentation`
 //! - `apply_inline_objects`
 //! - `render_terminal_widget`
+//! - `sync_terminal_renderer_config` (then the `bevy_terminal` sync builds the frame)
+//! - `sync_terminal_render_output`
+//! - `sync_terminal_materials`
 //! - `sync_inline_objects`
 //! - `animate_inline_kitty_planes`
 //! - `sync_rgp_objects`
@@ -26,7 +29,6 @@ use crate::camera::{
     MIN_ORTHOGRAPHIC_SCALE, TerminalCameraSlots, TerminalCameraUpdate, TerminalMobiusSource,
 };
 use crate::config::{AppConfig, CURSOR_DEPTH};
-use crate::direct_render::DirectTerminalSceneExchange;
 use crate::inline::{
     InlineKittyPlaneLayout, InlineObject, TerminalInlineObjectPlane, TerminalInlineObjectSprite,
     TerminalInlineObjects, TerminalRgpObject,
@@ -43,7 +45,8 @@ use crate::scene::{
     TerminalPresentationMode, TerminalViewport, sync_terminal_layout,
 };
 use crate::terminal::{
-    TerminalRedrawState, TerminalSurface, TerminalWidget, render_scale_for_window,
+    ConfiguredFontFaces, TerminalRedrawState, TerminalRenderTarget, TerminalSurface,
+    TerminalWidget, render_scale_for_window,
 };
 use bevy::app::AppExit;
 use bevy::asset::AssetMut;
@@ -56,7 +59,11 @@ use bevy::mesh::{Indices, VertexAttributeValues};
 use bevy::prelude::*;
 use bevy::render::render_resource::PrimitiveTopology;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use bevy::text::FontCx;
 use bevy::window::{PrimaryWindow, Window, WindowCloseRequested, WindowResized};
+use bevy_terminal_ratatui::prelude::{
+    FontFaces, FontSource, TerminalReady, TerminalRemeasured, TerminalRenderConfig, TerminalTexture,
+};
 
 struct InlineLayout {
     columns: u32,
@@ -163,8 +170,44 @@ pub fn pump_pty_output(
     mut app_exit: MessageWriter<AppExit>,
     mut redraw: ResMut<TerminalRedrawState>,
 ) {
-    let mut processed_output = false;
     let mut camera_updates = Vec::new();
+    let drained = drain_pty_output(&mut runtime, &mut inline_objects, &mut camera_updates);
+    for update in camera_updates {
+        camera_update_writer.write(update);
+    }
+    if drained.disconnected && !runtime.pty_disconnected {
+        runtime.pty_disconnected = true;
+        app_exit.write(AppExit::Success);
+    }
+    if drained.processed {
+        redraw.request();
+    }
+}
+
+/// What [`drain_pty_output`] found on the PTY.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PtyDrain {
+    /// Whether any terminal output was processed.
+    pub processed: bool,
+    /// Whether the PTY reader has hung up (the child exited).
+    pub disconnected: bool,
+}
+
+/// Drains every pending PTY chunk into the parser and inline-object state.
+///
+/// Each chunk goes through [`TerminalInlineObjects::consume_pty_output`]
+/// (which strips inline-graphics control sequences and feeds the rest to the
+/// parser), terminal replies are written back to the child, scroll-tracked
+/// inline anchors follow the screen, and placeholder anchors are refreshed.
+/// Camera updates requested by the output are collected into `camera_updates`.
+/// This is the whole per-frame PTY step; [`pump_pty_output`] wraps it for the
+/// app and `examples/headless_snapshot.rs` calls it directly.
+pub fn drain_pty_output(
+    runtime: &mut TerminalRuntime,
+    inline_objects: &mut TerminalInlineObjects,
+    camera_updates: &mut Vec<TerminalCameraUpdate>,
+) -> PtyDrain {
+    let mut drained = PtyDrain::default();
     loop {
         match runtime.try_recv() {
             Ok(chunk) => {
@@ -172,13 +215,10 @@ pub fn pump_pty_output(
                 let prev_rows = track_scroll.then(|| runtime.visible_row_texts());
                 let mut replies = inline_objects.consume_pty_output(
                     &chunk,
-                    &mut runtime,
-                    &mut camera_updates,
-                    &mut processed_output,
+                    runtime,
+                    camera_updates,
+                    &mut drained.processed,
                 );
-                for update in camera_updates.drain(..) {
-                    camera_update_writer.write(update);
-                }
                 replies.extend(runtime.take_replies());
                 for reply in replies {
                     runtime.write_input(&reply);
@@ -192,18 +232,12 @@ pub fn pump_pty_output(
             }
             Err(TryRecvError::Empty) => break,
             Err(TryRecvError::Disconnected) => {
-                if !runtime.pty_disconnected {
-                    runtime.pty_disconnected = true;
-                    app_exit.write(AppExit::Success);
-                }
+                drained.disconnected = true;
                 break;
             }
         }
     }
-
-    if processed_output {
-        redraw.request();
-    }
+    drained
 }
 
 fn infer_upward_scroll(prev_rows: &[String], next_rows: &[String]) -> u16 {
@@ -275,17 +309,103 @@ pub(crate) fn handle_window_resize(
         return;
     }
 
+    // Before the first measured texture arrives, no authoritative cell
+    // dimensions exist. The first measured-output sync uses the current
+    // window, so dropping the event loses nothing. (A session where
+    // measurement never succeeds is reported by `reveal_window_fallback`.)
+    if !terminal.is_measured() {
+        return;
+    }
+
     let window_size = window_size.max(Vec2::ONE);
-    let layout = terminal.resize_to_fit(window_size, render_scale_for_window(window));
+    let render_scale = render_scale_for_window(window);
+    if terminal.set_render_scale(render_scale) {
+        // A DPI transition can change snapped logical cell metrics. Let the
+        // renderer remeasure first; the output sync owns the single PTY
+        // reflow using those authoritative metrics and the current window.
+        return;
+    }
+    let layout = reflow_terminal(terminal, runtime, window_size, render_scale);
+    sync_terminal_layout(layout, viewport, plane_query, plane_back_query);
+    redraw.request();
+}
+
+/// Marker on the render target once its `TerminalReady` has fired: the
+/// texture carries measured font geometry and may drive PTY layout.
+///
+/// A component rather than a resource, so it dies with a despawned target and
+/// a foreign `bevy_terminal` terminal (an embedder may run several) cannot
+/// vouch for Ratty's.
+#[derive(Component)]
+pub(crate) struct TerminalRendererReady;
+
+/// Set by the renderer's readiness and remeasure events; consumed by
+/// [`sync_terminal_render_output`], which adopts the texture that frame.
+#[derive(Resource, Default)]
+pub(crate) struct TerminalOutputPending(pub bool);
+
+/// Marks the renderer's measured texture as authoritative for layout.
+pub(crate) fn on_terminal_ready(
+    ready: On<TerminalReady>,
+    targets: Query<(), With<TerminalRenderTarget>>,
+    mut pending: ResMut<TerminalOutputPending>,
+    mut commands: Commands,
+) {
+    if targets.contains(ready.entity) {
+        commands.entity(ready.entity).insert(TerminalRendererReady);
+        pending.0 = true;
+    }
+}
+
+/// Schedules texture adoption after the renderer resized its texture in
+/// place (font load, zoom, or a raster-scale change).
+pub(crate) fn on_terminal_remeasured(
+    remeasured: On<TerminalRemeasured>,
+    targets: Query<(), With<TerminalRenderTarget>>,
+    mut pending: ResMut<TerminalOutputPending>,
+) {
+    if targets.contains(remeasured.entity) {
+        pending.0 = true;
+    }
+}
+
+/// Fits the grid to the window, pushes the result to the PTY, and returns the
+/// layout. The single reflow implementation shared by the resize handler and
+/// the render-output sync.
+fn reflow_terminal(
+    terminal: &mut TerminalSurface,
+    runtime: &mut TerminalRuntime,
+    window_size: Vec2,
+    render_scale: f32,
+) -> crate::terminal::TerminalLayout {
+    let layout = terminal.resize_to_fit(window_size, render_scale);
     let pty_pixels = layout.pty_pixels();
-    runtime.resize(
+    if let Err(error) = runtime.resize(
         layout.cols,
         layout.rows,
         pty_pixels.x as u16,
         pty_pixels.y as u16,
-    );
-    sync_terminal_layout(layout, viewport, plane_query, plane_back_query);
-    redraw.request();
+    ) {
+        warn!("terminal resize remains pending: {error:#}");
+    }
+    layout
+}
+
+/// Retries an operating-system PTY resize that failed when it was requested.
+///
+/// The request site emits the warning. Later attempts run quietly at normal
+/// log levels so a persistent platform error cannot flood the log every frame.
+pub(crate) fn retry_pending_terminal_resize(
+    mut runtime: ResMut<TerminalRuntime>,
+    mut redraw: ResMut<TerminalRedrawState>,
+) {
+    match runtime.retry_pending_resize() {
+        // The parser grid only reflowed now, so the retry owns the redraw the
+        // original request could not deliver.
+        Ok(true) => redraw.request(),
+        Ok(false) => {}
+        Err(error) => trace!("terminal resize retry remains pending: {error:#}"),
+    }
 }
 
 /// Applies inline object visibility for the current presentation mode.
@@ -332,15 +452,11 @@ pub fn apply_inline_objects(
 #[derive(Resource, Default)]
 pub(crate) struct TerminalFrameDirty(pub bool);
 
-/// Ordered terminal redraw pipeline:
-/// [`render_terminal_widget`] → [`sync_terminal_materials`] →
+/// Ordered post-render synchronization pipeline, after the `bevy_terminal`
+/// sync: [`sync_terminal_render_output`] → [`sync_terminal_materials`] →
 /// [`finish_terminal_model_load`].
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct TerminalRedrawSet;
-
-/// Half-period of the fastest blink cadence the renderer supports (rapid
-/// blink); slow blink (0.5s) is a multiple of it.
-const BLINK_TICK_SECS: f32 = 0.25;
 
 #[derive(SystemParam)]
 pub(crate) struct RenderWidgetParams<'w, 's> {
@@ -348,48 +464,36 @@ pub(crate) struct RenderWidgetParams<'w, 's> {
     runtime: Res<'w, TerminalRuntime>,
     terminal: ResMut<'w, TerminalSurface>,
     selection: Res<'w, TerminalSelection>,
-    time: Res<'w, Time>,
     redraw: ResMut<'w, TerminalRedrawState>,
-    images: ResMut<'w, Assets<Image>>,
-    direct_render: Res<'w, DirectTerminalSceneExchange>,
     model_load_state: Res<'w, ModelLoadState>,
     frame_dirty: ResMut<'w, TerminalFrameDirty>,
-    blink_phase: Local<'s, u64>,
+    _marker: std::marker::PhantomData<&'s ()>,
 }
 
-/// Redraws the Ratatui buffer and publishes the rendered terminal frame.
+/// Redraws the Ratatui buffer into the retained Bevy terminal surface.
 ///
 /// This runs after [`pump_pty_output`] and [`crate::mouse::handle_mouse_input`]. It records
 /// whether the frame changed in [`TerminalFrameDirty`] so the rest of [`TerminalRedrawSet`]
-/// can skip its work on clean frames.
+/// can skip its work on clean frames. Blink is animated by the renderer itself.
 pub(crate) fn render_terminal_widget(mut params: RenderWidgetParams) {
     let RenderWidgetParams {
         app_config,
         runtime,
         terminal,
         selection,
-        time,
         redraw,
-        images,
-        direct_render,
         model_load_state,
         frame_dirty,
-        blink_phase,
+        _marker: _,
     } = &mut params;
     let needs_redraw = redraw.take();
-    // The texture content only changes with terminal state or blink phase;
-    // warp and camera animations are mesh- and camera-side. Rebuilding on
-    // blink ticks instead of every frame keeps idle scene builds at 4Hz.
-    let phase = (time.elapsed_secs() / BLINK_TICK_SECS) as u64;
-    let blink_ticked = **blink_phase != phase;
-    **blink_phase = phase;
-    frame_dirty.0 = needs_redraw || blink_ticked || !model_load_state.loaded;
+    frame_dirty.0 = needs_redraw || !model_load_state.loaded;
     if !frame_dirty.0 {
         return;
     }
 
     let screen = runtime.screen();
-    let _ = terminal.tui.draw(|frame| {
+    terminal.tui.draw(|frame| {
         frame.render_widget(
             TerminalWidget {
                 screen,
@@ -405,8 +509,197 @@ pub(crate) fn render_terminal_widget(mut params: RenderWidgetParams) {
             frame.set_cursor_position((cursor_col, cursor_row));
         }
     });
+}
 
-    let _ = terminal.sync_image(images, direct_render, time.elapsed_secs());
+/// Applies Ratty's live font, theme, and DPI settings to the renderer entity.
+pub(crate) fn sync_terminal_renderer_config(
+    app_config: Res<AppConfig>,
+    terminal: Res<TerminalSurface>,
+    configured_faces: Option<Res<ConfiguredFontFaces>>,
+    mut font_cx: ResMut<FontCx>,
+    mut in_family_fallback: Local<bool>,
+    mut configs: Query<&mut TerminalRenderConfig, With<TerminalRenderTarget>>,
+) {
+    let Ok(mut config) = configs.single_mut() else {
+        return;
+    };
+    // Idle-frame early-out before any clone or lookup. While the Monospace
+    // fallback is active the system keeps running so it recovers the moment
+    // the configured family registers.
+    let inputs_changed = app_config.is_changed()
+        || terminal.is_changed()
+        || configured_faces
+            .as_ref()
+            .is_some_and(|faces| faces.is_changed())
+        || config.is_added();
+    if !inputs_changed && !*in_family_fallback {
+        return;
+    }
+    let mut desired = terminal.render_config().clone();
+    if let Some(ref configured_faces) = configured_faces {
+        desired.font = configured_faces.faces.clone();
+    }
+    // The family retained inside ConfiguredFontFaces is the one actually
+    // pushed to the renderer; None means explicit font files, where no
+    // availability check applies.
+    let system_family: Option<&str> = match configured_faces.as_deref() {
+        Some(configured) => configured.system_family.as_deref(),
+        None => Some(app_config.font.family.as_str()),
+    };
+    *in_family_fallback = false;
+    if let Some(family) = system_family
+        && font_cx
+            .bypass_change_detection()
+            .collection
+            .family_by_name(family)
+            .is_none()
+    {
+        warn_once!(
+            "configured font family {family:?} is unavailable; using the generic monospace family"
+        );
+        desired.font = FontFaces::regular(FontSource::Monospace);
+        *in_family_fallback = true;
+    }
+    if *config != desired {
+        config.clone_from(&desired);
+    }
+}
+
+/// The render target's texture, present only once the renderer has signaled
+/// readiness.
+type ReadyTerminalTextureQuery<'w, 's> = Query<
+    'w,
+    's,
+    &'static TerminalTexture,
+    (With<TerminalRenderTarget>, With<TerminalRendererReady>),
+>;
+
+#[derive(SystemParam)]
+pub(crate) struct SyncRenderOutputParams<'w, 's> {
+    primary_window: Query<'w, 's, &'static mut Window, With<PrimaryWindow>>,
+    textures: ReadyTerminalTextureQuery<'w, 's>,
+    pending: ResMut<'w, TerminalOutputPending>,
+    runtime: ResMut<'w, TerminalRuntime>,
+    terminal: ResMut<'w, TerminalSurface>,
+    redraw: ResMut<'w, TerminalRedrawState>,
+    viewport: ResMut<'w, TerminalViewport>,
+    plane_query: TerminalPlaneLayoutQuery<'w, 's>,
+    plane_back_query: TerminalPlaneBackLayoutQuery<'w, 's>,
+    frame_dirty: ResMut<'w, TerminalFrameDirty>,
+}
+
+/// Adopts the renderer-owned texture and reflows the PTY when measured font
+/// metrics change.
+///
+/// Driven by the renderer's `TerminalReady` and `TerminalRemeasured` events
+/// (see [`on_terminal_ready`] and [`on_terminal_remeasured`]), which fire
+/// inside the `bevy_terminal` sync earlier in the same frame.
+pub(crate) fn sync_terminal_render_output(mut params: SyncRenderOutputParams) {
+    let SyncRenderOutputParams {
+        primary_window,
+        textures,
+        pending,
+        runtime,
+        terminal,
+        redraw,
+        viewport,
+        plane_query,
+        plane_back_query,
+        frame_dirty,
+    } = &mut params;
+    if !pending.0 {
+        return;
+    }
+    // The renderer inserts a provisional texture with estimated cell metrics
+    // before the font face has shaped. Adopting it would reflow the PTY to a
+    // wrong grid, so the query requires TerminalRendererReady, the renderer's
+    // own signal that the texture carries measured geometry.
+    let (Ok(texture), Ok(mut window)) = (textures.single(), primary_window.single_mut()) else {
+        return;
+    };
+    // Minimizing the window reports a 0x0 size. Skip the reflow (mirroring
+    // `handle_window_resize`) so a texture change landing on that frame does
+    // not collapse the terminal to a degenerate grid; the event stays pending.
+    let window_size = window.resolution.size();
+    if window_size.x < 1.0 || window_size.y < 1.0 {
+        return;
+    }
+    pending.0 = false;
+    // Bypass change detection for a no-op adoption so an unchanged texture
+    // does not bump the public resource's tick, then mark on real adoption.
+    if !terminal
+        .bypass_change_detection()
+        .update_render_output(texture)
+    {
+        return;
+    }
+    terminal.set_changed();
+    let previous_grid = (terminal.cols, terminal.rows);
+    let layout = reflow_terminal(terminal, runtime, window_size, texture.raster_scale);
+    sync_terminal_layout(layout, viewport, plane_query, plane_back_query);
+    frame_dirty.0 = true;
+    if previous_grid != (layout.cols, layout.rows) {
+        redraw.request();
+    }
+    // The first measured texture may still represent the configured startup
+    // grid. If measurement changes the fitted grid, keep the native window
+    // hidden until the renderer has produced the correctly sized texture.
+    if !window.visible && texture.size == terminal.pixmap_dimensions() {
+        window.visible = true;
+    }
+}
+
+/// Seconds to wait for a measured, correctly sized terminal texture before
+/// showing the window anyway.
+///
+/// Generous enough that a slow-but-healthy startup (debug build, large font
+/// collection) reveals through the normal measured path first; the fallback
+/// only exists so a font that never shapes cannot leave a headless process.
+const WINDOW_REVEAL_FALLBACK_SECS: f32 = 10.0;
+
+/// Reports a session where the renderer never produces a measured texture,
+/// and reveals the window if it is still hidden.
+///
+/// Ratty's own binary starts the window hidden and
+/// `sync_terminal_render_output` normally shows it once the first correctly
+/// sized texture exists; if font measurement fails (for example, no usable
+/// system fonts), this degrades to a visible window instead of a silent
+/// headless process.
+///
+/// One-shot: the system disarms on measurement success or after firing, so a
+/// later intentional hide is never reverted.
+pub(crate) fn reveal_window_fallback(
+    time: Res<Time<Real>>,
+    terminal: Res<TerminalSurface>,
+    mut primary_window: Query<&mut Window, With<PrimaryWindow>>,
+    mut waited: Local<f32>,
+    mut disarmed: Local<bool>,
+) {
+    if *disarmed {
+        return;
+    }
+    if terminal.is_measured() {
+        *disarmed = true;
+        return;
+    }
+    // Accumulate the observed wait rather than reading elapsed_secs(): an
+    // embedder may add this plugin long after app startup, and app-elapsed
+    // time would fire the fallback instantly. Real time, because virtual time
+    // clamps long blocking frames to `max_delta`.
+    *waited += time.delta_secs();
+    if *waited < WINDOW_REVEAL_FALLBACK_SECS {
+        return;
+    }
+    *disarmed = true;
+    warn!(
+        "no measured terminal texture after {WINDOW_REVEAL_FALLBACK_SECS}s; \
+         window resizes are ignored until font measurement succeeds"
+    );
+    if let Ok(mut window) = primary_window.single_mut()
+        && !window.visible
+    {
+        window.visible = true;
+    }
 }
 
 #[derive(SystemParam)]
@@ -422,9 +715,10 @@ pub(crate) struct SyncMaterialsParams<'w, 's> {
     present_materials: ResMut<'w, Assets<TerminalPresentMaterial>>,
     present_query: Query<'w, 's, &'static MeshMaterial2d<TerminalPresentMaterial>>,
     frame_dirty: Res<'w, TerminalFrameDirty>,
+    was_in_3d: Local<'s, bool>,
 }
 
-/// Refreshes the debug back texture and plane materials after a redraw.
+/// Refreshes terminal presentation materials after a redraw or on entering 3-D.
 pub(crate) fn sync_terminal_materials(mut params: SyncMaterialsParams) {
     let SyncMaterialsParams {
         runtime,
@@ -437,17 +731,19 @@ pub(crate) fn sync_terminal_materials(mut params: SyncMaterialsParams) {
         present_materials,
         present_query,
         frame_dirty,
+        was_in_3d,
     } = &mut params;
-    if !frame_dirty.0 {
+    let in_3d = camera_slots.active().mode.is_3d();
+    if !terminal_material_sync_needed(frame_dirty.0, in_3d, was_in_3d) {
         return;
     }
 
-    // The present texture's GpuImage is recreated when the terminal resizes (window
-    // resize / font zoom), which invalidates the 2D present material's cached bind
-    // group. Writing the texture handle — not merely touching the asset with
-    // `get_mut` — advances the material's change tick so Bevy re-prepares the bind
-    // group against the current GpuImage; a no-op touch leaves the quad sampling a
-    // stale texture and the flat view freezes. Matches the plane handling.
+    // The renderer owns one stable image handle and reallocates its GPU image in
+    // place when the terminal is remeasured. Writing the texture handle — not
+    // merely touching the asset with `get_mut` — advances the material's change
+    // tick so Bevy re-prepares the bind group against the current GpuImage; a
+    // no-op touch leaves the quad sampling a stale texture and the flat view
+    // freezes. Matches the plane handling.
     if let Some(present_image) = terminal.image_handle.as_ref() {
         for present_handle in present_query.iter() {
             if let Some(mut material) = present_materials.get_mut(&present_handle.0) {
@@ -456,7 +752,6 @@ pub(crate) fn sync_terminal_materials(mut params: SyncMaterialsParams) {
         }
     }
 
-    let in_3d = camera_slots.active().mode.is_3d();
     if in_3d {
         sync_terminal_debug_image(terminal, images, runtime.screen());
     }
@@ -469,6 +764,17 @@ pub(crate) fn sync_terminal_materials(mut params: SyncMaterialsParams) {
             materials,
         );
     }
+}
+
+/// Returns whether terminal materials need refreshing and tracks 3-D transitions.
+///
+/// Camera changes do not make the terminal frame dirty, but entering 3-D exposes
+/// the separately rendered back texture. Refresh it on that transition so it is
+/// generated from the renderer's current measured cell geometry.
+fn terminal_material_sync_needed(frame_dirty: bool, in_3d: bool, was_in_3d: &mut bool) -> bool {
+    let entering_3d = in_3d && !*was_in_3d;
+    *was_in_3d = in_3d;
+    frame_dirty || entering_3d
 }
 
 #[derive(SystemParam)]

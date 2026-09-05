@@ -111,6 +111,11 @@ impl<CB: crate::ratty_vt::callbacks::Callbacks> vte::Perform for WrappedScreen<C
                     params,
                     self.screen.grid().size(),
                 )),
+                // ratty-vt: SCOSC / SCORC (ANSI.SYS cursor save and restore),
+                // emitted by Ratatui-based inline-graphics widgets around
+                // placeholder text.
+                's' => self.screen.scosc(),
+                'u' => self.screen.scorc(),
                 't' => {
                     let mut params_iter = params.iter();
                     let op = params_iter.next().and_then(|x| x.first().copied());

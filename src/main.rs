@@ -16,7 +16,7 @@ use ratty::config::{AppConfig, UpdateModeConfig};
 use ratty::paths::runtime_asset_root;
 use ratty::plugin::TerminalPlugin;
 use ratty::runtime::{RuntimeOptions, TerminalRuntime};
-use ratty::terminal::TerminalSurface;
+use ratty::terminal::{TerminalSurface, load_configured_font_faces};
 
 // Matches the default icon id used by `winresource::WindowsResource::set_icon`.
 #[cfg(target_os = "windows")]
@@ -54,53 +54,55 @@ fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(&asset_root)?;
     let window_icon = load_window_icon()?;
 
-    App::new()
-        .insert_resource(ClearColor(Color::srgba_u8(
-            app_config.theme.background[0],
-            app_config.theme.background[1],
-            app_config.theme.background[2],
-            (app_config.window.opacity.clamp(0.0, 1.0) * 255.0).round() as u8,
-        )))
-        .insert_resource(app_config.clone())
-        .insert_resource(runtime)
-        .insert_resource(terminal)
-        .insert_non_send(AppWindowIcon { icon: window_icon })
-        // Unfocused windows always update continuously. Bevy's default switches
-        // them to a reactive mode, which would delay background PTY output.
-        // While focused, `update_mode` picks between updating continuously and
-        // updating reactively at a capped frame rate to reduce idle CPU usage.
-        .insert_resource(match app_config.window.update_mode {
-            UpdateModeConfig::Continuous => WinitSettings::continuous(),
-            UpdateModeConfig::LowPower => WinitSettings {
-                focused_mode: UpdateMode::reactive_low_power(Duration::from_millis(
-                    app_config.window.frame_interval_ms,
-                )),
-                unfocused_mode: UpdateMode::Continuous,
-            },
-        })
-        .add_plugins(
-            DefaultPlugins
-                .set(WindowPlugin {
-                    primary_window: Some(Window {
-                        title: window_title.clone(),
-                        name: Some(window_title),
-                        resolution: window_resolution(&app_config),
-                        resize_constraints: WindowResizeConstraints {
-                            min_width: 1.0,
-                            min_height: 1.0,
-                            ..default()
-                        },
-                        transparent: app_config.window.opacity < 1.0,
-                        visible: false,
+    let mut app = App::new();
+    app.insert_resource(ClearColor(Color::srgba_u8(
+        app_config.theme.background[0],
+        app_config.theme.background[1],
+        app_config.theme.background[2],
+        (app_config.window.opacity.clamp(0.0, 1.0) * 255.0).round() as u8,
+    )))
+    .insert_resource(app_config.clone())
+    .insert_resource(runtime)
+    .insert_resource(terminal)
+    .insert_non_send(AppWindowIcon { icon: window_icon })
+    // Unfocused windows always update continuously. Bevy's default switches
+    // them to a reactive mode, which would delay background PTY output.
+    // While focused, `update_mode` picks between updating continuously and
+    // updating reactively at a capped frame rate to reduce idle CPU usage.
+    .insert_resource(match app_config.window.update_mode {
+        UpdateModeConfig::Continuous => WinitSettings::continuous(),
+        UpdateModeConfig::LowPower => WinitSettings {
+            focused_mode: UpdateMode::reactive_low_power(Duration::from_millis(
+                app_config.window.frame_interval_ms,
+            )),
+            unfocused_mode: UpdateMode::Continuous,
+        },
+    })
+    .add_plugins(
+        DefaultPlugins
+            .set(WindowPlugin {
+                primary_window: Some(Window {
+                    title: window_title.clone(),
+                    name: Some(window_title),
+                    resolution: window_resolution(&app_config),
+                    resize_constraints: WindowResizeConstraints {
+                        min_width: 1.0,
+                        min_height: 1.0,
                         ..default()
-                    }),
-                    ..default()
-                })
-                .set(AssetPlugin {
-                    file_path: asset_root.to_string_lossy().into_owned(),
+                    },
+                    transparent: app_config.window.opacity < 1.0,
+                    visible: false,
                     ..default()
                 }),
-        )
+                ..default()
+            })
+            .set(AssetPlugin {
+                file_path: asset_root.to_string_lossy().into_owned(),
+                ..default()
+            }),
+    );
+    let font_faces = load_configured_font_faces(&mut app, &app_config.font)?;
+    app.insert_resource(font_faces)
         .add_systems(Update, apply_window_icon)
         .add_plugins(TerminalPlugin)
         .run();
@@ -112,12 +114,12 @@ fn main() -> anyhow::Result<()> {
 fn apply_window_icon(
     mut window_created_events: MessageReader<WindowCreated>,
     app_icon: NonSend<AppWindowIcon>,
-    mut primary_windows: Query<&mut Window, With<PrimaryWindow>>,
+    primary_windows: Query<(), With<PrimaryWindow>>,
 ) {
     for event in window_created_events.read() {
-        let Ok(mut primary_window) = primary_windows.get_mut(event.window) else {
+        if !primary_windows.contains(event.window) {
             continue;
-        };
+        }
 
         WINIT_WINDOWS.with(|winit_windows| {
             let winit_windows = winit_windows.borrow();
@@ -131,11 +133,8 @@ fn apply_window_icon(
                 #[cfg(target_os = "windows")]
                 window.set_taskbar_icon(Some(icon.clone()));
             }
-
-            if !primary_window.visible {
-                window.set_visible(true);
-                primary_window.visible = true;
-            }
+            // The window stays hidden until `sync_terminal_render_output`
+            // has a measured, correctly sized terminal texture to show.
         });
     }
 }

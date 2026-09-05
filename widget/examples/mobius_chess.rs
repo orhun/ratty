@@ -12,7 +12,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Paragraph, Widget},
 };
-use ratatui_ratty::{RattyGraphic, RattyGraphicSettings};
+use ratatui_ratty::{RattyGraphic, RattyGraphicSettings, emit_sequence};
 
 const TICK: Duration = Duration::from_millis(33);
 // Radians/sec the board auto-spins at when not paused.
@@ -178,9 +178,9 @@ impl MobiusChessApp {
         }
 
         let place_objects = self.view.placed_area != Some(area);
-        emit_sequence(buf, area.x, area.y, &self.scene.update_sequence());
+        emit_sequence(buf, (area.x, area.y), &self.scene.update_sequence());
         if place_objects {
-            emit_sequence(buf, area.x, area.y, &self.scene.place_sequence(area));
+            emit_sequence(buf, (area.x, area.y), &self.scene.place_sequence(area));
         }
 
         if place_objects {
@@ -792,15 +792,5 @@ impl std::ops::Mul for Mat3 {
             }
         }
         Self { m }
-    }
-}
-
-fn emit_sequence(buf: &mut Buffer, x: u16, y: u16, sequence: &str) {
-    if let Some(cell) = buf.cell_mut((x, y)) {
-        let existing = cell.symbol();
-        let mut symbol = String::with_capacity(sequence.len() + existing.len());
-        symbol.push_str(sequence);
-        symbol.push_str(existing);
-        cell.set_symbol(&symbol);
     }
 }

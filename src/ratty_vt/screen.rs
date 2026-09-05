@@ -7,10 +7,12 @@ const MODE_HIDE_CURSOR: u8 = 0b0000_0100;
 const MODE_ALTERNATE_SCREEN: u8 = 0b0000_1000;
 const MODE_BRACKETED_PASTE: u8 = 0b0001_0000;
 
-/// The kitty graphics protocol's Unicode placeholder character.
+/// The Kitty graphics protocol's Unicode placeholder character (U+10EEEE):
+/// a cell holding it, plus its row/column diacritics, marks where an image
+/// covers the grid.
 ///
 /// ratty-vt addition; see [`Row::has_kitty_placeholder`](crate::ratty_vt::Row::has_kitty_placeholder).
-const KITTY_PLACEHOLDER: char = '\u{10EEEE}';
+pub const KITTY_PLACEHOLDER: char = '\u{10EEEE}';
 
 /// The xterm mouse handling mode currently in use.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
@@ -55,6 +57,50 @@ pub enum MouseProtocolEncoding {
     // Urxvt,
 }
 
+/// Whether printing `c` right after a cell holding `prev` continues that
+/// cell's grapheme cluster (see `Screen::extend_grapheme_cluster`).
+///
+/// A Prepend-class format character (U+0600 ARABIC NUMBER SIGN and friends)
+/// clusters with whatever follows it under UAX #29, which would swallow an
+/// ordinary letter or space into the sign's cell; terminals keep those apart,
+/// so a cluster never grows past a Prepend character here.
+pub(crate) fn clusters_with(prev: &str, c: char) -> bool {
+    use unicode_segmentation::UnicodeSegmentation as _;
+
+    let Some(last) = prev.chars().next_back() else {
+        return false;
+    };
+    if is_prepend(last) {
+        return false;
+    }
+    let mut cluster = String::with_capacity(prev.len() + 4);
+    cluster.push_str(prev);
+    cluster.push(c);
+    cluster.graphemes(true).count() == 1
+}
+
+/// Grapheme_Cluster_Break=Prepend (Unicode 16).
+fn is_prepend(c: char) -> bool {
+    matches!(
+        u32::from(c),
+        0x0600..=0x0605
+            | 0x06DD
+            | 0x070F
+            | 0x0890..=0x0891
+            | 0x08E2
+            | 0x0D4E
+            | 0x110BD
+            | 0x110CD
+            | 0x111C2..=0x111C3
+            | 0x1193F
+            | 0x11941
+            | 0x11A3A
+            | 0x11A84..=0x11A89
+            | 0x11D46
+            | 0x11F02
+    )
+}
+
 /// Represents the overall terminal state.
 #[derive(Clone, Debug)]
 pub struct Screen {
@@ -76,6 +122,13 @@ pub struct Screen {
     // enhanced key reporting.
     kitty_keyboard_flags: [Vec<u8>; 2],
     modify_other_keys: Option<u8>,
+
+    // ratty-vt: the cell most recently written by `text`, so a following
+    // character that extends its grapheme cluster (a spacing vowel sign, a
+    // VS16, a ZWJ sequence, the second regional indicator of a flag) joins
+    // that cell instead of starting a new one. Cleared by anything that
+    // moves the cursor or edits the row.
+    last_print: Option<crate::ratty_vt::grid::Pos>,
 }
 
 // ratty-vt: `CSI > u` pushes a flag set; kitty caps the stack so a runaway
@@ -99,11 +152,13 @@ impl Screen {
 
             kitty_keyboard_flags: [vec![], vec![]],
             modify_other_keys: None,
+            last_print: None,
         }
     }
 
     /// Resizes the terminal.
     pub fn set_size(&mut self, rows: u16, cols: u16) {
+        self.break_cluster();
         self.grid
             .set_size(crate::ratty_vt::grid::Size { rows, cols });
         self.alternate_grid
@@ -120,6 +175,7 @@ impl Screen {
     /// screen is resized without reflow, since full-screen applications
     /// redraw on resize anyway.
     pub fn set_size_reflow(&mut self, rows: u16, cols: u16) {
+        self.break_cluster();
         let size = crate::ratty_vt::grid::Size { rows, cols };
         self.grid.set_size_reflow(size);
         self.alternate_grid.set_size_plain(size);
@@ -717,6 +773,31 @@ impl Screen {
         self.attrs.blink()
     }
 
+    /// Returns whether newly drawn text should be concealed (SGR 8).
+    ///
+    /// ratty-vt addition.
+    #[must_use]
+    pub fn hidden(&self) -> bool {
+        self.attrs.hidden()
+    }
+
+    /// Returns whether newly drawn text should be struck through (SGR 9).
+    ///
+    /// ratty-vt addition.
+    #[must_use]
+    pub fn strikeout(&self) -> bool {
+        self.attrs.strikeout()
+    }
+
+    /// Returns the underline color of newly drawn text (SGR 58);
+    /// `Color::Default` means the foreground color.
+    ///
+    /// ratty-vt addition.
+    #[must_use]
+    pub fn underline_color(&self) -> crate::ratty_vt::Color {
+        self.attrs.underline_color
+    }
+
     pub(crate) fn grid(&self) -> &crate::ratty_vt::grid::Grid {
         if self.mode(MODE_ALTERNATE_SCREEN) {
             &self.alternate_grid
@@ -734,12 +815,14 @@ impl Screen {
     }
 
     fn enter_alternate_grid(&mut self) {
+        self.break_cluster();
         self.grid_mut().set_scrollback(0);
         self.set_mode(MODE_ALTERNATE_SCREEN);
         self.alternate_grid.allocate_rows();
     }
 
     fn exit_alternate_grid(&mut self) {
+        self.break_cluster();
         self.clear_mode(MODE_ALTERNATE_SCREEN);
     }
 
@@ -805,6 +888,9 @@ impl Screen {
         // ratty-vt: a wide glyph cannot be drawn in a grid narrower than
         // itself; upstream underflows below and panics in a one-column grid.
         if width > size.cols {
+            return;
+        }
+        if self.extend_grapheme_cluster(c) {
             return;
         }
 
@@ -970,6 +1056,7 @@ impl Screen {
                 // that self.grid().pos().col has a valid value.
                 .unwrap();
             cell.set(c, attrs);
+            self.last_print = Some(pos);
             // ratty-vt: remember that this row holds a kitty graphics
             // Unicode placeholder so renderers can skip rows without one.
             if c == KITTY_PLACEHOLDER {
@@ -1036,29 +1123,121 @@ impl Screen {
         }
     }
 
+    /// Ends the grapheme cluster being built by `text`: anything that moves
+    /// the cursor or edits the row means the next printed character starts a
+    /// new cell instead of joining the previous one (see
+    /// `extend_grapheme_cluster`).
+    fn break_cluster(&mut self) {
+        self.last_print = None;
+    }
+
+    // ratty-vt: grapheme clustering.
+    //
+    // Applications built on unicode-width lay out one grapheme cluster per
+    // cell and give it the cluster's string width, so `नि`, `❤\u{fe0f}`,
+    // `1\u{fe0f}\u{20e3}`, `🇯🇵` and ZWJ sequences all occupy two columns
+    // that they never write to individually. A terminal that stores a spacing
+    // mark or the second regional indicator as its own cell disagrees about
+    // where the cell boundary is and keeps stale content when the
+    // application later clears only the columns it believes it painted.
+    // Kitty and Ghostty (mode 2027) cluster the same way; this joins `c` to
+    // the cell written just before it whenever the two form one grapheme
+    // cluster, and widens that cell when the cluster's width becomes two.
+    fn extend_grapheme_cluster(&mut self, c: char) -> bool {
+        use unicode_width::UnicodeWidthStr as _;
+
+        let pos = self.grid().pos();
+        let size = self.grid().size();
+        let Some(anchor) = self.last_print else {
+            return false;
+        };
+        if anchor.row != pos.row || pos.col == 0 {
+            return false;
+        }
+        let Some(anchor_cell) = self.grid().drawing_cell(anchor) else {
+            return false;
+        };
+        if !anchor_cell.has_contents() || anchor_cell.is_wide_continuation() {
+            return false;
+        }
+        let anchor_width: u16 = if anchor_cell.is_wide() { 2 } else { 1 };
+        if anchor.col + anchor_width != pos.col {
+            return false;
+        }
+        if !clusters_with(anchor_cell.contents(), c) {
+            return false;
+        }
+
+        let anchor_cell = self
+            .grid_mut()
+            .drawing_cell_mut(anchor)
+            // checked above
+            .unwrap();
+        anchor_cell.append(c);
+        let new_width = anchor_cell.contents().width().clamp(1, 2) as u16;
+        if new_width == 2 && anchor_width == 1 {
+            // Widen: the cell under the cursor becomes the continuation half.
+            if pos.col >= size.cols {
+                // The anchor sits in the last column with nothing to its
+                // right; it stays narrow (the application will be one column
+                // ahead on this row, as on any terminal that cannot widen).
+                return true;
+            }
+            if self
+                .grid()
+                .drawing_cell(pos)
+                .is_some_and(crate::ratty_vt::Cell::is_wide)
+                && pos.col + 1 < size.cols
+            {
+                let orphan = crate::ratty_vt::grid::Pos {
+                    row: pos.row,
+                    col: pos.col + 1,
+                };
+                if let Some(cell) = self.grid_mut().drawing_cell_mut(orphan) {
+                    cell.clear(crate::ratty_vt::attrs::Attrs::default());
+                }
+            }
+            if let Some(next) = self.grid_mut().drawing_cell_mut(pos) {
+                next.clear(crate::ratty_vt::attrs::Attrs::default());
+                next.set_wide_continuation(true);
+            }
+            if let Some(anchor_cell) = self.grid_mut().drawing_cell_mut(anchor) {
+                anchor_cell.set_wide(true);
+            }
+            self.grid_mut().col_inc(1);
+        }
+        true
+    }
+
     // control codes
 
     pub(crate) fn bs(&mut self) {
+        self.break_cluster();
         self.grid_mut().col_dec(1);
     }
 
     pub(crate) fn tab(&mut self) {
+        self.break_cluster();
         self.grid_mut().col_tab();
     }
 
     pub(crate) fn lf(&mut self) {
+        self.break_cluster();
         self.grid_mut().row_inc_scroll(1);
     }
 
     pub(crate) fn vt(&mut self) {
+        self.break_cluster();
         self.lf();
     }
 
     pub(crate) fn ff(&mut self) {
+        self.break_cluster();
         self.lf();
     }
 
     pub(crate) fn cr(&mut self) {
+        self.break_cluster();
         self.grid_mut().col_set(0);
     }
 
@@ -1066,11 +1245,32 @@ impl Screen {
 
     // ESC 7
     pub(crate) fn decsc(&mut self) {
+        self.break_cluster();
         self.save_cursor();
     }
 
     // ESC 8
     pub(crate) fn decrc(&mut self) {
+        self.break_cluster();
+        self.restore_cursor();
+    }
+
+    // CSI s
+    //
+    // ratty-vt: SCOSC / SCORC share DECSC's slot and, like DECSC in Ghostty
+    // and kitty, save and restore the text attributes with the position.
+    // ratatui-image relies on that: it wraps each Kitty placeholder row in
+    // `CSI s` ... `SGR 38;2;id` ... `CSI u` and expects the pen colour back
+    // afterwards, so a position-only restore leaked the placeholder colour
+    // into the text drawn after the image.
+    pub(crate) fn scosc(&mut self) {
+        self.break_cluster();
+        self.save_cursor();
+    }
+
+    // CSI u
+    pub(crate) fn scorc(&mut self) {
+        self.break_cluster();
         self.restore_cursor();
     }
 
@@ -1086,11 +1286,13 @@ impl Screen {
 
     // ESC M
     pub(crate) fn ri(&mut self) {
+        self.break_cluster();
         self.grid_mut().row_dec_scroll(1);
     }
 
     // ESC c
     pub(crate) fn ris(&mut self) {
+        self.break_cluster();
         *self = Self::new(self.grid.size(), self.grid.scrollback_len());
     }
 
@@ -1098,48 +1300,57 @@ impl Screen {
 
     // CSI @
     pub(crate) fn ich(&mut self, count: u16) {
+        self.break_cluster();
         self.grid_mut().insert_cells(count);
     }
 
     // CSI A
     pub(crate) fn cuu(&mut self, offset: u16) {
+        self.break_cluster();
         self.grid_mut().row_dec_clamp(offset);
     }
 
     // CSI B
     pub(crate) fn cud(&mut self, offset: u16) {
+        self.break_cluster();
         self.grid_mut().row_inc_clamp(offset);
     }
 
     // CSI C
     pub(crate) fn cuf(&mut self, offset: u16) {
+        self.break_cluster();
         self.grid_mut().col_inc_clamp(offset);
     }
 
     // CSI D
     pub(crate) fn cub(&mut self, offset: u16) {
+        self.break_cluster();
         self.grid_mut().col_dec(offset);
     }
 
     // CSI E
     pub(crate) fn cnl(&mut self, offset: u16) {
+        self.break_cluster();
         self.grid_mut().col_set(0);
         self.grid_mut().row_inc_clamp(offset);
     }
 
     // CSI F
     pub(crate) fn cpl(&mut self, offset: u16) {
+        self.break_cluster();
         self.grid_mut().col_set(0);
         self.grid_mut().row_dec_clamp(offset);
     }
 
     // CSI G
     pub(crate) fn cha(&mut self, col: u16) {
+        self.break_cluster();
         self.grid_mut().col_set(col - 1);
     }
 
     // CSI H, and CSI f (HVP; ratty-vt)
     pub(crate) fn cup(&mut self, (row, col): (u16, u16)) {
+        self.break_cluster();
         self.grid_mut().set_pos(crate::ratty_vt::grid::Pos {
             row: row - 1,
             col: col - 1,
@@ -1148,6 +1359,7 @@ impl Screen {
 
     // CSI J
     pub(crate) fn ed(&mut self, mode: u16, mut unhandled: impl FnMut(&mut Self)) {
+        self.break_cluster();
         let attrs = self.attrs;
         match mode {
             0 => self.grid_mut().erase_all_forward(attrs),
@@ -1159,11 +1371,13 @@ impl Screen {
 
     // CSI ? J
     pub(crate) fn decsed(&mut self, mode: u16, unhandled: impl FnMut(&mut Self)) {
+        self.break_cluster();
         self.ed(mode, unhandled);
     }
 
     // CSI K
     pub(crate) fn el(&mut self, mode: u16, mut unhandled: impl FnMut(&mut Self)) {
+        self.break_cluster();
         let attrs = self.attrs;
         match mode {
             0 => self.grid_mut().erase_row_forward(attrs),
@@ -1175,42 +1389,50 @@ impl Screen {
 
     // CSI ? K
     pub(crate) fn decsel(&mut self, mode: u16, unhandled: impl FnMut(&mut Self)) {
+        self.break_cluster();
         self.el(mode, unhandled);
     }
 
     // CSI L
     pub(crate) fn il(&mut self, count: u16) {
+        self.break_cluster();
         self.grid_mut().insert_lines(count);
     }
 
     // CSI M
     pub(crate) fn dl(&mut self, count: u16) {
+        self.break_cluster();
         self.grid_mut().delete_lines(count);
     }
 
     // CSI P
     pub(crate) fn dch(&mut self, count: u16) {
+        self.break_cluster();
         self.grid_mut().delete_cells(count);
     }
 
     // CSI S
     pub(crate) fn su(&mut self, count: u16) {
+        self.break_cluster();
         self.grid_mut().scroll_up(count);
     }
 
     // CSI T
     pub(crate) fn sd(&mut self, count: u16) {
+        self.break_cluster();
         self.grid_mut().scroll_down(count);
     }
 
     // CSI X
     pub(crate) fn ech(&mut self, count: u16) {
+        self.break_cluster();
         let attrs = self.attrs;
         self.grid_mut().erase_cells(count, attrs);
     }
 
     // CSI d
     pub(crate) fn vpa(&mut self, row: u16) {
+        self.break_cluster();
         self.grid_mut().row_set(row - 1);
     }
 
@@ -1335,12 +1557,18 @@ impl Screen {
                 [5] => self.attrs.set_blink(crate::ratty_vt::Blink::Slow),
                 [6] => self.attrs.set_blink(crate::ratty_vt::Blink::Rapid),
                 [7] => self.attrs.set_inverse(true),
+                // ratty-vt: hidden and strikeout.
+                [8] => self.attrs.set_hidden(true),
+                [9] => self.attrs.set_strikeout(true),
                 [22] => self.attrs.set_normal_intensity(),
                 [23] => self.attrs.set_italic(false),
                 [24] => self.attrs.set_underline(false),
                 // ratty-vt: blink.
                 [25] => self.attrs.set_blink(crate::ratty_vt::Blink::None),
                 [27] => self.attrs.set_inverse(false),
+                // ratty-vt: hidden and strikeout.
+                [28] => self.attrs.set_hidden(false),
+                [29] => self.attrs.set_strikeout(false),
                 [n] if (30..=37).contains(n) => {
                     self.attrs.fgcolor = crate::ratty_vt::Color::Idx(to_u8!(*n) - 30);
                 }
@@ -1397,6 +1625,33 @@ impl Screen {
                 [49] => {
                     self.attrs.bgcolor = crate::ratty_vt::Color::Default;
                 }
+                // ratty-vt: underline color (SGR 58 / 59), same parameter
+                // shapes as SGR 38 / 48.
+                [58, 2, r, g, b] => {
+                    self.attrs.underline_color =
+                        crate::ratty_vt::Color::Rgb(to_u8!(*r), to_u8!(*g), to_u8!(*b));
+                }
+                [58, 5, i] => {
+                    self.attrs.underline_color = crate::ratty_vt::Color::Idx(to_u8!(*i));
+                }
+                [58] => match next_param!() {
+                    [2] => {
+                        let r = next_param_u8!();
+                        let g = next_param_u8!();
+                        let b = next_param_u8!();
+                        self.attrs.underline_color = crate::ratty_vt::Color::Rgb(r, g, b);
+                    }
+                    [5] => {
+                        self.attrs.underline_color = crate::ratty_vt::Color::Idx(next_param_u8!());
+                    }
+                    _ => {
+                        unhandled(self);
+                        return;
+                    }
+                },
+                [59] => {
+                    self.attrs.underline_color = crate::ratty_vt::Color::Default;
+                }
                 [n] if (90..=97).contains(n) => {
                     self.attrs.fgcolor = crate::ratty_vt::Color::Idx(to_u8!(*n) - 82);
                 }
@@ -1410,6 +1665,7 @@ impl Screen {
 
     // CSI r
     pub(crate) fn decstbm(&mut self, (top, bottom): (u16, u16)) {
+        self.break_cluster();
         self.grid_mut().set_scroll_region(top - 1, bottom - 1);
     }
 
@@ -1543,6 +1799,134 @@ mod ratty_tests {
         assert_eq!(cell(3), Blink::None);
         assert_eq!(cell(4), Blink::None, "SGR 0 resets blink");
         assert_eq!(parser.screen().blink(), Blink::None);
+    }
+
+    #[test]
+    fn grapheme_clusters_share_one_cell_and_take_their_string_width() {
+        // Emoji presentation, keycap, ZWJ sequence, flag: one wide cell each.
+        for (input, cluster) in [
+            ("\u{2764}\u{fe0f}", "\u{2764}\u{fe0f}"),
+            ("1\u{fe0f}\u{20e3}", "1\u{fe0f}\u{20e3}"),
+            ("\u{1f469}\u{200d}\u{1f52c}", "\u{1f469}\u{200d}\u{1f52c}"),
+            ("\u{1f1ef}\u{1f1f5}", "\u{1f1ef}\u{1f1f5}"),
+            (
+                "\u{1f3f3}\u{fe0f}\u{200d}\u{1f308}",
+                "\u{1f3f3}\u{fe0f}\u{200d}\u{1f308}",
+            ),
+        ] {
+            let mut parser = Parser::new(2, 10, 0);
+            parser.process(format!("{input}x").as_bytes());
+            let screen = parser.screen();
+            let cell = screen.cell(0, 0).unwrap();
+            assert_eq!(cell.contents(), cluster, "{input:?}");
+            assert!(cell.is_wide(), "{input:?} must be wide");
+            assert!(screen.cell(0, 1).unwrap().is_wide_continuation());
+            assert_eq!(screen.cell(0, 2).unwrap().contents(), "x", "{input:?}");
+            assert_eq!(screen.cursor_position(), (0, 3));
+        }
+
+        // A spacing vowel sign joins its consonant: unicode-width says the
+        // cluster is two columns wide, so the cell is wide, not two cells.
+        let mut parser = Parser::new(2, 10, 0);
+        parser.process("\u{928}\u{93f}x".as_bytes());
+        let screen = parser.screen();
+        assert_eq!(screen.cell(0, 0).unwrap().contents(), "\u{928}\u{93f}");
+        assert!(screen.cell(0, 0).unwrap().is_wide());
+        assert!(screen.cell(0, 1).unwrap().is_wide_continuation());
+        assert_eq!(screen.cell(0, 2).unwrap().contents(), "x");
+
+        // A non-spacing mark still yields a narrow cell.
+        let mut parser = Parser::new(2, 10, 0);
+        parser.process("e\u{301}x".as_bytes());
+        let screen = parser.screen();
+        assert_eq!(screen.cell(0, 0).unwrap().contents(), "e\u{301}");
+        assert!(!screen.cell(0, 0).unwrap().is_wide());
+        assert_eq!(screen.cell(0, 1).unwrap().contents(), "x");
+    }
+
+    #[test]
+    fn grapheme_clustering_needs_an_adjacent_previous_print() {
+        // A cursor move between the two characters keeps them separate.
+        let mut parser = Parser::new(2, 10, 0);
+        parser.process("\u{928}\x1b[2G\u{93f}".as_bytes());
+        let screen = parser.screen();
+        assert_eq!(screen.cell(0, 0).unwrap().contents(), "\u{928}");
+        assert!(!screen.cell(0, 0).unwrap().is_wide());
+        assert_eq!(screen.cell(0, 1).unwrap().contents(), "\u{93f}");
+
+        // Two unrelated characters never cluster.
+        let mut parser = Parser::new(2, 10, 0);
+        parser.process(b"ab");
+        assert_eq!(parser.screen().cell(0, 1).unwrap().contents(), "b");
+
+        // Widening a cell that sits in the last column is impossible; the
+        // cell stays narrow and nothing panics.
+        let mut parser = Parser::new(2, 3, 0);
+        parser.process("ab\u{2764}\u{fe0f}".as_bytes());
+        let screen = parser.screen();
+        assert_eq!(screen.cell(0, 2).unwrap().contents(), "\u{2764}\u{fe0f}");
+        assert!(!screen.cell(0, 2).unwrap().is_wide());
+    }
+
+    #[test]
+    fn overwriting_a_clustered_wide_cell_clears_its_continuation() {
+        let mut parser = Parser::new(2, 10, 0);
+        parser.process("\u{2764}\u{fe0f}\r  ".as_bytes());
+        let screen = parser.screen();
+        assert_eq!(screen.cell(0, 0).unwrap().contents(), " ");
+        assert!(!screen.cell(0, 1).unwrap().is_wide_continuation());
+        assert_eq!(screen.cell(0, 1).unwrap().contents(), " ");
+    }
+
+    #[test]
+    fn scosc_and_scorc_save_and_restore_the_cursor_position() {
+        let mut parser = Parser::new(5, 20, 0);
+        parser.process(b"\x1b[2;3H\x1b[s\x1b[1mtext\x1b[4;10Hmore\x1b[u");
+        assert_eq!(parser.screen().cursor_position(), (1, 2));
+        // Like DECRC, SCORC restores the attributes saved by SCOSC.
+        assert!(!parser.screen().bold());
+        parser.process(b"X");
+        assert_eq!(parser.screen().cell(1, 2).unwrap().contents(), "X");
+    }
+
+    #[test]
+    fn sgr_hidden_strikeout_and_underline_color_are_stored_on_cells() {
+        let mut parser = Parser::new(2, 12, 0);
+        parser.process(b"a\x1b[8mb\x1b[28m\x1b[9mc\x1b[29m\x1b[58;2;1;2;3md\x1b[58;5;9me\x1b[59mf\x1b[8;9;58:2:4:5:6mg\x1b[mh");
+        use crate::ratty_vt::Color;
+        let cell = |col| parser.screen().cell(0, col).unwrap();
+        assert!(!cell(0).hidden() && !cell(0).strikeout());
+        assert!(cell(1).hidden());
+        assert!(!cell(2).hidden() && cell(2).strikeout());
+        assert!(!cell(3).strikeout());
+        assert_eq!(cell(3).underline_color(), Color::Rgb(1, 2, 3));
+        assert_eq!(cell(4).underline_color(), Color::Idx(9));
+        assert_eq!(cell(5).underline_color(), Color::Default);
+        assert!(cell(6).hidden() && cell(6).strikeout());
+        assert_eq!(cell(6).underline_color(), Color::Rgb(4, 5, 6));
+        assert!(!cell(7).hidden() && !cell(7).strikeout(), "SGR 0 resets");
+        assert_eq!(cell(7).underline_color(), Color::Default);
+        assert!(!parser.screen().hidden());
+    }
+
+    #[test]
+    fn hidden_strikeout_and_underline_color_round_trip_through_contents_formatted() {
+        let mut parser = Parser::new(2, 10, 0);
+        parser.process(b"\x1b[8ma\x1b[28;9mb\x1b[29;58;2;1;2;3mc\x1b[59md");
+        let formatted = parser.screen().contents_formatted();
+        let mut replay = Parser::new(2, 10, 0);
+        replay.process(&formatted);
+        use crate::ratty_vt::Color;
+        let cell = |col| replay.screen().cell(0, col).unwrap();
+        assert!(cell(0).hidden());
+        assert!(!cell(1).hidden() && cell(1).strikeout());
+        assert!(!cell(2).strikeout());
+        assert_eq!(cell(2).underline_color(), Color::Rgb(1, 2, 3));
+        assert_eq!(cell(3).underline_color(), Color::Default);
+        assert!(
+            formatted.windows(4).any(|w| w == b"\x1b[8m"),
+            "{formatted:?}"
+        );
     }
 
     #[test]

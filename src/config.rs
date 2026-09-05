@@ -15,10 +15,6 @@ use crate::paths::expand_path;
 pub const APP_NAME: &str = "ratty";
 /// Local fallback config path.
 pub const CONFIG_PATH: &str = "config/ratty.toml";
-/// Label used for the terminal present texture (sampled by the materials).
-pub const TERMINAL_TEXTURE_LABEL: &str = "ratty.parley_ratatui";
-/// Label used for the terminal render target (Vello's storage texture).
-pub const TERMINAL_RENDER_TEXTURE_LABEL: &str = "ratty.parley_ratatui.render";
 /// Z depth used for the cursor model root.
 pub const CURSOR_DEPTH: f32 = 10.0;
 
@@ -103,6 +99,27 @@ impl AppConfig {
         if let Some(program) = self.shell.program.as_mut() {
             *program = resolve_config_path(config_dir, program);
         }
+        for face in [
+            &mut self.font.regular,
+            &mut self.font.bold,
+            &mut self.font.italic,
+            &mut self.font.bold_italic,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            *face = resolve_relative_to(config_dir, face);
+        }
+    }
+}
+
+/// Resolves `path` against `base` when it is relative, after `~` expansion.
+fn resolve_relative_to(base: &Path, path: &Path) -> PathBuf {
+    let expanded = expand_path(path);
+    if expanded.is_relative() {
+        base.join(expanded)
+    } else {
+        expanded
     }
 }
 
@@ -329,18 +346,36 @@ impl BindingAction {
 pub struct FontConfig {
     /// Font family name.
     pub family: String,
+    /// Optional regular font file. When set, this takes precedence over `family`.
+    pub regular: Option<PathBuf>,
+    /// Optional bold font file used with `regular`.
+    pub bold: Option<PathBuf>,
+    /// Optional italic font file used with `regular`.
+    pub italic: Option<PathBuf>,
+    /// Optional bold-italic font file used with `regular`.
+    pub bold_italic: Option<PathBuf>,
     /// Font style override.
     pub style: FontStyleConfig,
     /// Font size in points (1pt = 4/3 logical pixels).
     pub size: i32,
+    /// Row height as a multiple of the font's natural line box: `1.0` keeps
+    /// the font's own spacing, `0.9` packs rows tighter (useful for tall
+    /// fonts such as Iosevka), `1.2` spaces them out. Below `1.0` the
+    /// outermost ascender and descender pixels are clipped.
+    pub line_height: f32,
 }
 
 impl Default for FontConfig {
     fn default() -> Self {
         Self {
             family: "DejaVu Sans Mono".to_string(),
+            regular: None,
+            bold: None,
+            italic: None,
+            bold_italic: None,
             style: FontStyleConfig::Regular,
             size: 18,
+            line_height: 1.0,
         }
     }
 }
@@ -613,5 +648,34 @@ action = "Toggle3DMode"
             .collect::<Vec<_>>();
         slots.sort_unstable();
         assert_eq!(slots, (0..10).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn resolves_explicit_font_faces_relative_to_the_config() {
+        let mut config: AppConfig = toml::from_str(
+            r#"
+[font]
+regular = "Regular.ttf"
+bold = "fonts/Bold.ttf"
+italic = "/absolute/Italic.ttf"
+"#,
+        )
+        .expect("font config");
+
+        config.resolve_relative_paths(Path::new("/config/ratty.toml"));
+
+        assert_eq!(
+            config.font.regular.as_deref(),
+            Some(Path::new("/config/Regular.ttf"))
+        );
+        assert_eq!(
+            config.font.bold.as_deref(),
+            Some(Path::new("/config/fonts/Bold.ttf"))
+        );
+        assert_eq!(
+            config.font.italic.as_deref(),
+            Some(Path::new("/absolute/Italic.ttf"))
+        );
+        assert_eq!(config.font.bold_italic, None);
     }
 }

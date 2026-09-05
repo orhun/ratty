@@ -5,7 +5,6 @@ use bevy::ecs::world::FromWorld;
 use bevy::input::ButtonState;
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
-use bevy::window::{PrimaryWindow, Window};
 
 use arboard::Clipboard;
 
@@ -18,10 +17,9 @@ use crate::mouse::{TerminalSelection, encode_mouse_wheel};
 use crate::ratty_vt::MouseProtocolMode;
 use crate::runtime::TerminalRuntime;
 use crate::scene::{
-    MobiusEnterZoomFloor, MobiusTransition, TerminalPlaneBackLayoutQuery, TerminalPlaneLayoutQuery,
-    TerminalPlaneWarp, TerminalPresentationMode, TerminalViewport, sync_terminal_layout,
+    MobiusEnterZoomFloor, MobiusTransition, TerminalPlaneWarp, TerminalPresentationMode,
 };
-use crate::terminal::{TerminalRedrawState, TerminalSurface, render_scale_for_window};
+use crate::terminal::{TerminalRedrawState, TerminalSurface};
 
 /// Clipboard bridge for terminal copy and paste.
 pub struct TerminalClipboard {
@@ -381,10 +379,6 @@ pub struct KeyboardSystemParams<'w, 's> {
     clipboard: NonSendMut<'w, TerminalClipboard>,
     runtime: ResMut<'w, TerminalRuntime>,
     terminal: ResMut<'w, TerminalSurface>,
-    primary_window: Query<'w, 's, &'static Window, With<PrimaryWindow>>,
-    viewport: ResMut<'w, TerminalViewport>,
-    plane_query: TerminalPlaneLayoutQuery<'w, 's>,
-    plane_back_query: TerminalPlaneBackLayoutQuery<'w, 's>,
     bindings: Res<'w, TerminalKeyBindings>,
     redraw: ResMut<'w, TerminalRedrawState>,
     _marker: std::marker::PhantomData<&'s ()>,
@@ -556,26 +550,10 @@ pub fn handle_keyboard_input(
                         _ => false,
                     };
                     if resized {
-                        let Ok(window) = params.primary_window.single() else {
-                            continue;
-                        };
-                        let layout = params.terminal.resize_to_fit(
-                            window.resolution.size().max(Vec2::ONE),
-                            render_scale_for_window(window),
-                        );
-                        let pty_pixels = layout.pty_pixels();
-                        params.runtime.resize(
-                            layout.cols,
-                            layout.rows,
-                            pty_pixels.x as u16,
-                            pty_pixels.y as u16,
-                        );
-                        sync_terminal_layout(
-                            layout,
-                            &mut params.viewport,
-                            &mut params.plane_query,
-                            &mut params.plane_back_query,
-                        );
+                        // The renderer remeasures the cell from the new font
+                        // size and reports it through `TerminalRemeasured`;
+                        // that sync owns the PTY reflow, so zoom never
+                        // resizes from an estimate first.
                         params.redraw.request();
                     }
                     continue;

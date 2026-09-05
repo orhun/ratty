@@ -13,6 +13,7 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, Face, TextureDimension, TextureFormat};
 use bevy::window::PrimaryWindow;
+use bevy_terminal_ratatui::TerminalRenderer;
 
 use bevy::camera::visibility::NoFrustumCulling;
 
@@ -20,10 +21,10 @@ use crate::camera::{
     MIN_ORTHOGRAPHIC_SCALE, TerminalCameraInteraction, TerminalCameraPreset, TerminalCameraSlots,
 };
 use crate::config::AppConfig;
-use crate::direct_render::{new_terminal_image, new_terminal_render_image};
 use crate::present::{TerminalPresentMaterial, fullscreen_quad};
-use crate::runtime::TerminalRuntime;
-use crate::terminal::{TerminalLayout, TerminalSurface, render_scale_for_window};
+use crate::terminal::{
+    TerminalLayout, TerminalRenderTarget, TerminalSurface, render_scale_for_window,
+};
 
 const TERMINAL_PERSPECTIVE_NEAR: f32 = 0.1;
 const TERMINAL_PERSPECTIVE_FAR: f32 = 10_000.0;
@@ -208,7 +209,6 @@ pub(crate) struct SetupSceneParams<'w, 's> {
     images: ResMut<'w, Assets<Image>>,
     present_materials: ResMut<'w, Assets<TerminalPresentMaterial>>,
     primary_window: Query<'w, 's, &'static Window, With<PrimaryWindow>>,
-    runtime: ResMut<'w, TerminalRuntime>,
     terminal: ResMut<'w, TerminalSurface>,
 }
 
@@ -225,21 +225,17 @@ pub(crate) fn setup_scene(mut params: SetupSceneParams) {
         images,
         present_materials,
         primary_window,
-        runtime,
         terminal,
     } = &mut params;
     let terminal_opacity = app_config.window.opacity.clamp(0.0, 1.0);
     let window = primary_window.single().expect("primary window");
-    let window_size = window.resolution.size().max(Vec2::ONE);
     let render_scale = render_scale_for_window(window);
-    let layout = terminal.resize_to_fit(window_size, render_scale);
-    let pty_pixels = layout.pty_pixels();
-    runtime.resize(
-        layout.cols,
-        layout.rows,
-        pty_pixels.x as u16,
-        pty_pixels.y as u16,
-    );
+    // Seed the renderer with the window's actual framebuffer scale, but keep
+    // the configured PTY grid until the renderer reports authoritative font
+    // metrics. Resizing before measurement causes a visible double reflow and
+    // can start applications with the wrong geometry.
+    terminal.set_render_scale(render_scale);
+    let layout = terminal.layout();
 
     commands.spawn((
         Camera2d,
@@ -283,20 +279,6 @@ pub(crate) fn setup_scene(mut params: SetupSceneParams) {
     ));
 
     let terminal_alpha = (terminal_opacity * 255.0).round() as u8;
-    let render_image_handle = images.add(new_terminal_render_image(
-        layout.texture_size.x,
-        layout.texture_size.y,
-        crate::config::TERMINAL_RENDER_TEXTURE_LABEL,
-    ));
-    terminal.render_image_handle = Some(render_image_handle);
-
-    let image_handle = images.add(new_terminal_image(
-        layout.texture_size.x,
-        layout.texture_size.y,
-        crate::config::TERMINAL_TEXTURE_LABEL,
-    ));
-    terminal.image_handle = Some(image_handle.clone());
-
     let [r, g, b] = app_config.theme.background;
     let back_image = create_terminal_image(
         layout.texture_size.x,
@@ -324,8 +306,10 @@ pub(crate) fn setup_scene(mut params: SetupSceneParams) {
     commands.spawn((
         TerminalSprite,
         Mesh2d(meshes.add(fullscreen_quad())),
+        // The renderer-owned texture handle is bound once it exists
+        // (`systems::sync_terminal_materials`).
         MeshMaterial2d(present_materials.add(TerminalPresentMaterial {
-            texture: image_handle,
+            texture: Handle::default(),
         })),
         Transform::default(),
         Visibility::Visible,
@@ -345,7 +329,7 @@ pub(crate) fn setup_scene(mut params: SetupSceneParams) {
         Mesh3d(front_mesh),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgba(1.0, 1.0, 1.0, terminal_opacity),
-            base_color_texture: terminal.image_handle.clone(),
+            base_color_texture: None,
             alpha_mode: AlphaMode::Blend,
             unlit: true,
             ..default()
@@ -407,6 +391,24 @@ pub(crate) fn setup_scene(mut params: SetupSceneParams) {
         loaded: false,
         first_frame_uploaded: false,
     });
+}
+
+/// Creates the renderer entity after Bevy has registered font assets in its
+/// font collection, so a configured family or explicit face is discoverable.
+pub(crate) fn spawn_terminal_renderer(
+    mut commands: Commands,
+    terminal: Res<TerminalSurface>,
+    renderer: Query<(), With<TerminalRenderTarget>>,
+) {
+    if !renderer.is_empty() {
+        return;
+    }
+
+    commands.spawn((
+        TerminalRenderTarget,
+        TerminalRenderer::new(terminal.tui.surface()),
+        terminal.render_config().clone(),
+    ));
 }
 
 /// Synchronizes Bevy presentation entities to the terminal texture layout.

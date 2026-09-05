@@ -1,24 +1,25 @@
 //! Terminal surface rendering and Ratatui integration.
 
+use std::fs;
 use std::num::NonZeroU16;
+use std::path::Path;
 
+use anyhow::Context;
 use bevy::prelude::*;
-use parley_ratatui::ratatui::Terminal;
-use parley_ratatui::ratatui::buffer::{Buffer, CellDiffOption};
-use parley_ratatui::ratatui::layout::Rect;
-use parley_ratatui::ratatui::style::{Color as TuiColor, Modifier, Style};
-use parley_ratatui::ratatui::widgets::Widget;
-use parley_ratatui::{
-    CellQuantization, FontOptions, ParleyBackend, TerminalRenderer, TexturePresentation,
+use bevy_terminal_ratatui::RatatuiTerminal;
+use bevy_terminal_ratatui::prelude::{
+    BlinkConfig, CellSizing, CursorConfig, CursorStyle, FontFaces, FontSizing, FontSource,
+    RasterConfig, TerminalRenderConfig, TerminalRenderScale, TerminalTexture, TerminalTheme,
+    font_family,
 };
+use ratatui::buffer::{Buffer, CellDiffOption};
+use ratatui::layout::Rect;
+use ratatui::style::{Color as TuiColor, Modifier, Style};
+use ratatui::widgets::Widget;
 
 use crate::config::{AppConfig, FontConfig, FontStyleConfig, ThemeConfig};
-use crate::direct_render::{
-    DirectTerminalSceneExchange, TerminalImages, resize_terminal_image,
-    update_direct_terminal_frame,
-};
 use crate::mouse::TerminalSelection;
-use crate::ratty_vt::{Blink, Cell as VtCell, Color as VtColor, Screen};
+use crate::ratty_vt::{Blink, Cell as VtCell, Color as VtColor, KITTY_PLACEHOLDER, Screen};
 
 /// Terminal grid and presentation dimensions.
 #[derive(Clone, Copy, Debug)]
@@ -31,8 +32,6 @@ pub struct TerminalLayout {
     pub texture_size: UVec2,
     /// Logical presentation size in Bevy world units.
     pub logical_size: Vec2,
-    /// Physical render scale used for the terminal texture.
-    pub render_scale: f32,
 }
 
 impl TerminalLayout {
@@ -42,7 +41,6 @@ impl TerminalLayout {
             rows,
             texture_size,
             logical_size: texture_logical_size(texture_size, render_scale),
-            render_scale,
         }
     }
 
@@ -50,6 +48,103 @@ impl TerminalLayout {
     pub fn pty_pixels(self) -> UVec2 {
         self.texture_size.min(UVec2::splat(u16::MAX as u32))
     }
+}
+
+/// Marks the Bevy entity that renders the application's terminal surface.
+#[derive(Component)]
+pub(crate) struct TerminalRenderTarget;
+
+/// Font faces resolved from the configured system family or explicit files.
+#[derive(Resource, Clone)]
+pub struct ConfiguredFontFaces {
+    pub(crate) faces: FontFaces,
+    /// The system family `faces` names (`None` for explicit font files).
+    /// Retained so the availability check validates the family actually
+    /// pushed to the renderer, which an embedder may build from a different
+    /// `FontConfig` than the inserted `AppConfig`.
+    pub(crate) system_family: Option<String>,
+}
+
+/// Loads explicit font files into Bevy, or retains the configured system family.
+///
+/// # Errors
+///
+/// Returns an error when an explicit font file cannot be read or is not a
+/// font, or when style faces are configured without `font.regular`.
+pub fn load_configured_font_faces(
+    app: &mut App,
+    font: &FontConfig,
+) -> anyhow::Result<ConfiguredFontFaces> {
+    let explicit = [
+        font.regular.as_deref(),
+        font.bold.as_deref(),
+        font.italic.as_deref(),
+        font.bold_italic.as_deref(),
+    ];
+    if explicit.iter().all(Option::is_none) {
+        return Ok(ConfiguredFontFaces {
+            faces: FontFaces::regular(font_family(&font.family)),
+            system_family: Some(font.family.clone()),
+        });
+    }
+
+    let regular = font
+        .regular
+        .as_deref()
+        .context("font.regular is required when explicit font files are configured")?;
+    let regular = read_font_face(regular)?;
+    let bold = font.bold.as_deref().map(read_font_face).transpose()?;
+    let italic = font.italic.as_deref().map(read_font_face).transpose()?;
+    let bold_italic = font
+        .bold_italic
+        .as_deref()
+        .map(read_font_face)
+        .transpose()?;
+
+    let mut fonts = app.world_mut().resource_mut::<Assets<Font>>();
+    let regular = fonts.add(regular);
+    let bold = bold.map(|font| fonts.add(font));
+    let italic = italic.map(|font| fonts.add(font));
+    let bold_italic = bold_italic.map(|font| fonts.add(font));
+
+    Ok(ConfiguredFontFaces {
+        faces: FontFaces {
+            regular: FontSource::Handle(regular),
+            bold: bold.map(FontSource::Handle),
+            italic: italic.map(FontSource::Handle),
+            bold_italic: bold_italic.map(FontSource::Handle),
+            synthesize: true,
+        },
+        system_family: None,
+    })
+}
+
+fn read_font_face(path: &Path) -> anyhow::Result<Font> {
+    let bytes =
+        fs::read(path).with_context(|| format!("failed to read font face {}", path.display()))?;
+    validate_font_face(path, &bytes)?;
+    Ok(Font::from_bytes(bytes))
+}
+
+/// Rejects files that are not an OpenType/TrueType font before handing them to
+/// Bevy, whose font registration silently ignores unparsable data and would
+/// otherwise leave the terminal on the generic fallback with no explanation.
+fn validate_font_face(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    const SFNT_TAGS: [[u8; 4]; 4] = [
+        [0x00, 0x01, 0x00, 0x00], // TrueType outlines
+        *b"OTTO",                 // CFF outlines
+        *b"true",                 // Apple TrueType
+        *b"ttcf",                 // TrueType collection
+    ];
+    let is_font = bytes
+        .get(..4)
+        .is_some_and(|magic| SFNT_TAGS.iter().any(|tag| tag == magic));
+    anyhow::ensure!(
+        is_font,
+        "font face {} is not a TrueType or OpenType font file",
+        path.display()
+    );
+    Ok(())
 }
 
 /// Terminal redraw flag.
@@ -80,12 +175,10 @@ impl TerminalRedrawState {
 #[derive(Resource)]
 pub struct TerminalSurface {
     /// Ratatui terminal backend.
-    pub tui: Terminal<ParleyBackend>,
-    /// Front texture image handle (sampled by the plane material and sprite).
+    pub tui: RatatuiTerminal,
+    /// Front texture image handle (the renderer-owned terminal texture,
+    /// sampled by the plane material and the 2D present quad).
     pub image_handle: Option<Handle<Image>>,
-    /// Vello render-target handle. Vello rasterizes into this storage texture
-    /// and it is copied into [`Self::image_handle`] each frame.
-    pub render_image_handle: Option<Handle<Image>>,
     /// Back texture image handle.
     pub back_image_handle: Option<Handle<Image>>,
     /// Terminal column count.
@@ -93,11 +186,11 @@ pub struct TerminalSurface {
     /// Terminal row count.
     pub rows: u16,
     cursor_model_visible: bool,
-    window_opacity: f32,
-    font: FontConfig,
-    theme: ThemeConfig,
+    font_size: i32,
+    render_config: TerminalRenderConfig,
     render_scale: f32,
-    renderer: TerminalRenderer,
+    cell_size: Vec2,
+    rendered_texture_size: Option<UVec2>,
 }
 
 impl TerminalSurface {
@@ -109,18 +202,17 @@ impl TerminalSurface {
     pub fn new(config: &AppConfig) -> anyhow::Result<Self> {
         let cols = config.terminal.default_cols;
         let rows = config.terminal.default_rows;
-        let backend = ParleyBackend::new(cols, rows);
-        let mut tui = Terminal::new(backend)?;
-        let _ = tui.clear();
+        let (mut tui, _) = RatatuiTerminal::new(cols, rows);
+        let Ok(()) = tui.clear();
         if config.cursor.model.visible {
-            tui.hide_cursor()?;
+            let Ok(()) = tui.hide_cursor();
         } else {
-            tui.show_cursor()?;
+            let Ok(()) = tui.show_cursor();
         }
         // The real scale arrives with the first `resize_to_fit` once the
         // window exists; an explicit override seeds it early.
         let render_scale = config.window.scale_factor.unwrap_or(1.0).max(1.0);
-        let renderer = build_terminal_renderer(
+        let render_config = build_terminal_render_config(
             &config.font,
             &config.theme,
             config.window.opacity,
@@ -130,45 +222,48 @@ impl TerminalSurface {
         Ok(Self {
             tui,
             image_handle: None,
-            render_image_handle: None,
             back_image_handle: None,
             cols,
             rows,
             cursor_model_visible: config.cursor.model.visible,
-            window_opacity: config.window.opacity.clamp(0.0, 1.0),
-            font: config.font.clone(),
-            theme: config.theme.clone(),
+            font_size: config.font.size,
+            render_config,
             render_scale,
-            renderer,
+            // No geometry is inferred before the renderer measures the loaded font.
+            cell_size: Vec2::ONE,
+            rendered_texture_size: None,
         })
     }
 
     /// Adjusts the font size.
+    ///
+    /// The renderer remeasures the cell from the new size and reports it
+    /// through [`TerminalTexture`]; the PTY reflow follows that report.
     pub fn adjust_font_size(&mut self, delta: i32) -> bool {
-        let new_size = self.font.size + delta;
-        if new_size == self.font.size {
+        let new_size = self.font_size.saturating_add(delta).max(1);
+        if new_size == self.font_size {
             return false;
         }
 
-        self.font.size = new_size;
-        self.rebuild_renderer();
+        self.render_config.font_size = FontSizing::Px(points_to_logical_pixels(new_size));
+        self.font_size = new_size;
         true
     }
 
     /// Returns the current font size.
     pub fn font_size(&self) -> i32 {
-        self.font.size
+        self.font_size
     }
 
-    /// Updates the physical render scale.
-    fn set_render_scale(&mut self, render_scale: f32) -> bool {
+    /// Updates the physical render scale; returns whether it changed.
+    pub(crate) fn set_render_scale(&mut self, render_scale: f32) -> bool {
         let render_scale = render_scale.max(1.0);
         if (render_scale - self.render_scale).abs() < f32::EPSILON {
             return false;
         }
 
         self.render_scale = render_scale;
-        self.rebuild_renderer();
+        self.render_config.raster.scale = TerminalRenderScale::Fixed(render_scale);
         true
     }
 
@@ -176,15 +271,11 @@ impl TerminalSurface {
     pub fn resize_to_fit(&mut self, logical_size: Vec2, render_scale: f32) -> TerminalLayout {
         self.set_render_scale(render_scale);
 
-        let metrics = self.renderer.logical_metrics(self.render_scale);
-        let logical_size = logical_size.max(Vec2::ONE);
-        let cols = (logical_size.x / metrics.cell_width)
-            .floor()
-            .clamp(1.0, u16::MAX as f32) as u16;
-        let rows = (logical_size.y / metrics.cell_height)
-            .floor()
-            .clamp(1.0, u16::MAX as f32) as u16;
-
+        // The renderer sizes its texture with the same exported helper, so
+        // the PTY grid and the rendered grid cannot disagree by a cell.
+        let grid =
+            bevy_terminal_ratatui::render::grid_for(logical_size.max(Vec2::ONE), self.cell_size);
+        let (cols, rows) = (grid.width, grid.height);
         if cols != self.cols || rows != self.rows {
             self.resize(cols, rows);
         }
@@ -198,33 +289,39 @@ impl TerminalSurface {
             return;
         }
 
-        self.tui.backend_mut().resize(cols, rows);
-        let _ = self.tui.resize(Rect::new(0, 0, cols, rows));
+        self.tui.resize_grid(cols, rows);
         if self.cursor_model_visible {
-            let _ = self.tui.hide_cursor();
+            let Ok(()) = self.tui.hide_cursor();
         } else {
-            let _ = self.tui.show_cursor();
+            let Ok(()) = self.tui.show_cursor();
         }
         self.cols = cols;
         self.rows = rows;
     }
 
     /// Returns the rendered cell size in logical pixels.
+    ///
+    /// Always at least 1x1: every writer of `cell_size` (the constructor and
+    /// `update_render_output`) floors it, so consumers need no re-clamp.
     pub fn char_dimensions(&self) -> Vec2 {
-        let metrics = self.renderer.logical_metrics(self.render_scale);
-        Vec2::new(metrics.cell_width.max(1.0), metrics.cell_height.max(1.0))
+        self.cell_size
+    }
+
+    /// Whether the renderer has supplied authoritative font and cell metrics.
+    pub fn is_measured(&self) -> bool {
+        self.rendered_texture_size.is_some()
     }
 
     /// Returns the terminal pixmap dimensions in pixels.
     pub fn pixmap_dimensions(&self) -> UVec2 {
-        let (width, height) = self
-            .renderer
-            .texture_size_for_buffer(self.tui.backend().buffer());
-        UVec2::new(width, height)
+        (Vec2::new(self.cols as f32, self.rows as f32) * self.cell_size * self.render_scale)
+            .round()
+            .max(Vec2::ONE)
+            .as_uvec2()
     }
 
     /// Returns the current terminal layout.
-    fn layout(&self) -> TerminalLayout {
+    pub(crate) fn layout(&self) -> TerminalLayout {
         TerminalLayout::new(
             self.cols,
             self.rows,
@@ -233,137 +330,113 @@ impl TerminalSurface {
         )
     }
 
-    /// Synchronizes the rendered terminal image.
+    /// Returns the render configuration derived from Ratty's settings.
     ///
-    /// # Errors
-    ///
-    /// Returns an error if the offscreen renderer cannot be initialized or rendered.
-    pub(crate) fn sync_image(
-        &mut self,
-        images: &mut Assets<Image>,
-        exchange: &DirectTerminalSceneExchange,
-        elapsed_secs: f32,
-    ) -> anyhow::Result<()> {
-        let (Some(render_handle), Some(present_handle)) =
-            (self.render_image_handle.clone(), self.image_handle.clone())
-        else {
-            return Ok(());
-        };
-        let (width, height) = self
-            .renderer
-            .texture_size_for_buffer(self.tui.backend().buffer());
-        // The render and present textures are kept the same size so the copy is
-        // a plain texel copy. `get_mut` marks the asset modified, which makes
-        // Bevy re-extract and re-upload the CPU-side buffer; only take it when
-        // the size changes.
-        for handle in [&render_handle, &present_handle] {
-            let Some(image) = images.get(handle) else {
-                continue;
-            };
-            let size = image.texture_descriptor.size;
-            if (size.width != width || size.height != height)
-                && let Some(mut image) = images.get_mut(handle)
-            {
-                resize_terminal_image(&mut image, width, height);
-            }
-        }
-
-        let buffer = self.tui.backend().buffer();
-        let cursor = Some(self.tui.backend().cursor_position());
-        let cursor_visible = self.tui.backend().cursor_visible();
-        update_direct_terminal_frame(
-            exchange,
-            TerminalImages {
-                render: render_handle,
-                present: present_handle,
-            },
-            &mut self.renderer,
-            buffer,
-            cursor,
-            cursor_visible,
-            elapsed_secs,
-        );
-
-        Ok(())
+    /// This is the template pushed to the renderer entity; the font faces may
+    /// be swapped for explicit files or a fallback family before the push.
+    pub const fn render_config(&self) -> &TerminalRenderConfig {
+        &self.render_config
     }
 
-    fn rebuild_renderer(&mut self) {
-        self.renderer = build_terminal_renderer(
-            &self.font,
-            &self.theme,
-            self.window_opacity,
-            self.render_scale,
-        );
+    /// Adopts the metrics and stable image handle produced by the Bevy
+    /// renderer, comparing first and writing only on change; returns whether
+    /// anything changed.
+    pub fn update_render_output(&mut self, texture: &TerminalTexture) -> bool {
+        let cell_size = texture.cell_size.max(Vec2::ONE);
+        let render_scale = texture.raster_scale.max(1.0);
+        let changed = self.image_handle.as_ref() != Some(&texture.image)
+            || self.rendered_texture_size != Some(texture.size)
+            || self.cell_size != cell_size
+            || self.render_scale != render_scale;
+        if changed {
+            self.image_handle = Some(texture.image.clone());
+            self.rendered_texture_size = Some(texture.size);
+            self.cell_size = cell_size;
+            self.render_scale = render_scale;
+        }
+        changed
     }
 }
 
 /// Computes the physical render scale for a Bevy window.
+///
+/// Delegates to the renderer's exported helper so the scale the PTY layout
+/// uses is the exact scale the renderer rasterizes with. It derives from the
+/// window's actual framebuffer ratio rather than the reported scale factor,
+/// which keeps mixed-DPI setups from over-sizing the texture.
 pub fn render_scale_for_window(window: &Window) -> f32 {
-    // The presenting window's *actual* framebuffer ratio (physical / logical), so the
-    // terminal texture is rasterized at exactly the framebuffer resolution and can be
-    // presented 1:1 with physical pixels. Deriving it from the real physical size —
-    // rather than the reported scale factor — keeps it correct when they disagree.
-    //
-    // The previous version took the max with the backend's base scale factor; on a
-    // mixed-DPI multi-monitor setup that leaked a higher-DPI monitor's scale, over-sizing
-    // the texture so it had to be resampled onto the low-DPI window.
-    let logical = window.resolution.size().max(Vec2::ONE);
-    let physical = window.resolution.physical_size().as_vec2();
-    (physical.x / logical.x)
-        .min(physical.y / logical.y)
-        .max(1.0)
+    bevy_terminal_ratatui::render::raster_scale_for_window(window)
 }
 
 /// Returns the logical size for a physical terminal texture.
 pub fn texture_logical_size(texture_size: UVec2, render_scale: f32) -> Vec2 {
-    let [width, height] =
-        TexturePresentation::new([texture_size.x, texture_size.y], render_scale).logical_size();
-    Vec2::new(width, height)
+    texture_size.as_vec2() / render_scale.max(1.0)
 }
 
-fn build_terminal_renderer(
+fn build_terminal_render_config(
     font: &FontConfig,
     theme_config: &ThemeConfig,
     window_opacity: f32,
     render_scale: f32,
-) -> TerminalRenderer {
-    let palette = theme_config
-        .palette()
-        .map(|[r, g, b]| parley_ratatui::Rgba::rgb(r, g, b));
-    let theme = parley_ratatui::Theme {
-        foreground: parley_ratatui::Rgba::rgb(
-            theme_config.foreground[0],
-            theme_config.foreground[1],
-            theme_config.foreground[2],
-        ),
-        background: parley_ratatui::Rgba::rgba(
-            theme_config.background[0],
-            theme_config.background[1],
-            theme_config.background[2],
+) -> TerminalRenderConfig {
+    let [fg_r, fg_g, fg_b] = theme_config.foreground;
+    let [bg_r, bg_g, bg_b] = theme_config.background;
+    let [cursor_r, cursor_g, cursor_b] = theme_config.cursor;
+    let theme = TerminalTheme {
+        foreground: Color::srgb_u8(fg_r, fg_g, fg_b),
+        background: Color::srgba_u8(
+            bg_r,
+            bg_g,
+            bg_b,
             (window_opacity.clamp(0.0, 1.0) * 255.0).round() as u8,
         ),
-        cursor: parley_ratatui::Rgba::rgb(
-            theme_config.cursor[0],
-            theme_config.cursor[1],
-            theme_config.cursor[2],
-        ),
-        palette,
+        ansi: theme_config
+            .palette()
+            .map(|[r, g, b]| Color::srgb_u8(r, g, b)),
     };
-    // Config font sizes are points; Parley takes pixels (1pt = 4/3px at 96dpi).
-    const PT_TO_PX: f32 = 96.0 / 72.0;
-    let font_options = FontOptions::default()
-        .with_family(font.family.clone())
-        // Fractional cells keep font-size zoom proportional on both axes even
-        // when a single step moves the glyph advance by less than one pixel.
-        .with_cell_quantization(CellQuantization::Fractional);
-    TerminalRenderer::new_scaled(
-        FontOptions {
-            size: font.size as f32 * PT_TO_PX,
-            ..font_options
+
+    TerminalRenderConfig {
+        // Cell width and height come from the loaded face's measured advance
+        // and line box; Ratty supplies no independent geometry estimate, only
+        // the user's line-height multiplier.
+        cell_size: CellSizing::FromFont {
+            line_height: line_height_multiplier(font.line_height),
         },
+        font: FontFaces::regular(font_family(&font.family)),
+        font_size: FontSizing::Px(points_to_logical_pixels(font.size)),
         theme,
-        render_scale,
-    )
+        cursor: CursorConfig {
+            style: CursorStyle::Block,
+            color: Color::srgb_u8(cursor_r, cursor_g, cursor_b),
+            blink_hz: None,
+        },
+        blink: BlinkConfig {
+            slow_hz: Some(1.0),
+            rapid_hz: Some(2.0),
+        },
+        raster: RasterConfig {
+            scale: TerminalRenderScale::Fixed(render_scale.max(1.0)),
+            ..default()
+        },
+    }
+}
+
+/// Clamps the configured line height to a sane multiplier; non-finite or
+/// non-positive values fall back to the font's natural row.
+fn line_height_multiplier(line_height: f32) -> f32 {
+    if line_height.is_finite() && line_height > 0.0 {
+        line_height.clamp(0.5, 3.0)
+    } else {
+        1.0
+    }
+}
+
+fn points_to_logical_pixels(points: i32) -> f32 {
+    // A typographic point is 1/72 inch and a logical (CSS) pixel is 1/96
+    // inch, so this converts units only; it estimates nothing about the font.
+    const POINTS_PER_INCH: f32 = 72.0;
+    const LOGICAL_PIXELS_PER_INCH: f32 = 96.0;
+    (points as f32 * LOGICAL_PIXELS_PER_INCH / POINTS_PER_INCH).max(1.0)
 }
 
 /// Ratatui widget backed by the terminal screen.
@@ -400,18 +473,13 @@ impl Widget for TerminalWidget<'_> {
                 };
                 let cell = &mut buf[(area.x + col, area.y + row)];
 
-                // Ratatui normally skips the trailing buffer cell when diffing
-                // a width-2 symbol. That is correct for a real terminal, where
-                // printing the glyph updates both columns, but ParleyBackend is
-                // an in-memory cell buffer: skipping the update leaves whatever
-                // symbol occupied the continuation cell in an earlier frame.
-                // Keep the owner visually wide for Parley while forcing Ratatui
-                // to diff it as one cell, which lets its continuation cell
-                // participate in the normal diff instead of being skipped.
-                //
+                // Ratatui skips a wide glyph's trailing cell when diffing and
+                // the Bevy backend synthesizes that continuation cell from the
+                // anchor, so the anchor branch below owns the glyph's style.
                 // The engine stores the continuation half with default
-                // attributes, so it borrows the owner's style: a background
-                // must cover both halves of the glyph.
+                // attributes; when it does reach the diff (behind a narrow
+                // predecessor after an edit) it borrows the owner's style so a
+                // background covers both halves of the glyph.
                 if vt_cell.is_wide_continuation() {
                     let owner = col
                         .checked_sub(1)
@@ -422,24 +490,43 @@ impl Widget for TerminalWidget<'_> {
                     if selection.is_some_and(|bounds| bounds.contains(row, col)) {
                         style = style.add_modifier(Modifier::REVERSED);
                     }
-                    cell.set_symbol(" ").set_style(style);
+                    cell.set_symbol(" ")
+                        .set_style(style)
+                        .set_diff_option(forced_width(1));
                     continue;
                 }
 
-                let symbol = vt_cell.contents();
+                // Kitty Unicode placeholders (U+10EEEE plus row/column
+                // diacritics) only mark where an image goes; the image is
+                // drawn as a separate scene object, so the cell must stay a
+                // blank instead of rendering the placeholder as a glyph.
+                let symbol = if vt_cell.contents().starts_with(KITTY_PLACEHOLDER) {
+                    " "
+                } else {
+                    vt_cell.contents()
+                };
                 let mut style = cell_style(vt_cell, &theme_palette, theme_fg, self.font_style);
-                if selection.is_some_and(|bounds| bounds.contains(row, col)) {
+                let is_wide = vt_cell.is_wide();
+                // A wide glyph renders as one unit: a selection touching
+                // either of its columns highlights the whole glyph, since the
+                // trailing continuation cell cannot carry its own style.
+                if selection.is_some_and(|bounds| {
+                    bounds.contains(row, col)
+                        || (is_wide && col + 1 < cols && bounds.contains(row, col + 1))
+                }) {
                     style = style.add_modifier(Modifier::REVERSED);
                 }
 
                 cell.set_symbol(if symbol.is_empty() { " " } else { symbol })
-                    .set_style(style);
-                if vt_cell.is_wide() {
-                    cell.set_diff_option(CellDiffOption::ForcedWidth(NonZeroU16::MIN));
-                }
+                    .set_style(style)
+                    .set_diff_option(forced_width(if is_wide { 2 } else { 1 }));
             }
         }
     }
+}
+
+fn forced_width(width: u16) -> CellDiffOption {
+    CellDiffOption::ForcedWidth(NonZeroU16::new(width).unwrap_or(NonZeroU16::MIN))
 }
 
 fn cell_style(
@@ -452,6 +539,9 @@ fn cell_style(
         Style::default().fg(cell_color_to_tui(cell.fgcolor(), theme_palette).unwrap_or(theme_fg));
     if let Some(bg) = cell_color_to_tui(cell.bgcolor(), theme_palette) {
         style = style.bg(bg);
+    }
+    if let Some(underline) = cell_color_to_tui(cell.underline_color(), theme_palette) {
+        style = style.underline_color(underline);
     }
 
     let mut modifiers = match font_style {
@@ -474,6 +564,12 @@ fn cell_style(
     }
     if cell.inverse() {
         modifiers |= Modifier::REVERSED;
+    }
+    if cell.hidden() {
+        modifiers |= Modifier::HIDDEN;
+    }
+    if cell.strikeout() {
+        modifiers |= Modifier::CROSSED_OUT;
     }
     match cell.blink() {
         Blink::None => {}
@@ -514,7 +610,8 @@ fn ansi_index_to_tui(index: u8, theme_palette: &[TuiColor; 16]) -> TuiColor {
 mod tests {
     use super::*;
 
-    use parley_ratatui::ratatui::buffer::Cell;
+    use bevy_terminal_ratatui::prelude::{TerminalColor, TerminalSnapshot};
+    use ratatui::buffer::{Cell, CellWidth};
 
     use crate::ratty_vt::Parser;
 
@@ -561,8 +658,8 @@ mod tests {
     }
 
     /// Draws a terminal state through Ratatui's differential update path into
-    /// the persistent Parley backend buffer.
-    fn draw_screen(tui: &mut Terminal<ParleyBackend>, screen: &Screen) {
+    /// the retained Bevy terminal surface.
+    fn draw_screen(tui: &mut RatatuiTerminal, screen: &Screen) {
         tui.draw(|frame| {
             frame.render_widget(
                 TerminalWidget {
@@ -573,14 +670,27 @@ mod tests {
                 },
                 frame.area(),
             );
-        })
-        .expect("draw terminal frame");
+        });
     }
 
     /// Builds and draws a fresh terminal state through [`draw_screen`].
-    fn draw_input(tui: &mut Terminal<ParleyBackend>, rows: u16, cols: u16, input: &[u8]) {
+    fn draw_input(tui: &mut RatatuiTerminal, rows: u16, cols: u16, input: &[u8]) {
         let parser = parse(rows, cols, input);
         draw_screen(tui, parser.screen());
+    }
+
+    fn symbol(snapshot: &TerminalSnapshot, col: u16, row: u16) -> String {
+        snapshot
+            .cell((col, row))
+            .map(|cell| cell.symbol().to_string())
+            .unwrap_or_default()
+    }
+
+    fn background(snapshot: &TerminalSnapshot, col: u16, row: u16) -> TerminalColor {
+        snapshot
+            .cell((col, row))
+            .map(|cell| cell.style.background)
+            .unwrap_or(TerminalColor::Default)
     }
 
     /// A narrowed DECSTBM region must not shift or blank the drawn grid: the
@@ -605,9 +715,8 @@ mod tests {
     }
 
     /// When a wide glyph does not fit at the end of a line it wraps, and the
-    /// cell it skipped must stay an unstyled blank. Painting the active
-    /// background there breaks the renderer's wide-cell heuristic, which only
-    /// treats a trailing space as a continuation when it has no background.
+    /// cell it skipped must stay an unstyled blank so the renderer does not
+    /// paint a stray background there.
     #[test]
     fn wrapped_wide_characters_leave_an_unstyled_pad() {
         // Green background, then thirteen narrow cells so the wide glyph cannot
@@ -623,14 +732,14 @@ mod tests {
         );
     }
 
-    /// Ratatui skips a wide glyph's second cell when sending a diff to a real
-    /// terminal. ParleyBackend stores those diffs as cells, so the skipped
-    /// update used to retain the old symbol and background. Scrolling then
-    /// repeated those stale cells anywhere a CJK glyph or emoji moved.
+    /// Ratatui skips a wide glyph's second cell when sending a diff. The Bevy
+    /// backend synthesizes that continuation cell from the anchor, so the
+    /// retained surface must show the glyph, its styled continuation, and no
+    /// stale content from the previous frame.
     #[test]
     fn successive_draws_replace_wide_continuation_cells() {
         let (rows, cols) = (2, 8);
-        let mut tui = Terminal::new(ParleyBackend::new(cols, rows)).expect("terminal");
+        let (mut tui, _) = RatatuiTerminal::new(cols, rows);
 
         draw_input(&mut tui, rows, cols, b"abcdefgh");
         draw_input(
@@ -640,17 +749,17 @@ mod tests {
             "\x1b[42m\u{4f60}\u{1f600}\x1b[0m".as_bytes(),
         );
 
-        let buffer = tui.backend().buffer();
-        assert_eq!(buffer[(0, 0)].symbol(), "\u{4f60}");
-        assert_eq!(buffer[(1, 0)].symbol(), " ");
-        assert_eq!(buffer[(2, 0)].symbol(), "\u{1f600}");
-        assert_eq!(buffer[(3, 0)].symbol(), " ");
-        assert_eq!(buffer[(1, 0)].bg, buffer[(0, 0)].bg);
-        assert_eq!(buffer[(3, 0)].bg, buffer[(2, 0)].bg);
-        assert_ne!(buffer[(0, 0)].bg, TuiColor::Reset);
+        let snapshot = tui.snapshot();
+        assert_eq!(symbol(&snapshot, 0, 0), "\u{4f60}");
+        assert!(snapshot.cell((1, 0)).is_some_and(|c| c.is_continuation()));
+        assert_eq!(symbol(&snapshot, 2, 0), "\u{1f600}");
+        assert!(snapshot.cell((3, 0)).is_some_and(|c| c.is_continuation()));
+        assert_eq!(background(&snapshot, 1, 0), background(&snapshot, 0, 0));
+        assert_eq!(background(&snapshot, 3, 0), background(&snapshot, 2, 0));
+        assert_ne!(background(&snapshot, 0, 0), TerminalColor::Default);
         for col in 4..cols {
             assert_eq!(
-                buffer[(col, 0)].symbol(),
+                symbol(&snapshot, col, 0),
                 " ",
                 "old content survived at column {col}"
             );
@@ -662,7 +771,7 @@ mod tests {
     #[test]
     fn scrollback_redraws_wide_graphemes_without_artifacts() {
         let (rows, cols) = (2, 8);
-        let mut tui = Terminal::new(ParleyBackend::new(cols, rows)).expect("terminal");
+        let (mut tui, _) = RatatuiTerminal::new(cols, rows);
         let mut parser = parse(
             rows,
             cols,
@@ -673,18 +782,18 @@ mod tests {
             parser.screen_mut().set_scrollback(offset);
             draw_screen(&mut tui, parser.screen());
 
-            let buffer = tui.backend().buffer();
+            let snapshot = tui.snapshot();
             if offset == 2 {
-                assert_eq!(buffer[(0, 0)].symbol(), "\u{4f60}");
-                assert_eq!(buffer[(1, 0)].symbol(), " ");
-                assert_eq!(buffer[(2, 0)].symbol(), "\u{1f600}");
-                assert_eq!(buffer[(3, 0)].symbol(), " ");
-                assert_eq!(buffer[(1, 0)].bg, buffer[(0, 0)].bg);
-                assert_eq!(buffer[(3, 0)].bg, buffer[(2, 0)].bg);
+                assert_eq!(symbol(&snapshot, 0, 0), "\u{4f60}");
+                assert!(snapshot.cell((1, 0)).is_some_and(|c| c.is_continuation()));
+                assert_eq!(symbol(&snapshot, 2, 0), "\u{1f600}");
+                assert!(snapshot.cell((3, 0)).is_some_and(|c| c.is_continuation()));
+                assert_eq!(background(&snapshot, 1, 0), background(&snapshot, 0, 0));
+                assert_eq!(background(&snapshot, 3, 0), background(&snapshot, 2, 0));
             } else {
                 assert!(
-                    buffer
-                        .content()
+                    snapshot
+                        .cells()
                         .iter()
                         .all(|cell| !matches!(cell.symbol(), "\u{4f60}" | "\u{1f600}"))
                 );
@@ -739,6 +848,52 @@ mod tests {
     }
 
     #[test]
+    fn widget_preserves_hidden_strikeout_and_underline_color() {
+        let rendered = render_cells(1, 3, b"\x1b[4;8;9;58;2;1;2;3mX\x1b[28;29;59mY");
+        let cell = &rendered[0];
+        assert!(cell.modifier.contains(Modifier::UNDERLINED));
+        assert!(cell.modifier.contains(Modifier::HIDDEN));
+        assert!(cell.modifier.contains(Modifier::CROSSED_OUT));
+        assert_eq!(cell.underline_color, TuiColor::Rgb(1, 2, 3));
+        let cell = &rendered[1];
+        assert!(
+            !cell
+                .modifier
+                .intersects(Modifier::HIDDEN | Modifier::CROSSED_OUT)
+        );
+        assert_eq!(cell.underline_color, TuiColor::Reset);
+    }
+
+    /// Hidden text must reach the renderer concealed: the backend translates
+    /// `Modifier::HIDDEN` to `StyleFlags::HIDDEN`, which the renderer skips.
+    #[test]
+    fn hidden_text_reaches_the_renderer_concealed() {
+        let (mut tui, _) = RatatuiTerminal::new(20, 2);
+        draw_input(&mut tui, 2, 20, b"ab\x1b[8mXY\x1b[28mcd");
+        let snapshot = tui.snapshot();
+        let hidden = snapshot.cell((2, 0)).expect("cell");
+        assert!(
+            hidden
+                .style
+                .has(bevy_terminal_ratatui::prelude::StyleFlags::HIDDEN)
+        );
+        let visible = snapshot.cell((4, 0)).expect("cell");
+        assert!(
+            !visible
+                .style
+                .has(bevy_terminal_ratatui::prelude::StyleFlags::HIDDEN)
+        );
+    }
+
+    #[test]
+    fn widget_blanks_kitty_placeholder_cells() {
+        let rendered = render_cells(1, 4, "a\u{10EEEE}\u{0305}\u{0305}b".as_bytes());
+        assert_eq!(rendered[0].symbol(), "a");
+        assert_eq!(rendered[1].symbol(), " ");
+        assert_eq!(rendered[2].symbol(), "b");
+    }
+
+    #[test]
     fn widget_resolves_colours_through_the_theme() {
         let rendered = render_cells(1, 8, b"\x1b[31;48;5;99mA\x1b[0;38;2;1;2;3mB");
         let theme = ThemeConfig::default();
@@ -753,36 +908,269 @@ mod tests {
         assert_eq!(rendered[2].fg, TuiColor::Rgb(fr, fg, fb));
     }
 
-    /// Regression test for vertical-only zoom steps (#97): with fractional
-    /// cell quantization, every font-size step must grow both axes.
+    /// Wide anchors declare their two-column span so the Bevy surface
+    /// synthesizes the continuation cell; narrow cells declare one column.
     #[test]
-    fn font_size_steps_scale_cells_on_both_axes() {
-        for render_scale in [1.0, 2.0] {
-            let mut previous: Option<(f32, f32)> = None;
-            for size in 8..=24 {
-                let font = FontConfig {
-                    size,
-                    ..FontConfig::default()
-                };
-                let renderer =
-                    build_terminal_renderer(&font, &ThemeConfig::default(), 1.0, render_scale);
-                let metrics = renderer.logical_metrics(render_scale);
-                if let Some((width, height)) = previous {
-                    assert!(
-                        metrics.cell_width > width,
-                        "cell width must grow at size {size} (scale {render_scale}): \
-                         {width} -> {}",
-                        metrics.cell_width
-                    );
-                    assert!(
-                        metrics.cell_height > height,
-                        "cell height must grow at size {size} (scale {render_scale}): \
-                         {height} -> {}",
-                        metrics.cell_height
-                    );
-                }
-                previous = Some((metrics.cell_width, metrics.cell_height));
-            }
+    fn widget_declares_wide_glyph_widths() {
+        let rendered = render_cells(1, 6, "\u{4f60}ab".as_bytes());
+        assert_eq!(rendered[0].cell_width(), 2);
+        assert_eq!(rendered[1].cell_width(), 1);
+        assert_eq!(rendered[2].cell_width(), 1);
+    }
+
+    #[test]
+    fn line_height_reaches_the_render_config() {
+        let mut config = AppConfig::default();
+        assert_eq!(
+            TerminalSurface::new(&config)
+                .expect("surface")
+                .render_config()
+                .cell_size,
+            CellSizing::FromFont { line_height: 1.0 }
+        );
+        config.font.line_height = 0.85;
+        assert_eq!(
+            TerminalSurface::new(&config)
+                .expect("surface")
+                .render_config()
+                .cell_size,
+            CellSizing::FromFont { line_height: 0.85 }
+        );
+        assert_eq!(line_height_multiplier(0.0), 1.0);
+        assert_eq!(line_height_multiplier(f32::NAN), 1.0);
+        assert_eq!(line_height_multiplier(10.0), 3.0);
+    }
+
+    #[test]
+    fn font_size_changes_update_the_render_config_only() {
+        let mut surface = TerminalSurface::new(&AppConfig::default()).expect("surface");
+        let before = surface.render_config().clone();
+        assert!(surface.adjust_font_size(2));
+        assert_eq!(surface.font_size(), AppConfig::default().font.size + 2);
+        assert_ne!(surface.render_config().font_size, before.font_size);
+        assert!(!surface.is_measured());
+        // Zoom never moves the grid on its own: the renderer's measurement
+        // reports the new cell size and the reflow follows that.
+        assert_eq!(surface.cols, AppConfig::default().terminal.default_cols);
+        assert!(!surface.adjust_font_size(0));
+    }
+
+    #[test]
+    fn render_output_adoption_reports_changes_once() {
+        let mut surface = TerminalSurface::new(&AppConfig::default()).expect("surface");
+        let texture = TerminalTexture {
+            image: Handle::default(),
+            size: UVec2::new(800, 600),
+            logical_size: Vec2::new(400.0, 300.0),
+            raster_scale: 2.0,
+            cell_size: Vec2::new(8.0, 16.0),
+            font_size: 16.0,
+        };
+        assert!(surface.update_render_output(&texture));
+        assert!(!surface.update_render_output(&texture));
+        assert!(surface.is_measured());
+        assert_eq!(surface.char_dimensions(), Vec2::new(8.0, 16.0));
+
+        let layout = surface.resize_to_fit(Vec2::new(400.0, 300.0), 2.0);
+        assert_eq!((layout.cols, layout.rows), (50, 18));
+        assert_eq!(layout.texture_size, UVec2::new(800, 576));
+        assert_eq!(layout.logical_size, Vec2::new(400.0, 288.0));
+    }
+
+    #[test]
+    fn non_font_files_are_rejected() {
+        let dir = std::env::temp_dir().join(format!("ratty-font-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("not-a-font.ttf");
+        fs::write(&path, b"hello").expect("write");
+        assert!(read_font_face(&path).is_err());
+        assert!(read_font_face(&dir.join("missing.ttf")).is_err());
+        fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// Builds a headless Bevy text app that measures Ratty's renderer config.
+    ///
+    /// The family is deliberately absent so the fallback path is exercised
+    /// without depending on which fonts the host has installed.
+    fn measured_terminal_app(font_size: i32, render_scale: f32) -> (App, Entity) {
+        let app_config = AppConfig {
+            font: FontConfig {
+                family: "Ratty Definitely Missing Mono".to_string(),
+                size: font_size,
+                ..default()
+            },
+            window: crate::config::WindowConfig {
+                scale_factor: Some(render_scale),
+                ..default()
+            },
+            ..default()
+        };
+        let terminal = TerminalSurface::new(&app_config).expect("terminal");
+        let render_surface = terminal.tui.surface();
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            bevy::asset::AssetPlugin::default(),
+            bevy::text::TextPlugin,
+            bevy_terminal_ratatui::prelude::TerminalPlugin,
+        ))
+        .init_asset::<Image>()
+        .insert_resource(app_config)
+        .insert_resource(terminal)
+        .add_systems(
+            Update,
+            crate::systems::sync_terminal_renderer_config
+                .before(bevy_terminal_ratatui::prelude::TerminalSystems::Sync),
+        );
+        let entity = app
+            .world_mut()
+            .spawn((
+                TerminalRenderTarget,
+                bevy_terminal_ratatui::TerminalRenderer::new(render_surface),
+            ))
+            .id();
+        for _ in 0..4 {
+            app.update();
         }
+        (app, entity)
+    }
+
+    /// Bevy snaps cell dimensions to whole physical pixels. Adjacent requested
+    /// sizes can therefore share one effective font/cell at low DPI, but the
+    /// sequence may never shrink and the full zoom range must grow both axes.
+    #[test]
+    fn font_size_steps_change_measured_cells_without_shrinking() {
+        for render_scale in [1.0, 2.0] {
+            let (mut app, entity) = measured_terminal_app(8, render_scale);
+            let mut previous = app
+                .world()
+                .get::<TerminalTexture>(entity)
+                .expect("initial measured texture")
+                .cell_size;
+            let initial = previous;
+            for size in 9..=24 {
+                assert!(
+                    app.world_mut()
+                        .resource_mut::<TerminalSurface>()
+                        .adjust_font_size(1)
+                );
+                app.update();
+                let texture = app
+                    .world()
+                    .get::<TerminalTexture>(entity)
+                    .expect("remeasured texture")
+                    .clone();
+                let requested = points_to_logical_pixels(size);
+                assert_eq!(
+                    app.world()
+                        .resource::<TerminalSurface>()
+                        .render_config()
+                        .font_size,
+                    FontSizing::Px(requested)
+                );
+                assert!(texture.font_size.is_finite() && texture.font_size >= 1.0);
+                let measured = texture.cell_size;
+                assert!(
+                    measured.cmpge(previous).all(),
+                    "cell shrank at size {size} (scale {render_scale}): \
+                     {previous:?} -> {measured:?}"
+                );
+                previous = measured;
+            }
+            assert!(
+                previous.cmpgt(initial).all(),
+                "zoom range did not grow both axes at scale {render_scale}: \
+                 {initial:?} -> {previous:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unavailable_font_falls_back_and_adopts_measured_metrics() {
+        let (mut app, entity) = measured_terminal_app(12, 1.0);
+
+        let render_config = app
+            .world()
+            .get::<TerminalRenderConfig>(entity)
+            .expect("render config");
+        assert_eq!(render_config.font.regular, FontSource::Monospace);
+        assert_eq!(render_config.cell_size, CellSizing::FROM_FONT);
+        assert!(matches!(render_config.font_size, FontSizing::Px(_)));
+        let texture = app
+            .world()
+            .get::<TerminalTexture>(entity)
+            .expect("measured terminal texture")
+            .clone();
+        assert!(texture.cell_size.cmpgt(Vec2::ONE).all());
+        assert!(texture.cell_size.y >= points_to_logical_pixels(12));
+
+        let cell_size = texture.cell_size;
+        let mut terminal = app.world_mut().resource_mut::<TerminalSurface>();
+        assert!(terminal.update_render_output(&texture));
+        let layout = terminal.resize_to_fit(cell_size * Vec2::new(4.9, 3.9), 1.0);
+        assert_eq!((layout.cols, layout.rows), (4, 3));
+    }
+
+    #[test]
+    fn font_config_always_uses_measured_cell_metrics() {
+        let config = AppConfig {
+            font: FontConfig {
+                size: 20,
+                ..default()
+            },
+            window: crate::config::WindowConfig {
+                scale_factor: Some(2.0),
+                ..default()
+            },
+            ..default()
+        };
+        let mut terminal = TerminalSurface::new(&config).expect("measured terminal");
+        assert_eq!(terminal.render_config().cell_size, CellSizing::FROM_FONT);
+        assert_eq!(
+            terminal.render_config().font_size,
+            FontSizing::Px(points_to_logical_pixels(20))
+        );
+        assert_eq!(
+            terminal.render_config().raster.scale,
+            TerminalRenderScale::Fixed(2.0)
+        );
+
+        let unmeasured_cell = terminal.char_dimensions();
+        assert!(terminal.adjust_font_size(2));
+        assert_eq!(
+            terminal.char_dimensions(),
+            unmeasured_cell,
+            "zoom must retain the last authoritative metrics until remeasurement"
+        );
+    }
+
+    #[test]
+    fn explicit_face_configuration_requires_a_regular_face() {
+        let font = FontConfig {
+            bold: Some("Bold.ttf".into()),
+            ..default()
+        };
+        let Err(error) = load_configured_font_faces(&mut App::new(), &font) else {
+            panic!("bold without regular must fail");
+        };
+
+        assert!(error.to_string().contains("font.regular is required"));
+    }
+
+    #[test]
+    fn invalid_explicit_font_data_is_rejected_before_asset_loading() {
+        let font = FontConfig {
+            regular: Some(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")),
+            ..default()
+        };
+        let Err(error) = load_configured_font_faces(&mut App::new(), &font) else {
+            panic!("non-font data must fail");
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("is not a TrueType or OpenType font")
+        );
     }
 }
