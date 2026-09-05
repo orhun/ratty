@@ -110,20 +110,20 @@ fn render(frame: &mut Frame<'_>, lines: &[Line<'static>], scroll: u16) -> u16 {
 fn emit_hidden_sequences(buf: &mut Buffer) {
     let area = buf.area;
     for y in area.top()..area.bottom() {
-        let mut run_start = None;
+        let mut in_run = false;
         for x in area.left()..=area.right() {
             let hidden = x < area.right()
                 && buf
                     .cell((x, y))
                     .is_some_and(|cell| cell.modifier.contains(Modifier::HIDDEN));
-            match (run_start, hidden) {
-                (None, true) => {
-                    run_start = Some(x);
+            match (in_run, hidden) {
+                (false, true) => {
+                    in_run = true;
                     wrap_symbol(buf, x, y, "\x1b[8m", "");
                 }
-                (Some(_), false) => {
+                (true, false) => {
+                    in_run = false;
                     wrap_symbol(buf, x - 1, y, "", "\x1b[28m");
-                    run_start = None;
                 }
                 _ => {}
             }
