@@ -27,7 +27,12 @@ subject, so the fork can be rebased onto a future upstream release.
   color) are parsed, stored on cells, and round-trip through the formatted
   output.
 - `CSI f` (HVP) is handled like `CSI H` (CUP); `CSI s` / `CSI u` (SCOSC /
-  SCORC) save and restore the cursor position.
+  SCORC) save and restore the cursor position and attributes like DECSC /
+  DECRC.
+- Grapheme clusters share one cell: a printed character that extends the
+  previous cell's cluster (spacing vowel signs, VS16, ZWJ sequences, flag
+  pairs, keycaps) joins it, and the cell's width is the cluster's
+  `unicode-width` string width, matching how Ratatui lays out cells.
 - Resize reflows wrapped lines, moves lines between the screen and scrollback,
   and resets the DECSTBM scroll region.
 - Grids with a single row or column no longer panic on wide glyphs.

@@ -224,6 +224,7 @@ impl Row {
         }
 
         let mut erase: Option<(u16, &crate::ratty_vt::attrs::Attrs)> = None;
+        let mut last_written: Option<&str> = None;
         for (col, cell) in self
             .cells()
             .enumerate()
@@ -284,6 +285,7 @@ impl Row {
                         prev_attrs = *attrs;
                     }
 
+                    cluster_break(contents, &mut last_written, pos, prev_pos, cell.contents());
                     prev_pos.col += if cell.is_wide() { 2 } else { 1 };
                     let cell_contents = cell.contents();
                     contents.extend(cell_contents.as_bytes());
@@ -364,6 +366,7 @@ impl Row {
         }
 
         let mut erase: Option<(u16, &crate::ratty_vt::attrs::Attrs)> = None;
+        let mut last_written: Option<&str> = None;
         for (col, (cell, prev_cell)) in self
             .cells()
             .zip(prev.cells())
@@ -425,6 +428,7 @@ impl Row {
                         prev_attrs = *attrs;
                     }
 
+                    cluster_break(contents, &mut last_written, pos, prev_pos, cell.contents());
                     prev_pos.col += if cell.is_wide() { 2 } else { 1 };
                     contents.extend(cell.contents().as_bytes());
                 } else if erase.is_none() {
@@ -488,4 +492,26 @@ impl Row {
 
         (prev_pos, prev_attrs)
     }
+}
+
+/// Emits an explicit column move before writing `cell_contents` when it
+/// would otherwise join the grapheme cluster of the cell written just before
+/// it (`Screen::extend_grapheme_cluster`), so replaying formatted output
+/// reproduces two cells that were written separately. Records the contents
+/// as the most recently written cell.
+fn cluster_break<'a>(
+    contents: &mut Vec<u8>,
+    last_written: &mut Option<&'a str>,
+    pos: crate::ratty_vt::grid::Pos,
+    prev_pos: crate::ratty_vt::grid::Pos,
+    cell_contents: &'a str,
+) {
+    if pos == prev_pos
+        && let Some(previous) = *last_written
+        && let Some(first) = cell_contents.chars().next()
+        && crate::ratty_vt::screen::clusters_with(previous, first)
+    {
+        crate::ratty_vt::term::MoveTo::new(pos).write_buf(contents);
+    }
+    *last_written = Some(cell_contents);
 }

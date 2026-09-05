@@ -54,6 +54,7 @@ shellexpand = "3.1"
 stl_io = "0.11.0"
 tobj = "4.0"
 toml = "0.8"
+unicode-segmentation = "1.12"
 unicode-width = "0.2"
 vte = "0.15"
 winit = { version = "0.30", default-features = false }

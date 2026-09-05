@@ -4706,6 +4706,7 @@ dependencies = [
  "stl_io",
  "tobj",
  "toml 0.8.23",
+ "unicode-segmentation",
  "unicode-width",
  "vte",
  "winit",

@@ -112,7 +112,7 @@ impl Cell {
         self.len & IS_WIDE_CONTINUATION != 0
     }
 
-    fn set_wide(&mut self, wide: bool) {
+    pub(crate) fn set_wide(&mut self, wide: bool) {
         if wide {
             self.len |= IS_WIDE;
         } else {

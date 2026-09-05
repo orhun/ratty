@@ -56,10 +56,19 @@ struct Args {
     /// Terminal rows (texture mode) or window height in pixels (scene mode).
     #[arg(long)]
     height: Option<u32>,
-    /// Bytes to write to the PTY one second before capturing (`\x1b`,
-    /// `\n`, `\r`, `\t` and `\\` escapes are decoded).
+    /// Bytes to write to the PTY before capturing (`\x1b`, `\n`, `\r`,
+    /// `\t` and `\\` escapes are decoded). May be repeated; each value is
+    /// sent `--send-interval` seconds after the previous one, starting one
+    /// second into the session, so intermediate frames are rendered.
     #[arg(long)]
-    send: Option<String>,
+    send: Vec<String>,
+    /// Seconds between successive `--send` values.
+    #[arg(long, default_value_t = 0.25)]
+    send_interval: f32,
+    /// At capture time, report cells whose Ratatui surface content differs
+    /// from the VT screen (stale or missing cells in the retained surface).
+    #[arg(long)]
+    check_stale: bool,
     /// Config file to load (defaults to Ratty's normal lookup).
     #[arg(short = 'c', long)]
     config_file: Option<PathBuf>,
@@ -72,7 +81,88 @@ struct Args {
 struct Options {
     out: PathBuf,
     after: f32,
-    send: Option<Vec<u8>>,
+    send: Vec<Vec<u8>>,
+    send_interval: f32,
+    check_stale: bool,
+}
+
+/// Compares the retained Ratatui surface with the VT screen and logs every
+/// cell whose visible symbol differs.
+fn report_stale_cells(terminal: &TerminalSurface, runtime: &TerminalRuntime) {
+    let screen = runtime.screen();
+    let snapshot = terminal.tui.snapshot();
+    let (rows, cols) = screen.size();
+    let mut stale = 0;
+    for row in 0..rows {
+        for col in 0..cols {
+            let expected = screen
+                .cell(row, col)
+                .map(|cell| {
+                    if cell.is_wide_continuation() || !cell.has_contents() {
+                        " ".to_string()
+                    } else {
+                        cell.contents().to_string()
+                    }
+                })
+                .unwrap_or_else(|| " ".to_string());
+            let actual = snapshot
+                .cell((col, row))
+                .map(|cell| {
+                    if cell.is_continuation() {
+                        " ".to_string()
+                    } else {
+                        cell.symbol().to_string()
+                    }
+                })
+                .unwrap_or_default();
+            let expected = if expected.starts_with('\u{10EEEE}') {
+                " ".to_string()
+            } else {
+                expected
+            };
+            if expected.trim_end() != actual.trim_end() {
+                stale += 1;
+                if stale <= 40 {
+                    warn!("stale cell row {row} col {col}: screen {expected:?} surface {actual:?}");
+                }
+            }
+        }
+    }
+    info!("stale-cell check: {stale} mismatches");
+    if std::env::var_os("RATTY_TRACE_FG").is_some() {
+        for row in 0..rows {
+            let mut runs = Vec::new();
+            let mut current: Option<(u16, ratty::ratty_vt::Color, String)> = None;
+            for col in 0..cols {
+                let Some(cell) = screen.cell(row, col) else {
+                    continue;
+                };
+                let color = cell.fgcolor();
+                match &mut current {
+                    Some((_, c, text)) if *c == color => text.push_str(cell.contents()),
+                    _ => {
+                        if let Some(run) = current.take() {
+                            runs.push(run);
+                        }
+                        current = Some((col, color, cell.contents().to_string()));
+                    }
+                }
+            }
+            if let Some(run) = current.take() {
+                runs.push(run);
+            }
+            let described: Vec<String> = runs
+                .iter()
+                .map(|(col, color, text)| {
+                    format!(
+                        "{col}:{color:?}:{:?}",
+                        text.trim_end().chars().take(12).collect::<String>()
+                    )
+                })
+                .collect();
+            info!("row {row}: {}", described.join(" | "));
+        }
+    }
 }
 
 /// Decodes the `--send` escapes into raw PTY input bytes.
@@ -105,20 +195,22 @@ fn decode_input(text: &str) -> Vec<u8> {
     out
 }
 
-/// Writes `--send` to the PTY once, one second before the capture.
+/// Writes the `--send` values to the PTY in order, spaced by the interval.
 fn send_input(
     time: Res<Time<Real>>,
     options: Res<Options>,
     runtime: Res<TerminalRuntime>,
-    mut sent: Local<bool>,
+    mut next: Local<usize>,
 ) {
-    if *sent || time.elapsed_secs() < (options.after - 1.0).max(0.2) {
+    let Some(bytes) = options.send.get(*next) else {
+        return;
+    };
+    let due = 1.0 + *next as f32 * options.send_interval;
+    if time.elapsed_secs() < due {
         return;
     }
-    *sent = true;
-    if let Some(bytes) = &options.send {
-        runtime.write_input(bytes);
-    }
+    *next += 1;
+    runtime.write_input(bytes);
 }
 
 #[derive(Resource, Default)]
@@ -183,7 +275,9 @@ fn main() -> anyhow::Result<()> {
     .insert_resource(Options {
         out: args.out,
         after: args.after,
-        send: args.send.as_deref().map(decode_input),
+        send: args.send.iter().map(|text| decode_input(text)).collect(),
+        send_interval: args.send_interval,
+        check_stale: args.check_stale,
     })
     .add_systems(Update, send_input);
 
@@ -341,6 +435,8 @@ fn request_scene_capture(
     options: Res<Options>,
     mut state: ResMut<CaptureState>,
     target: Option<Res<SceneTarget>>,
+    terminal: Res<TerminalSurface>,
+    runtime: Res<TerminalRuntime>,
     commands: Commands,
 ) {
     if state.requested || time.elapsed_secs() < options.after {
@@ -350,6 +446,9 @@ fn request_scene_capture(
         return;
     };
     state.requested = true;
+    if options.check_stale {
+        report_stale_cells(&terminal, &runtime);
+    }
     schedule_readback(commands, target.0.clone(), target.1);
 }
 
