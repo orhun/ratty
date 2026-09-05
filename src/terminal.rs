@@ -32,8 +32,6 @@ pub struct TerminalLayout {
     pub texture_size: UVec2,
     /// Logical presentation size in Bevy world units.
     pub logical_size: Vec2,
-    /// Physical render scale used for the terminal texture.
-    pub render_scale: f32,
 }
 
 impl TerminalLayout {
@@ -43,7 +41,6 @@ impl TerminalLayout {
             rows,
             texture_size,
             logical_size: texture_logical_size(texture_size, render_scale),
-            render_scale,
         }
     }
 
