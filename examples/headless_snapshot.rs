@@ -66,10 +66,11 @@ struct Args {
     /// Seconds between successive `--send` values.
     #[arg(long, default_value_t = 0.25)]
     send_interval: f32,
-    /// At capture time, report cells whose Ratatui surface content differs
-    /// from the VT screen (stale or missing cells in the retained surface).
-    #[arg(long)]
-    check_stale: bool,
+    /// At capture time, log diagnostics: cells whose Ratatui surface content
+    /// differs from the VT screen (stale or missing cells), and each row's
+    /// foreground-colour runs. `--check-stale` is accepted as an alias.
+    #[arg(long, alias = "check-stale")]
+    diagnose: bool,
     /// Config file to load (defaults to Ratty's normal lookup).
     #[arg(short = 'c', long)]
     config_file: Option<PathBuf>,
@@ -84,7 +85,7 @@ struct Options {
     after: f32,
     send: Vec<Vec<u8>>,
     send_interval: f32,
-    check_stale: bool,
+    diagnose: bool,
 }
 
 /// Compares the retained Ratatui surface with the VT screen and logs every
@@ -130,40 +131,42 @@ fn report_stale_cells(terminal: &TerminalSurface, runtime: &TerminalRuntime) {
         }
     }
     info!("stale-cell check: {stale} mismatches");
-    if std::env::var_os("RATTY_TRACE_FG").is_some() {
-        for row in 0..rows {
-            let mut runs = Vec::new();
-            let mut current: Option<(u16, ratty::ratty_vt::Color, String)> = None;
-            for col in 0..cols {
-                let Some(cell) = screen.cell(row, col) else {
-                    continue;
-                };
-                let color = cell.fgcolor();
-                match &mut current {
-                    Some((_, c, text)) if *c == color => text.push_str(cell.contents()),
-                    _ => {
-                        if let Some(run) = current.take() {
-                            runs.push(run);
-                        }
-                        current = Some((col, color, cell.contents().to_string()));
-                    }
+}
+
+/// Logs each row as runs of cells sharing a foreground colour, to spot a
+/// colour that leaked past the cells that set it.
+fn report_foreground_runs(runtime: &TerminalRuntime) {
+    let screen = runtime.screen();
+    let (rows, cols) = screen.size();
+    for row in 0..rows {
+        let mut runs: Vec<(u16, ratty::ratty_vt::Color, String)> = Vec::new();
+        for col in 0..cols {
+            let Some(cell) = screen.cell(row, col) else {
+                continue;
+            };
+            let color = cell.fgcolor();
+            match runs.last_mut() {
+                Some((_, run_color, text)) if *run_color == color => {
+                    text.push_str(cell.contents());
                 }
+                _ => runs.push((col, color, cell.contents().to_string())),
             }
-            if let Some(run) = current.take() {
-                runs.push(run);
-            }
-            let described: Vec<String> = runs
-                .iter()
-                .map(|(col, color, text)| {
-                    format!(
-                        "{col}:{color:?}:{:?}",
-                        text.trim_end().chars().take(12).collect::<String>()
-                    )
-                })
-                .collect();
-            info!("row {row}: {}", described.join(" | "));
         }
+        let described: Vec<String> = runs
+            .iter()
+            .map(|(col, color, text)| {
+                let text: String = text.trim_end().chars().take(12).collect();
+                format!("{col}:{color:?}:{text:?}")
+            })
+            .collect();
+        info!("row {row}: {}", described.join(" | "));
     }
+}
+
+/// Runs every capture-time probe.
+fn diagnose(terminal: &TerminalSurface, runtime: &TerminalRuntime) {
+    report_stale_cells(terminal, runtime);
+    report_foreground_runs(runtime);
 }
 
 /// Decodes the `--send` escapes into raw PTY input bytes.
@@ -278,7 +281,7 @@ fn main() -> anyhow::Result<()> {
         after: args.after,
         send: args.send.iter().map(|text| decode_input(text)).collect(),
         send_interval: args.send_interval,
-        check_stale: args.check_stale,
+        diagnose: args.diagnose,
     })
     .add_systems(Update, send_input);
 
@@ -435,8 +438,8 @@ fn request_scene_capture(
         return;
     };
     state.requested = true;
-    if options.check_stale {
-        report_stale_cells(&terminal, &runtime);
+    if options.diagnose {
+        diagnose(&terminal, &runtime);
     }
     schedule_readback(commands, target.0.clone(), target.1);
 }
