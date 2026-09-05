@@ -62,10 +62,13 @@ struct Args {
     height: Option<u32>,
     /// Bytes to write to the PTY before capturing (`\x1b`, `\n`, `\r`,
     /// `\t` and `\\` escapes are decoded). May be repeated; each value is
-    /// sent `--send-interval` seconds after the previous one, starting one
-    /// second into the session, so intermediate frames are rendered.
+    /// sent `--send-interval` seconds after the previous one, starting at
+    /// `--send-after`, so intermediate frames are rendered.
     #[arg(long)]
     send: Vec<String>,
+    /// Seconds into the session at which the first `--send` value is written.
+    #[arg(long, default_value_t = 1.0)]
+    send_after: f32,
     /// Seconds between successive `--send` values.
     #[arg(long, default_value_t = 0.25)]
     send_interval: f32,
@@ -91,6 +94,7 @@ struct Options {
     out: PathBuf,
     after: f32,
     send: Vec<Vec<u8>>,
+    send_after: f32,
     send_interval: f32,
     timeout: f32,
     diagnose: bool,
@@ -264,7 +268,7 @@ fn send_input(
     let Some(bytes) = options.send.get(*next) else {
         return;
     };
-    let due = 1.0 + *next as f32 * options.send_interval;
+    let due = options.send_after + *next as f32 * options.send_interval;
     if time.elapsed_secs() < due {
         return;
     }
@@ -287,6 +291,16 @@ struct Target;
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    if let Some(last) = args.send.len().checked_sub(1) {
+        let last_send = args.send_after + last as f32 * args.send_interval;
+        if args.after <= last_send {
+            eprintln!(
+                "warning: --after {} does not exceed the last --send at {last_send}s; \
+                 the capture may precede it",
+                args.after
+            );
+        }
+    }
     let mut app_config = AppConfig::load_from_path(args.config_file.as_deref())?;
     app_config.window.scale_factor = Some(1.0);
     if args.scene {
@@ -335,6 +349,7 @@ fn main() -> anyhow::Result<()> {
         out: args.out,
         after: args.after,
         send: args.send.iter().map(|text| decode_input(text)).collect(),
+        send_after: args.send_after,
         send_interval: args.send_interval,
         timeout: args.timeout,
         diagnose: args.diagnose,
