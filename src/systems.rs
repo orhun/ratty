@@ -170,8 +170,44 @@ pub fn pump_pty_output(
     mut app_exit: MessageWriter<AppExit>,
     mut redraw: ResMut<TerminalRedrawState>,
 ) {
-    let mut processed_output = false;
     let mut camera_updates = Vec::new();
+    let drained = drain_pty_output(&mut runtime, &mut inline_objects, &mut camera_updates);
+    for update in camera_updates {
+        camera_update_writer.write(update);
+    }
+    if drained.disconnected && !runtime.pty_disconnected {
+        runtime.pty_disconnected = true;
+        app_exit.write(AppExit::Success);
+    }
+    if drained.processed {
+        redraw.request();
+    }
+}
+
+/// What [`drain_pty_output`] found on the PTY.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PtyDrain {
+    /// Whether any terminal output was processed.
+    pub processed: bool,
+    /// Whether the PTY reader has hung up (the child exited).
+    pub disconnected: bool,
+}
+
+/// Drains every pending PTY chunk into the parser and inline-object state.
+///
+/// Each chunk goes through [`TerminalInlineObjects::consume_pty_output`]
+/// (which strips inline-graphics control sequences and feeds the rest to the
+/// parser), terminal replies are written back to the child, scroll-tracked
+/// inline anchors follow the screen, and placeholder anchors are refreshed.
+/// Camera updates requested by the output are collected into `camera_updates`.
+/// This is the whole per-frame PTY step; [`pump_pty_output`] wraps it for the
+/// app and `examples/headless_snapshot.rs` calls it directly.
+pub fn drain_pty_output(
+    runtime: &mut TerminalRuntime,
+    inline_objects: &mut TerminalInlineObjects,
+    camera_updates: &mut Vec<TerminalCameraUpdate>,
+) -> PtyDrain {
+    let mut drained = PtyDrain::default();
     loop {
         match runtime.try_recv() {
             Ok(chunk) => {
@@ -179,13 +215,10 @@ pub fn pump_pty_output(
                 let prev_rows = track_scroll.then(|| runtime.visible_row_texts());
                 let mut replies = inline_objects.consume_pty_output(
                     &chunk,
-                    &mut runtime,
-                    &mut camera_updates,
-                    &mut processed_output,
+                    runtime,
+                    camera_updates,
+                    &mut drained.processed,
                 );
-                for update in camera_updates.drain(..) {
-                    camera_update_writer.write(update);
-                }
                 replies.extend(runtime.take_replies());
                 for reply in replies {
                     runtime.write_input(&reply);
@@ -199,18 +232,12 @@ pub fn pump_pty_output(
             }
             Err(TryRecvError::Empty) => break,
             Err(TryRecvError::Disconnected) => {
-                if !runtime.pty_disconnected {
-                    runtime.pty_disconnected = true;
-                    app_exit.write(AppExit::Success);
-                }
+                drained.disconnected = true;
                 break;
             }
         }
     }
-
-    if processed_output {
-        redraw.request();
-    }
+    drained
 }
 
 fn infer_upward_scroll(prev_rows: &[String], next_rows: &[String]) -> u16 {

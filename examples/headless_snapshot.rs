@@ -36,6 +36,7 @@ use ratty::config::AppConfig;
 use ratty::inline::TerminalInlineObjects;
 use ratty::mouse::TerminalSelection;
 use ratty::runtime::{RuntimeOptions, TerminalRuntime};
+use ratty::systems::drain_pty_output;
 use ratty::terminal::{TerminalSurface, TerminalWidget, load_configured_font_faces};
 
 #[derive(Parser)]
@@ -379,21 +380,9 @@ fn pump_and_draw(
     mut terminal: ResMut<TerminalSurface>,
     selection: Res<TerminalSelection>,
 ) {
+    // Camera updates have no camera to go to in texture mode.
     let mut camera_updates = Vec::new();
-    let mut processed = false;
-    while let Ok(chunk) = runtime.try_recv() {
-        let mut replies = inline_objects.consume_pty_output(
-            &chunk,
-            &mut runtime,
-            &mut camera_updates,
-            &mut processed,
-        );
-        replies.extend(runtime.take_replies());
-        for reply in replies {
-            runtime.write_input(&reply);
-        }
-        inline_objects.refresh_placeholder_anchors(runtime.screen());
-    }
+    drain_pty_output(&mut runtime, &mut inline_objects, &mut camera_updates);
 
     let screen = runtime.screen();
     terminal.tui.draw(|frame| {
