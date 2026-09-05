@@ -21,17 +21,14 @@ TERM = "xterm-256color"
 
 [font]
 family = "DejaVu Sans Mono"
-# To guarantee the exact face on every platform, set `regular` and optionally
-# the other three face files. Relative paths are resolved from this config.
+# Explicit font files override `family` (paths relative to this file).
 # regular = "fonts/IosevkaFixed-Regular.ttf"
 # bold = "fonts/IosevkaFixed-Bold.ttf"
 # italic = "fonts/IosevkaFixed-Italic.ttf"
 # bold_italic = "fonts/IosevkaFixed-BoldItalic.ttf"
 style = "Regular"
 size = 12
-# Row height as a multiple of the font's natural line box. Tall fonts such as
-# Iosevka (2.5:1 cells) look better around 0.85; below 1.0 the outermost
-# ascender and descender pixels are clipped.
+# Row height as a multiple of the font's natural line height.
 # line_height = 1.0
 
 [cursor.model]
