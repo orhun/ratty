@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use base64::Engine as _;
 
 use crate::inline::{InlineAnchor, InlineObject, InlineStyle, KittyInlineObject, RasterObject};
-use crate::ratty_vt::{Color, Screen};
+use crate::ratty_vt::{Color, KITTY_PLACEHOLDER, Screen};
 
 /// Kitty graphics APC prefix.
 pub const KITTY_APC_START: &[u8] = b"\x1b_G";
@@ -312,7 +312,7 @@ pub fn refresh_kitty_placeholder_anchors(
             };
             // Placeholders may carry combining diacritics that encode the
             // image row and column, so match on the base character.
-            if !cell.contents().starts_with('\u{10EEEE}') {
+            if !cell.contents().starts_with(KITTY_PLACEHOLDER) {
                 continue;
             }
             let Color::Rgb(r, g, b) = cell.fgcolor() else {

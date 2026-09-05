@@ -7,10 +7,12 @@ const MODE_HIDE_CURSOR: u8 = 0b0000_0100;
 const MODE_ALTERNATE_SCREEN: u8 = 0b0000_1000;
 const MODE_BRACKETED_PASTE: u8 = 0b0001_0000;
 
-/// The kitty graphics protocol's Unicode placeholder character.
+/// The Kitty graphics protocol's Unicode placeholder character (U+10EEEE):
+/// a cell holding it, plus its row/column diacritics, marks where an image
+/// covers the grid.
 ///
 /// ratty-vt addition; see [`Row::has_kitty_placeholder`](crate::ratty_vt::Row::has_kitty_placeholder).
-const KITTY_PLACEHOLDER: char = '\u{10EEEE}';
+pub const KITTY_PLACEHOLDER: char = '\u{10EEEE}';
 
 /// The xterm mouse handling mode currently in use.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]

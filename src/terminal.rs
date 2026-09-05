@@ -19,7 +19,7 @@ use ratatui::widgets::Widget;
 
 use crate::config::{AppConfig, FontConfig, FontStyleConfig, ThemeConfig};
 use crate::mouse::TerminalSelection;
-use crate::ratty_vt::{Blink, Cell as VtCell, Color as VtColor, Screen};
+use crate::ratty_vt::{Blink, Cell as VtCell, Color as VtColor, KITTY_PLACEHOLDER, Screen};
 
 /// Terminal grid and presentation dimensions.
 #[derive(Clone, Copy, Debug)]
@@ -438,9 +438,6 @@ fn points_to_logical_pixels(points: i32) -> f32 {
     const LOGICAL_PIXELS_PER_INCH: f32 = 96.0;
     (points as f32 * LOGICAL_PIXELS_PER_INCH / POINTS_PER_INCH).max(1.0)
 }
-
-/// Leading character of a Kitty graphics Unicode placeholder cell.
-const KITTY_PLACEHOLDER: char = '\u{10EEEE}';
 
 /// Ratatui widget backed by the terminal screen.
 pub struct TerminalWidget<'a> {

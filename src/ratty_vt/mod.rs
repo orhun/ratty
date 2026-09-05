@@ -73,4 +73,4 @@ pub use callbacks::Callbacks;
 pub use cell::Cell;
 pub use parser::Parser;
 pub use row::Row;
-pub use screen::{MouseProtocolEncoding, MouseProtocolMode, Screen};
+pub use screen::{KITTY_PLACEHOLDER, MouseProtocolEncoding, MouseProtocolMode, Screen};
