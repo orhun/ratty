@@ -14,6 +14,17 @@
 //! cargo run --example headless_snapshot -- --scene --out shot.png -- ./widget/target/debug/examples/document
 //! ```
 //!
+//! `--after` must exceed `--send-after + (n - 1) * --send-interval` for the
+//! last of `n` sends to land before the capture; a warning is printed at
+//! startup otherwise.
+//!
+//! Texture mode mirrors three pieces of Ratty's own update loop, which must
+//! be kept in step when they change: `ratty::systems::drain_pty_output` (the
+//! PTY step, shared), the `TerminalWidget` draw in
+//! `ratty::systems::render_terminal_widget` (`pump_and_draw` here), and the
+//! texture adoption in `ratty::systems::sync_terminal_render_output`
+//! (`on_ready` here). Scene mode runs Ratty's real plugin instead.
+//!
 //! Requires a GPU (Metal/Vulkan/DX12).
 
 use std::path::PathBuf;
