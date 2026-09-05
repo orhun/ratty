@@ -158,7 +158,7 @@ impl Screen {
 
     /// Resizes the terminal.
     pub fn set_size(&mut self, rows: u16, cols: u16) {
-        self.last_print = None;
+        self.break_cluster();
         self.grid
             .set_size(crate::ratty_vt::grid::Size { rows, cols });
         self.alternate_grid
@@ -175,7 +175,7 @@ impl Screen {
     /// screen is resized without reflow, since full-screen applications
     /// redraw on resize anyway.
     pub fn set_size_reflow(&mut self, rows: u16, cols: u16) {
-        self.last_print = None;
+        self.break_cluster();
         let size = crate::ratty_vt::grid::Size { rows, cols };
         self.grid.set_size_reflow(size);
         self.alternate_grid.set_size_plain(size);
@@ -815,14 +815,14 @@ impl Screen {
     }
 
     fn enter_alternate_grid(&mut self) {
-        self.last_print = None;
+        self.break_cluster();
         self.grid_mut().set_scrollback(0);
         self.set_mode(MODE_ALTERNATE_SCREEN);
         self.alternate_grid.allocate_rows();
     }
 
     fn exit_alternate_grid(&mut self) {
-        self.last_print = None;
+        self.break_cluster();
         self.clear_mode(MODE_ALTERNATE_SCREEN);
     }
 
@@ -1123,6 +1123,14 @@ impl Screen {
         }
     }
 
+    /// Ends the grapheme cluster being built by `text`: anything that moves
+    /// the cursor or edits the row means the next printed character starts a
+    /// new cell instead of joining the previous one (see
+    /// `extend_grapheme_cluster`).
+    fn break_cluster(&mut self) {
+        self.last_print = None;
+    }
+
     // ratty-vt: grapheme clustering.
     //
     // Applications built on unicode-width lay out one grapheme cluster per
@@ -1204,32 +1212,32 @@ impl Screen {
     // control codes
 
     pub(crate) fn bs(&mut self) {
-        self.last_print = None;
+        self.break_cluster();
         self.grid_mut().col_dec(1);
     }
 
     pub(crate) fn tab(&mut self) {
-        self.last_print = None;
+        self.break_cluster();
         self.grid_mut().col_tab();
     }
 
     pub(crate) fn lf(&mut self) {
-        self.last_print = None;
+        self.break_cluster();
         self.grid_mut().row_inc_scroll(1);
     }
 
     pub(crate) fn vt(&mut self) {
-        self.last_print = None;
+        self.break_cluster();
         self.lf();
     }
 
     pub(crate) fn ff(&mut self) {
-        self.last_print = None;
+        self.break_cluster();
         self.lf();
     }
 
     pub(crate) fn cr(&mut self) {
-        self.last_print = None;
+        self.break_cluster();
         self.grid_mut().col_set(0);
     }
 
@@ -1237,13 +1245,13 @@ impl Screen {
 
     // ESC 7
     pub(crate) fn decsc(&mut self) {
-        self.last_print = None;
+        self.break_cluster();
         self.save_cursor();
     }
 
     // ESC 8
     pub(crate) fn decrc(&mut self) {
-        self.last_print = None;
+        self.break_cluster();
         self.restore_cursor();
     }
 
@@ -1256,13 +1264,13 @@ impl Screen {
     // afterwards, so a position-only restore leaked the placeholder colour
     // into the text drawn after the image.
     pub(crate) fn scosc(&mut self) {
-        self.last_print = None;
+        self.break_cluster();
         self.save_cursor();
     }
 
     // CSI u
     pub(crate) fn scorc(&mut self) {
-        self.last_print = None;
+        self.break_cluster();
         self.restore_cursor();
     }
 
@@ -1278,13 +1286,13 @@ impl Screen {
 
     // ESC M
     pub(crate) fn ri(&mut self) {
-        self.last_print = None;
+        self.break_cluster();
         self.grid_mut().row_dec_scroll(1);
     }
 
     // ESC c
     pub(crate) fn ris(&mut self) {
-        self.last_print = None;
+        self.break_cluster();
         *self = Self::new(self.grid.size(), self.grid.scrollback_len());
     }
 
@@ -1292,57 +1300,57 @@ impl Screen {
 
     // CSI @
     pub(crate) fn ich(&mut self, count: u16) {
-        self.last_print = None;
+        self.break_cluster();
         self.grid_mut().insert_cells(count);
     }
 
     // CSI A
     pub(crate) fn cuu(&mut self, offset: u16) {
-        self.last_print = None;
+        self.break_cluster();
         self.grid_mut().row_dec_clamp(offset);
     }
 
     // CSI B
     pub(crate) fn cud(&mut self, offset: u16) {
-        self.last_print = None;
+        self.break_cluster();
         self.grid_mut().row_inc_clamp(offset);
     }
 
     // CSI C
     pub(crate) fn cuf(&mut self, offset: u16) {
-        self.last_print = None;
+        self.break_cluster();
         self.grid_mut().col_inc_clamp(offset);
     }
 
     // CSI D
     pub(crate) fn cub(&mut self, offset: u16) {
-        self.last_print = None;
+        self.break_cluster();
         self.grid_mut().col_dec(offset);
     }
 
     // CSI E
     pub(crate) fn cnl(&mut self, offset: u16) {
-        self.last_print = None;
+        self.break_cluster();
         self.grid_mut().col_set(0);
         self.grid_mut().row_inc_clamp(offset);
     }
 
     // CSI F
     pub(crate) fn cpl(&mut self, offset: u16) {
-        self.last_print = None;
+        self.break_cluster();
         self.grid_mut().col_set(0);
         self.grid_mut().row_dec_clamp(offset);
     }
 
     // CSI G
     pub(crate) fn cha(&mut self, col: u16) {
-        self.last_print = None;
+        self.break_cluster();
         self.grid_mut().col_set(col - 1);
     }
 
     // CSI H, and CSI f (HVP; ratty-vt)
     pub(crate) fn cup(&mut self, (row, col): (u16, u16)) {
-        self.last_print = None;
+        self.break_cluster();
         self.grid_mut().set_pos(crate::ratty_vt::grid::Pos {
             row: row - 1,
             col: col - 1,
@@ -1351,7 +1359,7 @@ impl Screen {
 
     // CSI J
     pub(crate) fn ed(&mut self, mode: u16, mut unhandled: impl FnMut(&mut Self)) {
-        self.last_print = None;
+        self.break_cluster();
         let attrs = self.attrs;
         match mode {
             0 => self.grid_mut().erase_all_forward(attrs),
@@ -1363,13 +1371,13 @@ impl Screen {
 
     // CSI ? J
     pub(crate) fn decsed(&mut self, mode: u16, unhandled: impl FnMut(&mut Self)) {
-        self.last_print = None;
+        self.break_cluster();
         self.ed(mode, unhandled);
     }
 
     // CSI K
     pub(crate) fn el(&mut self, mode: u16, mut unhandled: impl FnMut(&mut Self)) {
-        self.last_print = None;
+        self.break_cluster();
         let attrs = self.attrs;
         match mode {
             0 => self.grid_mut().erase_row_forward(attrs),
@@ -1381,50 +1389,50 @@ impl Screen {
 
     // CSI ? K
     pub(crate) fn decsel(&mut self, mode: u16, unhandled: impl FnMut(&mut Self)) {
-        self.last_print = None;
+        self.break_cluster();
         self.el(mode, unhandled);
     }
 
     // CSI L
     pub(crate) fn il(&mut self, count: u16) {
-        self.last_print = None;
+        self.break_cluster();
         self.grid_mut().insert_lines(count);
     }
 
     // CSI M
     pub(crate) fn dl(&mut self, count: u16) {
-        self.last_print = None;
+        self.break_cluster();
         self.grid_mut().delete_lines(count);
     }
 
     // CSI P
     pub(crate) fn dch(&mut self, count: u16) {
-        self.last_print = None;
+        self.break_cluster();
         self.grid_mut().delete_cells(count);
     }
 
     // CSI S
     pub(crate) fn su(&mut self, count: u16) {
-        self.last_print = None;
+        self.break_cluster();
         self.grid_mut().scroll_up(count);
     }
 
     // CSI T
     pub(crate) fn sd(&mut self, count: u16) {
-        self.last_print = None;
+        self.break_cluster();
         self.grid_mut().scroll_down(count);
     }
 
     // CSI X
     pub(crate) fn ech(&mut self, count: u16) {
-        self.last_print = None;
+        self.break_cluster();
         let attrs = self.attrs;
         self.grid_mut().erase_cells(count, attrs);
     }
 
     // CSI d
     pub(crate) fn vpa(&mut self, row: u16) {
-        self.last_print = None;
+        self.break_cluster();
         self.grid_mut().row_set(row - 1);
     }
 
@@ -1657,7 +1665,7 @@ impl Screen {
 
     // CSI r
     pub(crate) fn decstbm(&mut self, (top, bottom): (u16, u16)) {
-        self.last_print = None;
+        self.break_cluster();
         self.grid_mut().set_scroll_region(top - 1, bottom - 1);
     }
 
