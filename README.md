@@ -91,33 +91,6 @@ The default configuration file is available in [`config/ratty.toml`](config/ratt
 
 You can copy this file to `$HOME/.config/ratty/ratty.toml` and customize it.
 
-### Font rendering
-
-Ratty can resolve a system font by family name or load exact font files. Explicit
-faces are the most predictable choice for box drawing, Braille, CJK, emoji-width,
-bold, and italic rendering because the renderer does not have to guess which
-installed face belongs to each style:
-
-```toml
-[font]
-regular = "/path/to/IosevkaFixed-Regular.ttf"
-bold = "/path/to/IosevkaFixed-Bold.ttf"
-italic = "/path/to/IosevkaFixed-Italic.ttf"
-bold_italic = "/path/to/IosevkaFixed-BoldItalic.ttf"
-size = 12
-```
-
-`size` is interpreted in points. Ratty measures the loaded font's glyph advance
-and line box to derive the cell dimensions before sizing the PTY; the only
-geometry setting is `line_height`, a multiplier on the font's natural row
-(`1.0` default). Iosevka's rows are 2.5 times its column width, so cell art such
-as the fastfetch logo looks stretched at `1.0`; `line_height = 0.85` brings it
-close to 2:1 at the cost of clipping the outermost ascender and descender
-pixels. If the configured family is not installed,
-Ratty falls back to the generic monospace family and logs a warning. Leave
-`window.scale_factor` unset for automatic framebuffer/DPI scaling; set it only
-as an explicit override.
-
 ### Changing the cursor
 
 ```toml
