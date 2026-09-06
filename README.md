@@ -122,8 +122,8 @@ Other useful cursor fields are:
 
 | Key                                                            | Action               |
 | -------------------------------------------------------------- | -------------------- |
-| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>C</kbd>                    | Copy selection       |
-| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>V</kbd>                    | Paste clipboard      |
+| <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd>                    | Copy selection       |
+| <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>V</kbd>                    | Paste clipboard      |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Enter</kbd>                | Toggle 2D / ortho 3D |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>P</kbd>                    | Toggle perspective   |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>M</kbd>                    | Toggle Mobius mode   |
