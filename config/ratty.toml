@@ -40,8 +40,8 @@ bob_amplitude = 0.08
 
 [bindings]
 keys = [
-  { key = "C", with = "Control | alt", action = "Copy" },
-  { key = "V", with = "Control | alt", action = "Paste" },
+  { key = "C", with = "Control | shift", action = "Copy" },
+  { key = "V", with = "Control | shift", action = "Paste" },
   { key = "PageUp", with = "alt", action = "ScrollPageUp" },
   { key = "PageDown", with = "alt", action = "ScrollPageDown" },
   { key = "Up", with = "alt", action = "ScrollUp" },
