@@ -13,6 +13,7 @@ use winit::window::Icon;
 
 use ratty::cli::Cli;
 use ratty::config::{AppConfig, UpdateModeConfig};
+use ratty::control::TerminalControl;
 use ratty::paths::runtime_asset_root;
 use ratty::plugin::TerminalPlugin;
 use ratty::runtime::{RuntimeOptions, TerminalRuntime};
@@ -54,56 +55,61 @@ fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(&asset_root)?;
     let window_icon = load_window_icon()?;
 
-    App::new()
-        .insert_resource(ClearColor(Color::srgba_u8(
-            app_config.theme.background[0],
-            app_config.theme.background[1],
-            app_config.theme.background[2],
-            (app_config.window.opacity.clamp(0.0, 1.0) * 255.0).round() as u8,
-        )))
-        .insert_resource(app_config.clone())
-        .insert_resource(runtime)
-        .insert_resource(terminal)
-        .insert_non_send(AppWindowIcon { icon: window_icon })
-        // Unfocused windows always update continuously. Bevy's default switches
-        // them to a reactive mode, which would delay background PTY output.
-        // While focused, `update_mode` picks between updating continuously and
-        // updating reactively at a capped frame rate to reduce idle CPU usage.
-        .insert_resource(match app_config.window.update_mode {
-            UpdateModeConfig::Continuous => WinitSettings::continuous(),
-            UpdateModeConfig::LowPower => WinitSettings {
-                focused_mode: UpdateMode::reactive_low_power(Duration::from_millis(
-                    app_config.window.frame_interval_ms,
-                )),
-                unfocused_mode: UpdateMode::Continuous,
-            },
-        })
-        .add_plugins(
-            DefaultPlugins
-                .set(WindowPlugin {
-                    primary_window: Some(Window {
-                        title: window_title.clone(),
-                        name: Some(window_title),
-                        resolution: window_resolution(&app_config),
-                        resize_constraints: WindowResizeConstraints {
-                            min_width: 1.0,
-                            min_height: 1.0,
-                            ..default()
-                        },
-                        transparent: app_config.window.opacity < 1.0,
-                        visible: false,
+    let control = cli.mcp.then(TerminalControl::spawn).transpose()?;
+
+    let mut app = App::new();
+    if let Some(control) = control {
+        app.insert_resource(control);
+    }
+    app.insert_resource(ClearColor(Color::srgba_u8(
+        app_config.theme.background[0],
+        app_config.theme.background[1],
+        app_config.theme.background[2],
+        (app_config.window.opacity.clamp(0.0, 1.0) * 255.0).round() as u8,
+    )))
+    .insert_resource(app_config.clone())
+    .insert_resource(runtime)
+    .insert_resource(terminal)
+    .insert_non_send(AppWindowIcon { icon: window_icon })
+    // Unfocused windows always update continuously. Bevy's default switches
+    // them to a reactive mode, which would delay background PTY output.
+    // While focused, `update_mode` picks between updating continuously and
+    // updating reactively at a capped frame rate to reduce idle CPU usage.
+    .insert_resource(match app_config.window.update_mode {
+        UpdateModeConfig::Continuous => WinitSettings::continuous(),
+        UpdateModeConfig::LowPower => WinitSettings {
+            focused_mode: UpdateMode::reactive_low_power(Duration::from_millis(
+                app_config.window.frame_interval_ms,
+            )),
+            unfocused_mode: UpdateMode::Continuous,
+        },
+    })
+    .add_plugins(
+        DefaultPlugins
+            .set(WindowPlugin {
+                primary_window: Some(Window {
+                    title: window_title.clone(),
+                    name: Some(window_title),
+                    resolution: window_resolution(&app_config),
+                    resize_constraints: WindowResizeConstraints {
+                        min_width: 1.0,
+                        min_height: 1.0,
                         ..default()
-                    }),
-                    ..default()
-                })
-                .set(AssetPlugin {
-                    file_path: asset_root.to_string_lossy().into_owned(),
+                    },
+                    transparent: app_config.window.opacity < 1.0,
+                    visible: false,
                     ..default()
                 }),
-        )
-        .add_systems(Update, apply_window_icon)
-        .add_plugins(TerminalPlugin)
-        .run();
+                ..default()
+            })
+            .set(AssetPlugin {
+                file_path: asset_root.to_string_lossy().into_owned(),
+                ..default()
+            }),
+    )
+    .add_systems(Update, apply_window_icon)
+    .add_plugins(TerminalPlugin)
+    .run();
 
     Ok(())
 }

@@ -91,6 +91,101 @@ The default configuration file is available in [`config/ratty.toml`](config/ratt
 
 You can copy this file to `$HOME/.config/ratty/ratty.toml` and customize it.
 
+## Codex / MCP live control
+
+Ratty ships a stdio MCP server named `ratty-mcp`. It gives Codex live, per-frame control of a
+running terminal while keeping MCP protocol traffic separate from the shell PTY.
+
+Start a controllable Ratty window:
+
+```bash
+ratty --mcp
+```
+
+When developing from a source checkout, use the freshly built binary explicitly. A previously
+installed `ratty` on `PATH` may not have MCP support yet:
+
+```bash
+./target/debug/ratty --mcp
+```
+
+Register the installed MCP server with Codex once, then restart Codex:
+
+```bash
+codex mcp add ratty -- ratty-mcp
+```
+
+Codex launches `ratty-mcp` automatically as its stdio child; do not start that binary by hand.
+The controllable `ratty --mcp` GUI can run in another shell, or Codex can run inside the very
+terminal it controls:
+
+```bash
+./target/debug/ratty --mcp -e codex
+```
+
+Both processes must run as the same OS user so the MCP child can read Ratty's private endpoint
+file. If Codex was already open when the server was registered, restart it so the new tools load.
+
+For a source checkout, build first and register the absolute binary path:
+
+```bash
+cargo build --release --bins
+codex mcp add ratty -- /absolute/path/to/ratty/target/release/ratty-mcp
+```
+
+The MCP tools can:
+
+- inspect all live window, grid, camera, warp, and rat-cursor state
+- read the visible terminal screen and type or submit exact PTY input
+- resize the native window or exact PTY row/column grid and change font size
+- move the window, rename it, and change its background colour
+- switch among flat, orthographic, perspective, and Möbius modes
+- replace the terminal sheet with an agent-defined 2×2 through 8×8 control-point surface
+- edit ten persistent camera slots: translation, yaw, pitch, roll, zoom, FOV, and warp
+- control rat visibility, size, horizontal/depth offsets, brightness, spin speed, jump speed,
+  and jump height
+
+Once Codex has restarted and the `ratty` MCP server is connected, try prompts such as:
+
+```text
+Inspect my Ratty terminal, make it 120x40 cells, and set the window title to "agent cage".
+
+Put Ratty into perspective mode with maximum warp, yaw 28°, pitch -12°, roll 4°,
+and move the camera to x=20, y=-10, z=80.
+
+Make the rat twice as large, neon-bright, spinning backwards at speed 5, and jumping
+three times faster with a height of 0.7 cells.
+
+Fold the terminal into a deep asymmetric saddle using a 4x4 custom control-point lattice,
+then choose a camera angle where I can still read it.
+
+Read the terminal, type `cargo check`, press Enter, then read the visible result.
+```
+
+Every configuration argument is optional, so an agent can change one property without resetting
+the others. `terminal_state` returns the current values; `read_terminal` reads the visible grid;
+`send_input` types into the PTY; and `set_view`, `set_cursor`, `set_window`, and `set_terminal`
+apply partial updates. Camera slots `0` through `9` are persistent for the lifetime of the window,
+which lets an agent build multiple views and switch between them instantly.
+
+`set_shape` changes the terminal's actual vertex surface. `kind = "custom"` accepts a row-major
+lattice of 2×2 through 8×8 XYZ control points. X and Y are normalized terminal coordinates
+(normally `-0.5..0.5`), while Z is depth in terminal world units. Ratty interpolates the entire
+textured terminal between those points; inline images and the rat cursor follow the same surface.
+Use `kind = "automatic"` to return to the regular plane or Möbius geometry selected by `set_view`.
+This makes arbitrary folds, tents, saddles, fans, and generated sculptures possible without
+recompiling Ratty.
+
+Control is opt-in. `--mcp` binds an ephemeral IPv4 loopback port and writes a random 256-bit
+session token to a user-only discovery file in the platform cache directory. Requests and response
+waits are bounded. Set `RATTY_MCP_ENDPOINT_FILE` for both processes when controlling multiple
+Ratty instances or when you want a custom discovery-file location:
+
+```bash
+RATTY_MCP_ENDPOINT_FILE=/tmp/my-ratty.json ratty --mcp
+codex mcp add --env RATTY_MCP_ENDPOINT_FILE=/tmp/my-ratty.json ratty-special -- ratty-mcp
+```
+
 ### Changing the cursor
 
 ```toml

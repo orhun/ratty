@@ -163,6 +163,22 @@ impl TerminalSurface {
         self.font.size
     }
 
+    /// Sets the font size, rebuilding the text renderer when it changes.
+    pub fn set_font_size(&mut self, size: i32) -> bool {
+        if size == self.font.size {
+            return false;
+        }
+        self.font.size = size;
+        self.rebuild_renderer();
+        true
+    }
+
+    /// Updates the renderer's default background colour.
+    pub fn set_background(&mut self, rgb: [u8; 3]) {
+        self.theme.background = rgb;
+        self.rebuild_renderer();
+    }
+
     /// Updates the physical render scale.
     fn set_render_scale(&mut self, render_scale: f32) -> bool {
         let render_scale = render_scale.max(1.0);
@@ -227,7 +243,7 @@ impl TerminalSurface {
     }
 
     /// Returns the current terminal layout.
-    fn layout(&self) -> TerminalLayout {
+    pub(crate) fn layout(&self) -> TerminalLayout {
         TerminalLayout::new(
             self.cols,
             self.rows,

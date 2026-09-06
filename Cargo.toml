@@ -10,6 +10,7 @@ repository = "https://github.com/orhun/ratty"
 keywords = ["terminal", "emulator", "3d", "graphics"]
 categories = ["command-line-utilities", "graphics"]
 edition = "2024"
+default-run = "ratty"
 exclude = ["website/**", ".github/**", "widget/**"]
 
 [dependencies]
@@ -49,11 +50,23 @@ ratatui = "0.30"
 rio-vt = { version = "0.5.19", default-features = false }
 rust-embed = "8.5"
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 shellexpand = "3.1"
 stl_io = "0.11.0"
 tobj = "4.0"
 toml = "0.8"
 winit = { version = "0.30", default-features = false }
+
+# MCP control-plane binary. The GUI-side bridge itself remains synchronous so
+# it never adds an async runtime to Bevy's render process.
+getrandom = "0.3"
+rmcp = { version = "3.2", features = ["transport-io"] }
+schemars = "1.0"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std"] }
+
+[[bin]]
+name = "ratty-mcp"
+path = "src/bin/ratty-mcp.rs"
 
 [build-dependencies]
 winresource = "0.1.31"

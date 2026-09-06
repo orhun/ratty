@@ -57,11 +57,50 @@ pub struct TerminalPlaneMeshes {
     pub back: Handle<Mesh>,
 }
 
-/// Plane warp state.
+/// Parametric surface selected for the terminal sheet.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TerminalSurfaceKind {
+    /// Follow the active presentation mode (plane or Möbius).
+    #[default]
+    ModeDefault,
+    /// A surface sampled from an agent-provided control-point lattice.
+    Custom,
+}
+
+/// Parameters and optional control lattice for the terminal surface.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TerminalSurfaceShape {
+    /// Surface family.
+    pub kind: TerminalSurfaceKind,
+    /// Overall deformation multiplier.
+    pub amplitude: f32,
+    /// Number of columns in `control_points` for a custom surface.
+    pub control_columns: u8,
+    /// Number of rows in `control_points` for a custom surface.
+    pub control_rows: u8,
+    /// Row-major XYZ lattice. X/Y are normalized sheet coordinates; Z is depth.
+    pub control_points: Vec<Vec3>,
+}
+
+impl Default for TerminalSurfaceShape {
+    fn default() -> Self {
+        Self {
+            kind: TerminalSurfaceKind::ModeDefault,
+            amplitude: 1.0,
+            control_columns: 0,
+            control_rows: 0,
+            control_points: Vec::new(),
+        }
+    }
+}
+
+/// Plane warp and parametric surface state.
 #[derive(Resource, Default)]
 pub struct TerminalPlaneWarp {
     /// Warp amount.
     pub amount: f32,
+    /// Current parametric surface definition.
+    pub shape: TerminalSurfaceShape,
 }
 
 impl TerminalPlaneWarp {

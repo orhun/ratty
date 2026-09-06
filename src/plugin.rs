@@ -7,6 +7,7 @@ use crate::camera::{
     TerminalCameraUpdate, activate_terminal_camera_presets, apply_terminal_camera_updates,
 };
 use crate::config::AppConfig;
+use crate::control::pump_control_commands;
 use crate::direct_render::DirectTerminalRenderPlugin;
 use crate::inline::{
     TerminalInlineObjectPlane, TerminalInlineObjectSprite, TerminalInlineObjects, TerminalRgpObject,
@@ -53,6 +54,10 @@ impl Plugin for TerminalPlugin {
             .add_systems(Startup, setup_scene)
             .add_systems(Update, request_exit_on_primary_window_close)
             .add_systems(Update, pump_pty_output)
+            .add_systems(
+                Update,
+                pump_control_commands.run_if(resource_exists::<crate::control::TerminalControl>),
+            )
             .configure_sets(
                 Update,
                 (
@@ -69,6 +74,7 @@ impl Plugin for TerminalPlugin {
                 Update,
                 apply_terminal_camera_updates
                     .after(pump_pty_output)
+                    .after(pump_control_commands)
                     .in_set(TerminalCameraSystemSet::ProtocolUpdates),
             )
             .add_systems(

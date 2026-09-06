@@ -40,7 +40,8 @@ use crate::runtime::TerminalRuntime;
 use crate::scene::{
     MobiusTransition, ModelLoadState, TerminalPlane, TerminalPlaneBack,
     TerminalPlaneBackLayoutQuery, TerminalPlaneLayoutQuery, TerminalPlaneMeshes, TerminalPlaneWarp,
-    TerminalPresentationMode, TerminalViewport, sync_terminal_layout,
+    TerminalPresentationMode, TerminalSurfaceKind, TerminalSurfaceShape, TerminalViewport,
+    sync_terminal_layout,
 };
 use crate::terminal::{
     TerminalRedrawState, TerminalSurface, TerminalWidget, render_scale_for_window,
@@ -74,6 +75,7 @@ struct InlineLayout {
 
 struct KittyRenderContext<'a> {
     mode: TerminalPresentationMode,
+    surface_shape: TerminalSurfaceShape,
     mobius_progress: f32,
     warp_amount: f32,
     elapsed_secs: f32,
@@ -88,15 +90,18 @@ struct CursorPoseContext<'a, 'w, 's> {
     terminal: &'a TerminalSurface,
     viewport: &'a TerminalViewport,
     mode: TerminalPresentationMode,
-    plane_warp_amount: f32,
+    plane_warp: &'a TerminalPlaneWarp,
     mobius_progress: f32,
     elapsed_secs: f32,
     plane_query: &'a Query<'w, 's, &'static Transform, (With<TerminalPlane>, Without<CursorModel>)>,
 }
 
-/// Marker for objects that already had instance brightness applied.
+/// Original material plus the last live brightness applied to an instance.
 #[derive(Component)]
-pub struct BrightnessAdjusted;
+pub struct BrightnessAdjusted {
+    source: StandardMaterial,
+    brightness: f32,
+}
 
 type PlaneTransformQuery<'w, 's> =
     Query<'w, 's, &'static Transform, (With<TerminalPlane>, Without<TerminalRgpObject>)>;
@@ -621,6 +626,7 @@ pub(crate) fn sync_inline_objects(mut params: SyncInlineParams) {
             InlineObject::KittyImage(object) => {
                 let mut ctx = KittyRenderContext {
                     mode: camera_slots.active().mode,
+                    surface_shape: plane_warp.shape.clone(),
                     mobius_progress: active_mobius_progress(
                         camera_slots.active().mode,
                         mobius_transition,
@@ -770,6 +776,7 @@ fn ensure_kitty_plane_assets(
         let mesh = build_kitty_plane_mesh(
             layout,
             ctx.mode,
+            &ctx.surface_shape,
             ctx.warp_amount,
             ctx.elapsed_secs,
             ctx.mobius_progress,
@@ -791,6 +798,7 @@ fn ensure_kitty_plane_assets(
             &mut mesh,
             layout,
             ctx.mode,
+            &ctx.surface_shape,
             ctx.warp_amount,
             ctx.elapsed_secs,
             ctx.mobius_progress,
@@ -816,6 +824,7 @@ fn kitty_plane_material(image_handle: &Handle<Image>) -> StandardMaterial {
 fn build_kitty_plane_mesh(
     layout: &InlineKittyPlaneLayout,
     mode: TerminalPresentationMode,
+    surface_shape: &TerminalSurfaceShape,
     warp_amount: f32,
     elapsed_secs: f32,
     mobius_progress: f32,
@@ -861,6 +870,7 @@ fn build_kitty_plane_mesh(
         &mut mesh,
         layout,
         mode,
+        surface_shape,
         warp_amount,
         elapsed_secs,
         mobius_progress,
@@ -872,10 +882,15 @@ fn write_kitty_plane_positions(
     mesh: &mut Mesh,
     layout: &InlineKittyPlaneLayout,
     mode: TerminalPresentationMode,
+    surface_shape: &TerminalSurfaceShape,
     warp_amount: f32,
     elapsed_secs: f32,
     mobius_progress: f32,
 ) {
+    let surface = TerminalPlaneWarp {
+        amount: warp_amount,
+        shape: surface_shape.clone(),
+    };
     let Some(VertexAttributeValues::Float32x3(positions)) =
         mesh.attribute_mut(Mesh::ATTRIBUTE_POSITION)
     else {
@@ -890,11 +905,11 @@ fn write_kitty_plane_positions(
             let u = x as f32 / layout.x_segments as f32;
             let px = layout.local_x + (u - 0.5) * layout.local_width;
             if index < positions.len() {
-                let point = plane_surface_point(
+                let point = terminal_surface_point(
+                    &surface,
                     mode,
                     px,
                     py,
-                    warp_amount,
                     elapsed_secs,
                     1.5,
                     mobius_progress,
@@ -943,6 +958,7 @@ pub(crate) fn animate_inline_kitty_planes(
             &mut mesh,
             layout,
             mode,
+            &warp.shape,
             warp.amount,
             elapsed_secs,
             mobius_progress,
@@ -1219,11 +1235,11 @@ pub(crate) fn sync_rgp_objects(mut params: RgpSyncParams) {
                 *visibility = Visibility::Hidden;
                 continue;
             };
-            let local_position = plane_surface_point(
+            let local_position = terminal_surface_point(
+                plane_warp,
                 mode,
                 layout.local_x,
                 layout.local_y,
-                plane_warp.amount,
                 elapsed_secs,
                 8.0 + anchor.style.depth * 1.5,
                 mobius_progress,
@@ -1262,8 +1278,8 @@ pub(crate) struct BrightnessParams<'w, 's> {
             Entity,
             &'static mut MeshMaterial3d<StandardMaterial>,
             &'static ChildOf,
+            Option<&'static mut BrightnessAdjusted>,
         ),
-        Without<BrightnessAdjusted>,
     >,
     materials: ResMut<'w, Assets<StandardMaterial>>,
     commands: Commands<'w, 's>,
@@ -1276,8 +1292,8 @@ pub(crate) struct BrightnessParams<'w, 's> {
 /// [`TerminalRgpObject`] root or a [`CursorModel`] root and clones the referenced material with
 /// the effective brightness applied.
 ///
-/// Adjusted entities receive [`BrightnessAdjusted`] so the same material branch is not processed
-/// again every frame.
+/// Adjusted entities retain their unmodified source material in [`BrightnessAdjusted`], allowing
+/// MCP and RGP brightness changes to be reapplied without compounding the previous multiplier.
 pub(crate) fn apply_instance_brightness(mut params: BrightnessParams) {
     let BrightnessParams {
         app_config,
@@ -1306,7 +1322,7 @@ pub(crate) fn apply_instance_brightness(mut params: BrightnessParams) {
         .collect::<HashMap<_, _>>();
     let cursor_roots = cursor_roots.iter().collect::<Vec<_>>();
 
-    for (entity, mut material_handle, parent) in material_query.iter_mut() {
+    for (entity, mut material_handle, parent, adjusted_state) in material_query.iter_mut() {
         let mut current = parent.parent();
         let mut brightness = None;
 
@@ -1329,10 +1345,21 @@ pub(crate) fn apply_instance_brightness(mut params: BrightnessParams) {
             continue;
         };
 
-        let Some(source_material) = materials.get(&material_handle.0).cloned() else {
+        if adjusted_state
+            .as_ref()
+            .is_some_and(|state| (state.brightness - brightness).abs() < f32::EPSILON)
+        {
+            continue;
+        }
+
+        let source_material = adjusted_state
+            .as_ref()
+            .map(|state| state.source.clone())
+            .or_else(|| materials.get(&material_handle.0).cloned());
+        let Some(source_material) = source_material else {
             continue;
         };
-        let mut adjusted = source_material;
+        let mut adjusted = source_material.clone();
         let linear = adjusted.base_color.to_linear();
         adjusted.base_color = Color::linear_rgba(
             linear.red * brightness,
@@ -1347,7 +1374,14 @@ pub(crate) fn apply_instance_brightness(mut params: BrightnessParams) {
             adjusted.emissive.alpha,
         );
         material_handle.0 = materials.add(adjusted);
-        commands.entity(entity).insert(BrightnessAdjusted);
+        if let Some(mut state) = adjusted_state {
+            state.brightness = brightness;
+        } else {
+            commands.entity(entity).insert(BrightnessAdjusted {
+                source: source_material,
+                brightness,
+            });
+        }
     }
 }
 
@@ -1492,7 +1526,7 @@ pub fn animate_terminal_plane_warp(
     apply_plane_warp(
         meshes.get_mut(&plane_meshes.front),
         mode,
-        warp.amount,
+        &warp,
         time.elapsed_secs(),
         1.0,
         mobius_progress,
@@ -1503,7 +1537,7 @@ pub fn animate_terminal_plane_warp(
         apply_plane_warp(
             meshes.get_mut(&plane_meshes.back),
             mode,
-            warp.amount,
+            &warp,
             time.elapsed_secs(),
             -1.0,
             mobius_progress,
@@ -1594,7 +1628,7 @@ fn active_mobius_progress(
 fn apply_plane_warp(
     mesh: Option<AssetMut<'_, Mesh>>,
     mode: TerminalPresentationMode,
-    warp_amount: f32,
+    warp: &TerminalPlaneWarp,
     elapsed_secs: f32,
     direction: f32,
     mobius_progress: f32,
@@ -1615,8 +1649,7 @@ fn apply_plane_warp(
     for (position, uv) in positions.iter_mut().zip(uvs.iter()) {
         let x = uv[0] - 0.5;
         let y = 0.5 - uv[1];
-        let point =
-            plane_surface_point(mode, x, y, warp_amount, elapsed_secs, 0.0, mobius_progress);
+        let point = terminal_surface_point(warp, mode, x, y, elapsed_secs, 0.0, mobius_progress);
         position[0] = point.x;
         position[1] = point.y;
         position[2] = oriented_plane_depth(mode, point.z, direction);
@@ -1677,7 +1710,7 @@ pub(crate) fn sync_asset_to_terminal_cursor(mut params: CursorSyncParams) {
         terminal,
         viewport,
         mode: camera_slots.active().mode,
-        plane_warp_amount: plane_warp.amount,
+        plane_warp,
         mobius_progress: active_mobius_progress(camera_slots.active().mode, mobius_transition),
         elapsed_secs: time.elapsed_secs(),
         plane_query,
@@ -1735,11 +1768,11 @@ fn cursor_pose(
         };
         let plane_local_x = cursor_x / cols - 0.5;
         let plane_local_y = 0.5 - (cursor_row + 0.5) / rows + plane_bob;
-        let local_position = plane_surface_point(
+        let local_position = terminal_surface_point(
+            ctx.plane_warp,
             ctx.mode,
             plane_local_x,
             plane_local_y,
-            ctx.plane_warp_amount,
             ctx.elapsed_secs,
             app_config.cursor.model.plane_offset,
             ctx.mobius_progress,
@@ -1793,6 +1826,56 @@ fn plane_surface_point(
             source_point.lerp(target_point, mobius_progress)
         }
     }
+}
+
+fn terminal_surface_point(
+    warp: &TerminalPlaneWarp,
+    mode: TerminalPresentationMode,
+    local_x: f32,
+    local_y: f32,
+    elapsed_secs: f32,
+    depth_offset: f32,
+    mobius_progress: f32,
+) -> Vec3 {
+    let shape = &warp.shape;
+    match shape.kind {
+        TerminalSurfaceKind::ModeDefault => plane_surface_point(
+            mode,
+            local_x,
+            local_y,
+            warp.amount,
+            elapsed_secs,
+            depth_offset,
+            mobius_progress,
+        ),
+        TerminalSurfaceKind::Custom => custom_surface_point(shape, local_x, local_y, depth_offset),
+    }
+}
+
+fn custom_surface_point(
+    shape: &TerminalSurfaceShape,
+    local_x: f32,
+    local_y: f32,
+    depth_offset: f32,
+) -> Vec3 {
+    let columns = usize::from(shape.control_columns);
+    let rows = usize::from(shape.control_rows);
+    if columns < 2 || rows < 2 || shape.control_points.len() != columns * rows {
+        return Vec3::new(local_x, local_y, depth_offset);
+    }
+    let gx = ((local_x + 0.5).clamp(0.0, 1.0) * (columns - 1) as f32).min((columns - 1) as f32);
+    let gy = ((0.5 - local_y).clamp(0.0, 1.0) * (rows - 1) as f32).min((rows - 1) as f32);
+    let x0 = gx.floor() as usize;
+    let y0 = gy.floor() as usize;
+    let x1 = (x0 + 1).min(columns - 1);
+    let y1 = (y0 + 1).min(rows - 1);
+    let top = shape.control_points[y0 * columns + x0]
+        .lerp(shape.control_points[y0 * columns + x1], gx - x0 as f32);
+    let bottom = shape.control_points[y1 * columns + x0]
+        .lerp(shape.control_points[y1 * columns + x1], gx - x0 as f32);
+    let mut point = top.lerp(bottom, gy - y0 as f32);
+    point.z = point.z * shape.amplitude + depth_offset;
+    point
 }
 
 fn mobius_surface_point(
@@ -2049,8 +2132,14 @@ mod tests {
             x_segments: 2,
             y_segments: 2,
         };
-        let mesh =
-            build_kitty_plane_mesh(&layout, TerminalPresentationMode::Mobius3d, 0.0, 0.0, 0.0);
+        let mesh = build_kitty_plane_mesh(
+            &layout,
+            TerminalPresentationMode::Mobius3d,
+            &TerminalSurfaceShape::default(),
+            0.0,
+            0.0,
+            0.0,
+        );
 
         let mut slots = TerminalCameraSlots::default();
         slots.active_mut().mode = TerminalPresentationMode::Mobius3d;
@@ -2121,8 +2210,14 @@ mod tests {
             x_segments: 2,
             y_segments: 2,
         };
-        let mesh =
-            build_kitty_plane_mesh(&layout, TerminalPresentationMode::Mobius3d, 0.0, 0.0, 1.0);
+        let mesh = build_kitty_plane_mesh(
+            &layout,
+            TerminalPresentationMode::Mobius3d,
+            &TerminalSurfaceShape::default(),
+            0.0,
+            0.0,
+            1.0,
+        );
         let Some(VertexAttributeValues::Float32x3(positions)) =
             mesh.attribute(Mesh::ATTRIBUTE_POSITION)
         else {
