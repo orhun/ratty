@@ -41,9 +41,26 @@ measurement conditions, and tooling migration details.
 ## Validation and outstanding measurements
 
 Both preserved optimized application binaries pass the 21-case CPU drawing/PTY
-matrix and sustained-flood validation. The attempted five-sample application
-noise baseline was contaminated by restarted external compilation and is
-excluded from performance conclusions.
+matrix and sustained-flood validation. All four application noise pilots are
+excluded: the first three overlapped external compilation, and a broader audit
+found an external `fux-xtask` process using 97.5–100% of one CPU core throughout
+the fourth. The initial compiler-name filter missed this workload. Thresholds
+derived from that pilot (`app-acceptance-thresholds.json`) were set before
+candidate evaluation, but are invalid for accepting results and must be replaced
+after a quiet baseline run. Load audits must inspect all busy processes, not
+just compiler and test executable names.
+
+The subsequent five alternating baseline/candidate pairs all completed the 18
+drawing cases (300 updates each) and three PTY cases. Every PTY case consumed
+1,802,263 bytes; final-state hashes agreed across both variants and all trials.
+Observed peak outstanding PTY accounting was 17,408–18,432 bytes. These are
+finite-workload correctness and queue observations, not a general memory bound.
+However, process logs captured external compilation or test workloads in pairs
+1–3, including a process at 99.7% of one CPU core. The entire batch is excluded
+from performance claims; the two remaining pairs do not meet the five-run
+requirement. Raw `app-paired-{baseline,candidate}-{1..5}.json`, `.log`, and
+`-processes.txt` artifacts are retained. A controlled replacement comparison
+remains outstanding.
 
 Real Metal windows have verified 80×24 and 240×80 configurations. A three-cycle
 graphics validation observed all twelve live RGP yaw updates and exact upward
@@ -62,18 +79,44 @@ This single diagnostic run occurred under external load; it supports an observed
 plateau for this workload, not a controlled memory improvement or a general
 no-leak claim.
 
-Focused low-power behavior is unmeasured: attempted activation still recorded
-unfocused windows. Unfocused scheduling remains continuous. Controlled window
-timings, RSS, recorder overhead, input latency, and broader application profiling
-remain outstanding. GPU timestamps are unavailable through the pinned renderer's
+Most activation probes recorded unfocused windows; a later probe recorded 92
+focused updates over three seconds in low-power mode. Its Apple Events activation
+command was denied, so this does not establish reliable focus automation. Every
+measurement must check its recorded focus state. Unfocused scheduling remains
+continuous. Controlled window timings, RSS comparisons, recorder/profiler overhead,
+and repeated input-latency measurements remain outstanding. GPU timestamps are unavailable through the pinned renderer's
 diagnostics on Metal; CPU markers do not substitute for them.
+An OS-state audit subsequently found the session locked (`CGSSessionScreenIsLocked=Yes`,
+`loginwindow` frontmost). Earlier probes did not record OS lock state; their
+visible/focused flags establish application state only. Treat them as pipeline
+validation rather than evidence of an actively presented desktop. Remaining
+desktop measurements require an unlocked session and a quiet machine.
 
 The opt-in font/DPI/window scenario passes all seven stages and restores its
 original grid and physical dimensions. Its phase field identifies a requested
 stage; stable stretches establish settling. Image asset counts rise from 14 to
-22 over the first cycle and remain there after restoration. This could include
-font/scale caches; repeated cycles are needed to distinguish a bounded cache
-from continued retention. No memory-restoration claim follows from grid restoration.
+22 over the first cycle and remain there after restoration. A subsequent three-cycle
+run stayed at 22 in later cycles and restored the grid each time, consistent with
+a cache plateau over this finite test. This does not prove bounded GPU memory
+or exclude retention in other workloads. No memory-restoration claim follows
+from grid restoration.
+
+The symbol-preserving baseline application profile (`desktop-full-profile-repeat.txt`)
+captured 813 snapshots per thread over ten seconds with 30 Hz full-text updates
+at 80×24. It reaches PTY draining/filtering and widget/renderer synchronization.
+Most collapsed stack counts represent waiting threads; active stacks frequently
+include Bevy task scheduling. Few snapshots land in parsing at this input rate,
+so the VT gain cannot be extrapolated to the entire application. These are
+qualitative sampling observations, not CPU-share percentages or an optimization
+justification for changing scheduling. The first two-snapshot profile is excluded.
+
+The graphics profile (`desktop-graphics-profile.txt`) captured 871 snapshots per
+thread and reached inline filtering and synchronization. Row-to-text conversion
+appears among the more frequent active leaf samples (26 collapsed samples),
+consistent with the visible-row snapshots used for anchor tracking. This is a
+candidate for further investigation, not a retained optimization: the existing
+scroll-inference ambiguity and missing controlled comparisons make a batching
+change premature.
 
 `ARTIFACT-STATUS.md` in the evidence directory identifies superseded and
 contaminated artifacts. No application or desktop gain is claimed here.

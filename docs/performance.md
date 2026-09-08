@@ -179,6 +179,12 @@ bytes, renderer counters, intervals between main-world updates, and wall time
 between markers in `First` and `Last`. Those wall times include scheduling and
 waiting; they are not thread CPU time, GPU duration, presentation completion, or
 input-to-display latency. Renderer snapshot/scene counters describe CPU work.
+Before desktop timing runs, separately verify that the OS session is unlocked
+and the intended window is actually presented. Bevy's visible/focused fields do
+not establish that the lock screen is absent. On macOS, the
+`CGSSessionScreenIsLocked` property reported by `ioreg -n Root -d 1 -l` can expose
+a locked session. Runs without verified session state support pipeline validation
+only, not active-desktop or input-to-display performance claims.
 The CSV also records registered inline objects/anchors and main-world image,
 mesh, and standard-material asset counts. Asset counts include the rest of the
 application and may settle after deferred cleanup; compare against the same
