@@ -198,6 +198,19 @@ pub struct TerminalRuntime {
     last_parser_size: ParserDimensions,
     /// Desired dimensions retained until both the PTY and parser accept them.
     pending_resize: Option<PtyDimensions>,
+    #[cfg(feature = "performance")]
+    processed_bytes: u64,
+    #[cfg(feature = "performance")]
+    processed_digest: Option<u64>,
+    #[cfg(feature = "performance")]
+    queue_metrics: Arc<QueueMetrics>,
+}
+
+#[cfg(feature = "performance")]
+#[derive(Default)]
+struct QueueMetrics {
+    outstanding: std::sync::atomic::AtomicUsize,
+    peak: std::sync::atomic::AtomicUsize,
 }
 
 /// `(cols, rows, pixel_width, pixel_height)` as sent to the PTY.
@@ -339,13 +352,28 @@ impl TerminalRuntime {
             .context("failed to create PTY writer")?;
 
         let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(16);
+        #[cfg(feature = "performance")]
+        let queue_metrics = Arc::new(QueueMetrics::default());
+        #[cfg(feature = "performance")]
+        let reader_metrics = Arc::clone(&queue_metrics);
         let reader_thread = thread::spawn(move || {
             let mut buf = [0_u8; 16 * 1024];
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => break,
                     Ok(size) => {
+                        #[cfg(feature = "performance")]
+                        {
+                            use std::sync::atomic::Ordering::Relaxed;
+                            let outstanding =
+                                reader_metrics.outstanding.fetch_add(size, Relaxed) + size;
+                            reader_metrics.peak.fetch_max(outstanding, Relaxed);
+                        }
                         if tx.send(buf[..size].to_vec()).is_err() {
+                            #[cfg(feature = "performance")]
+                            reader_metrics
+                                .outstanding
+                                .fetch_sub(size, std::sync::atomic::Ordering::Relaxed);
                             break;
                         }
                     }
@@ -374,12 +402,62 @@ impl TerminalRuntime {
             last_pty_size: (cols, rows, 0, 0),
             last_parser_size: (cols, rows),
             pending_resize: None,
+            #[cfg(feature = "performance")]
+            processed_bytes: 0,
+            #[cfg(feature = "performance")]
+            processed_digest: None,
+            #[cfg(feature = "performance")]
+            queue_metrics,
         })
     }
 
     /// Feeds bytes from the PTY into the VT state machine.
     pub fn process(&mut self, bytes: &[u8]) {
+        #[cfg(feature = "performance")]
+        {
+            self.processed_bytes = self.processed_bytes.saturating_add(bytes.len() as u64);
+            if let Some(digest) = &mut self.processed_digest {
+                for byte in bytes {
+                    *digest = (*digest ^ u64::from(*byte)).wrapping_mul(0x100000001b3);
+                }
+            }
+        }
         self.parser.process(bytes);
+    }
+
+    /// Bytes delivered to the VT parser, excluding filtered graphics sequences.
+    #[cfg(feature = "performance")]
+    pub fn processed_bytes(&self) -> u64 {
+        self.processed_bytes
+    }
+
+    /// Enables a streaming FNV-1a digest for an untimed fidelity validation pass.
+    #[cfg(feature = "performance")]
+    pub fn start_processed_digest(&mut self) {
+        self.processed_digest = Some(0xcbf29ce484222325);
+    }
+
+    /// Returns the optional digest of bytes delivered since validation started.
+    #[cfg(feature = "performance")]
+    pub fn processed_digest(&self) -> Option<u64> {
+        self.processed_digest
+    }
+
+    /// Polls the PTY child's exit status independently of output EOF.
+    #[cfg(feature = "performance")]
+    pub fn child_exit_success(&mut self) -> std::io::Result<Option<bool>> {
+        let child = self
+            .child
+            .as_mut()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotConnected, "no PTY child"))?;
+        let result = child.try_wait()?.map(|status| status.success());
+        if result.is_some() {
+            // portable-pty's Unix kill sends SIGHUP before checking status.
+            // Once reaped, retaining this handle could signal a reused PID
+            // during shutdown.
+            self.child.take();
+        }
+        Ok(result)
     }
 
     /// Returns the terminal screen.
@@ -409,7 +487,27 @@ impl TerminalRuntime {
 
     /// Receives pending PTY output without blocking.
     pub fn try_recv(&mut self) -> Result<Vec<u8>, TryRecvError> {
-        self.rx.get().try_recv()
+        let bytes = self.rx.get().try_recv()?;
+        #[cfg(feature = "performance")]
+        self.queue_metrics
+            .outstanding
+            .fetch_sub(bytes.len(), std::sync::atomic::Ordering::Relaxed);
+        Ok(bytes)
+    }
+
+    /// Current and peak PTY bytes awaiting receipt, including a blocked send.
+    ///
+    /// Excludes the reader's fixed buffer and chunks already returned by
+    /// `try_recv`. The channel and pending send hold at most 17 chunks of
+    /// 16 KiB; accounting can briefly include an eighteenth chunk between
+    /// receipt and decrement. This is an upper bound, not an exact channel
+    /// occupancy measurement. Unread kernel PTY and producer bytes are not
+    /// counted. The peak includes startup.
+    #[cfg(feature = "performance")]
+    pub fn queued_bytes(&self) -> (usize, usize) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let current = self.queue_metrics.outstanding.load(Relaxed);
+        (current, self.queue_metrics.peak.load(Relaxed).max(current))
     }
 
     /// Writes input bytes to the PTY.
@@ -641,6 +739,70 @@ mod resize_tests {
 
     use super::*;
 
+    #[cfg(feature = "performance")]
+    #[derive(Debug, Clone)]
+    struct ObservedChild {
+        kills: Arc<AtomicUsize>,
+        status: Option<u32>,
+    }
+
+    #[cfg(feature = "performance")]
+    impl portable_pty::ChildKiller for ObservedChild {
+        fn kill(&mut self) -> io::Result<()> {
+            self.kills.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(self.clone())
+        }
+    }
+
+    #[cfg(feature = "performance")]
+    impl portable_pty::Child for ObservedChild {
+        fn try_wait(&mut self) -> io::Result<Option<portable_pty::ExitStatus>> {
+            Ok(self.status.map(portable_pty::ExitStatus::with_exit_code))
+        }
+
+        fn wait(&mut self) -> io::Result<portable_pty::ExitStatus> {
+            Ok(portable_pty::ExitStatus::with_exit_code(
+                self.status.unwrap_or(0),
+            ))
+        }
+
+        fn process_id(&self) -> Option<u32> {
+            None
+        }
+
+        #[cfg(windows)]
+        fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+            None
+        }
+    }
+
+    #[cfg(feature = "performance")]
+    #[test]
+    fn polling_exit_discards_reaped_children_but_preserves_live_child_cleanup() {
+        for status in [None, Some(0), Some(7)] {
+            let kills = Arc::new(AtomicUsize::new(0));
+            let mut runtime = test_runtime(Box::new(FailOnceMaster {
+                attempts: Arc::new(AtomicUsize::new(0)),
+                applied_size: Arc::new(Mutex::new(None)),
+            }));
+            runtime.child = Some(Box::new(ObservedChild {
+                kills: kills.clone(),
+                status,
+            }));
+            assert_eq!(
+                runtime.child_exit_success().expect("poll child status"),
+                status.map(|code| code == 0)
+            );
+            assert_eq!(runtime.child.is_some(), status.is_none());
+            runtime.shutdown();
+            assert_eq!(kills.load(Ordering::SeqCst), usize::from(status.is_none()));
+        }
+    }
+
     struct FailOnceMaster {
         attempts: Arc<AtomicUsize>,
         applied_size: Arc<Mutex<Option<PtyDimensions>>>,
@@ -698,7 +860,71 @@ mod resize_tests {
             last_pty_size: (80, 24, 0, 0),
             last_parser_size: (80, 24),
             pending_resize: None,
+            #[cfg(feature = "performance")]
+            processed_bytes: 0,
+            #[cfg(feature = "performance")]
+            processed_digest: None,
+            #[cfg(feature = "performance")]
+            queue_metrics: Arc::new(QueueMetrics::default()),
         }
+    }
+
+    #[cfg(feature = "performance")]
+    #[test]
+    fn queue_accounting_decrements_only_on_successful_receipt() {
+        let mut runtime = test_runtime(Box::new(FailOnceMaster {
+            attempts: Arc::new(AtomicUsize::new(0)),
+            applied_size: Arc::new(Mutex::new(None)),
+        }));
+        let (tx, rx) = mpsc::sync_channel(1);
+        runtime.rx = SyncCell::new(rx);
+        runtime
+            .queue_metrics
+            .outstanding
+            .store(3, Ordering::Relaxed);
+        runtime.queue_metrics.peak.store(3, Ordering::Relaxed);
+        tx.send(vec![1, 2, 3]).expect("send output");
+        assert_eq!(runtime.queued_bytes(), (3, 3));
+        assert_eq!(runtime.try_recv().expect("receive output"), vec![1, 2, 3]);
+        assert_eq!(runtime.queued_bytes(), (0, 3));
+        assert_eq!(runtime.try_recv(), Err(TryRecvError::Empty));
+        drop(tx);
+        assert_eq!(runtime.try_recv(), Err(TryRecvError::Disconnected));
+        assert_eq!(runtime.queued_bytes(), (0, 3));
+    }
+
+    #[cfg(feature = "performance")]
+    #[test]
+    fn fidelity_digest_is_opt_in_and_independent_of_chunk_boundaries() {
+        let make_runtime = || {
+            test_runtime(Box::new(FailOnceMaster {
+                attempts: Arc::new(AtomicUsize::new(0)),
+                applied_size: Arc::new(Mutex::new(None)),
+            }))
+        };
+        let mut whole = make_runtime();
+        whole.process(b"READY");
+        assert_eq!(whole.processed_digest(), None);
+        whole.start_processed_digest();
+        whole.process(b"hello");
+        assert_eq!(whole.processed_digest(), Some(0xa430d84680aabd0b));
+        let mut split = make_runtime();
+        split.start_processed_digest();
+        for byte in b"hello" {
+            split.process(&[*byte]);
+        }
+        assert_eq!(split.processed_digest(), whole.processed_digest());
+        split.start_processed_digest();
+        split.process(b"jello");
+        assert_ne!(split.processed_digest(), whole.processed_digest());
+        assert_eq!(whole.processed_bytes(), 10);
+        assert_eq!(
+            whole
+                .child_exit_success()
+                .expect_err("no child handle")
+                .kind(),
+            io::ErrorKind::NotConnected
+        );
     }
 
     #[test]

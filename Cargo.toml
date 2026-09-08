@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/ratty-vt"]
+members = [".", "crates/ratty-vt", "xtask"]
 exclude = ["widget"]
 resolver = "3"
 
@@ -15,7 +15,11 @@ repository = "https://github.com/orhun/ratty"
 keywords = ["terminal", "emulator", "3d", "graphics"]
 categories = ["command-line-utilities", "graphics"]
 edition = "2024"
-exclude = ["website/**", ".github/**", "widget/**", "crates/**", "scratchpad/**"]
+exclude = ["website/**", ".github/**", "widget/**", "crates/**", "xtask/**", "scratchpad/**"]
+
+[features]
+# Optional counters for the internal performance harness; absent in normal builds.
+performance = []
 
 [dependencies]
 anyhow = "1.0"
@@ -80,3 +84,9 @@ opt-level = 3
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+# Same optimizations as release, retaining symbols for CPU sampling.
+[profile.profiling]
+inherits = "release"
+debug = 1
+strip = false

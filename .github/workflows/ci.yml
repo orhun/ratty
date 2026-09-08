@@ -91,7 +91,15 @@ jobs:
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
       - name: Run workspace tests and doctests
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --all-features --locked
+      - name: Exercise benchmark harness (no timing threshold)
+        run: cargo run --locked -p xtask -- bench-vt --filter ascii/80x24/chunk-4096 --samples 1 --rounds 1 --output "$RUNNER_TEMP/vt-bench.json"
+      - name: Exercise CPU drawing and PTY harness (no timing threshold)
+        run: cargo run --locked -p xtask --features app -- bench-app --samples 1 --frames 8 --lines 3000 --output "$RUNNER_TEMP/app-bench.json"
+      - name: Exercise burst input and terminal reply validation
+        run: cargo run --locked -p xtask --features app -- bench-interactive --samples 1 --bursts 4 --burst-lines 32 --output "$RUNNER_TEMP/interactive-bench.json"
+      - name: Exercise sustained output acknowledgement validation
+        run: cargo run --locked -p xtask --features app -- bench-flood --samples 1 --bursts 2 --lines 128 --output "$RUNNER_TEMP/flood-bench.json"
 
   package:
     name: Package workspace crates
@@ -106,7 +114,7 @@ jobs:
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
       - name: Verify package
-        run: cargo package --workspace --locked
+        run: cargo package --workspace --exclude xtask --locked
 
   gpu-smoke:
     name: Headless renderer smoke
@@ -149,7 +157,7 @@ jobs:
           cargo build --manifest-path widget/Cargo.toml --locked --example document --example render_test
       - name: Capture and validate renderer smoke cases
         timeout-minutes: 15
-        run: python3 .github/scripts/headless-smoke.py --output "$RUNNER_TEMP/headless-smoke"
+        run: cargo run --locked -p xtask -- smoke --output "$RUNNER_TEMP/headless-smoke"
       - name: Upload captures and diagnostics
         if: always()
         uses: actions/upload-artifact@v4

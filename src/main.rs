@@ -7,6 +7,9 @@ use bevy::winit::{UpdateMode, WINIT_WINDOWS, WinitSettings};
 use clap::Parser;
 use std::time::Duration;
 
+#[cfg(feature = "performance")]
+mod performance;
+
 #[cfg(target_os = "windows")]
 use winit::platform::windows::{IconExtWindows, WindowExtWindows};
 use winit::window::Icon;
@@ -102,10 +105,23 @@ fn main() -> anyhow::Result<()> {
             }),
     );
     let font_faces = load_configured_font_faces(&mut app, &app_config.font)?;
-    app.insert_resource(font_faces)
+    #[cfg(feature = "performance")]
+    let recording = performance::install(&mut app)?;
+    let _exit = app
+        .insert_resource(font_faces)
         .add_systems(Update, apply_window_icon)
         .add_plugins(TerminalPlugin)
         .run();
+
+    #[cfg(feature = "performance")]
+    {
+        if let Some(recording) = recording {
+            recording.check()?;
+        }
+        if let AppExit::Error(code) = _exit {
+            anyhow::bail!("application exited with error {code}");
+        }
+    }
 
     Ok(())
 }

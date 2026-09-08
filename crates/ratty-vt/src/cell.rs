@@ -299,6 +299,35 @@ mod ratty_cell_tests {
     }
 
     #[test]
+    fn ascii_boundary_shortcut_matches_unicode_segmentation() {
+        use unicode_segmentation::UnicodeSegmentation as _;
+
+        for previous in b' '..=b'~' {
+            for next in b' '..=b'~' {
+                let text = String::from_utf8(vec![previous, next]).unwrap();
+                assert!(!crate::screen::clusters_with(&text[..1], char::from(next)));
+                assert_eq!(text.graphemes(true).count(), 2);
+            }
+        }
+        // Non-ASCII prefixes can contain earlier boundaries; only the appended
+        // boundary matters. Marks with ASCII-looking low bytes must not take
+        // the shortcut, and CR/LF retains its special joining rule.
+        for previous in ["e\u{301}a", "👩\u{200d}💻x", "\u{0600}a", "a", "\r"] {
+            for next in ['x', ' ', '\u{034f}', '\u{301}', '\n', '界'] {
+                let joined = format!("{previous}{next}");
+                let boundary = joined
+                    .grapheme_indices(true)
+                    .any(|(index, _)| index == previous.len());
+                assert_eq!(
+                    crate::screen::clusters_with(previous, next),
+                    !boundary,
+                    "{previous:?} + {next:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn zero_width_marks_after_cursor_moves_reconcile_cluster_width() {
         for (rows, cols) in [(1, 2), (2, 4)] {
             let mut parser = Parser::new(rows, cols, 0);

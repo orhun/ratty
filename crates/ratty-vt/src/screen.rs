@@ -69,6 +69,18 @@ pub enum MouseProtocolEncoding {
 pub(crate) fn clusters_with(prev: &str, c: char) -> bool {
     use unicode_segmentation::{GraphemeCursor, GraphemeIncomplete};
 
+    // Printable ASCII pairs always have a grapheme boundary. Avoid the
+    // contextual Unicode cursor on the overwhelmingly common text path;
+    // controls (notably CR/LF) and any non-ASCII endpoint still use it.
+    if matches!(c, ' '..='~')
+        && prev
+            .as_bytes()
+            .last()
+            .is_some_and(|&last| matches!(last, b' '..=b'~'))
+    {
+        return false;
+    }
+
     let Some(last) = prev.chars().next_back() else {
         return false;
     };
