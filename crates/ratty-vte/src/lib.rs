@@ -18,7 +18,8 @@
 //!
 //! * UTF-8 Support for Input
 //! * OSC Strings can be terminated by 0x07
-//! * Only supports 7-bit codes
+//! * C1 controls are executed from raw 0x80..=0x9F bytes and from their UTF-8
+//!   encodings; 8-bit escape sequence introducers are not recognised
 //!
 //! [`Parser`]: struct.Parser.html
 //! [`Perform`]: trait.Perform.html

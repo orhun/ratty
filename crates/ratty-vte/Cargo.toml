@@ -10,6 +10,7 @@ repository = "https://github.com/orhun/ratty"
 keywords = ["ansi", "vte", "parser", "terminal"]
 categories = ["parsing", "no-std"]
 edition = "2024"
+rust-version = "1.85"
 include = ["src/**", "Cargo.toml", "README.md", "LICENSE-APACHE", "LICENSE-MIT"]
 
 [features]
