@@ -258,9 +258,9 @@ world to the render world each frame is compact scene data, not pixels.
 The Cargo workspace contains the Ratty application and the independent
 [`ratty-vt`](crates/ratty-vt/README.md) terminal engine. The widget remains a
 separate package under `widget/` with its own lockfile.
-The unpublished `xtask` workspace member provides Rust smoke-test tooling and
-performance workloads; see the [performance guide](docs/performance.md) for
-build commands, validation, profiling, and measurement methodology.
+The unpublished `xtask` workspace member provides the Rust smoke-test runner and
+performance workloads; run `cargo run -p xtask -- --help` for the available
+commands.
 
 ```sh
 cargo test -p ratty-vt --locked      # Engine tests without building Bevy
