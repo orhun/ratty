@@ -31,12 +31,10 @@ executables have SHA-256 identities:
 - Baseline: `13f4ba79a067069338de4c9fc1f9fb8e4c4d82836731b2c4ab1ae75740933c02`
 - Candidate: `1954fdef565400938535d4b9c700267ef59a413c1601d32788c1060779292017`
 
-The VT evidence is committed under [`performance-evidence/vt`](performance-evidence/vt):
-raw `paired-baseline-{1..5}.json` and `paired-ascii-fast-path-{1..5}.json`, full
+Local evidence is `/private/tmp/ratty-performance-evidence`: raw
+`paired-baseline-{1..5}.json` and `paired-ascii-fast-path-{1..5}.json`, full
 matrices `vt-baseline.json` and `vt-ascii-fast-path.json`, the comparison summary
-`vt-comparison-summary.json`, and CPU stack sample `vt-cpu-sample.txt`. Bulky application, desktop, and profile
-artifacts stay in the local results directory `/private/tmp/ratty-performance-evidence`
-and are excluded from published packages. These are optimized Apple M2 Max CPU runs,
+`vt-comparison-summary.json`, and CPU stack sample `vt-cpu-sample.txt`. These are optimized Apple M2 Max CPU runs,
 not renderer or GPU measurements. See [the guide](performance.md) for commands,
 measurement conditions, and tooling migration details.
 
