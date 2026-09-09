@@ -1,0 +1,32 @@
+{
+  "kind": "vt-cpu",
+  "measurements": [
+    {
+      "bytes_per_sample": 4194304,
+      "chunk_bytes": 4096,
+      "cols": 120,
+      "final_state_hash": "c9c855bd28942998",
+      "max_seconds": 0.133711542,
+      "median_seconds": 0.129185958,
+      "min_seconds": 0.128559167,
+      "operations_per_sample": 128,
+      "rounds": 128,
+      "rows": 40,
+      "scrollback_capacity": 2000,
+      "seconds": [
+        0.133711542,
+        0.129185958,
+        0.128719125,
+        0.128559167,
+        0.128769542,
+        0.130890917,
+        0.13364225
+      ],
+      "workload": "ascii/120x40/chunk-4096"
+    }
+  ],
+  "note": "Generation, parser construction, reflow prefill/cloning, and state validation excluded; one warmup discarded. Record commit/toolchain/hardware alongside this report.",
+  "profile": "optimized-no-debug-assertions",
+  "schema": 1,
+  "validation_failures": []
+}

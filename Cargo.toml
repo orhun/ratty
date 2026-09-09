@@ -15,7 +15,7 @@ repository = "https://github.com/orhun/ratty"
 keywords = ["terminal", "emulator", "3d", "graphics"]
 categories = ["command-line-utilities", "graphics"]
 edition = "2024"
-exclude = ["website/**", ".github/**", "widget/**", "crates/**", "xtask/**", "scratchpad/**"]
+exclude = ["website/**", ".github/**", "widget/**", "crates/**", "xtask/**", "docs/performance-evidence/**", "scratchpad/**"]
 
 [features]
 # Optional counters for the internal performance harness; absent in normal builds.

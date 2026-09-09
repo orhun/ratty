@@ -50,7 +50,7 @@ pub fn run(args: Args) -> Result<()> {
         let path = provided
             .unwrap_or_else(|| examples.join(format!("{name}{}", std::env::consts::EXE_SUFFIX)));
         ensure!(
-            path.is_file(),
+            is_executable(&path),
             "build the example first: {}",
             path.display()
         );
@@ -345,6 +345,22 @@ fn validate_log(
         );
     }
     Ok(())
+}
+
+/// Mirrors the previous runner's `os.access(path, os.X_OK)` check.
+fn is_executable(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path).is_ok_and(|meta| meta.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 #[cfg(test)]

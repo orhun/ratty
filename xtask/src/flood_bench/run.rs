@@ -125,7 +125,7 @@ fn sample(
                 digest,
             )?;
             let (queued, peak_queued) = runtime.queued_bytes();
-            ensure!(queued == 0 && peak_queued > 0 && peak_queued <= 18 * 16 * 1024, "PTY queue accounting out of bounds");
+            ensure!(queued == 0 && peak_queued > 0 && peak_queued <= ratty::runtime::PTY_QUEUE_ACCOUNTING_BOUND, "PTY queue accounting out of bounds");
             Ok(serde_json::json!({"bursts":bursts,"consumed_bytes":count,"peak_outstanding_pty_bytes_upper_bound":peak_queued}))
         },
     );

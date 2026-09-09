@@ -206,6 +206,16 @@ pub struct TerminalRuntime {
     queue_metrics: Arc<QueueMetrics>,
 }
 
+/// Capacity of the bounded PTY reader channel, in chunks.
+const PTY_CHANNEL_CHUNKS: usize = 16;
+/// Size of each PTY reader chunk, in bytes.
+const PTY_CHUNK_BYTES: usize = 16 * 1024;
+
+/// Upper bound on bytes reported by [`TerminalRuntime::queued_bytes`]: the channel,
+/// one blocked reader send, and one chunk between receipt and decrement.
+#[cfg(feature = "performance")]
+pub const PTY_QUEUE_ACCOUNTING_BOUND: usize = (PTY_CHANNEL_CHUNKS + 2) * PTY_CHUNK_BYTES;
+
 #[cfg(feature = "performance")]
 #[derive(Default)]
 struct QueueMetrics {
@@ -351,13 +361,13 @@ impl TerminalRuntime {
             .take_writer()
             .context("failed to create PTY writer")?;
 
-        let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(16);
+        let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(PTY_CHANNEL_CHUNKS);
         #[cfg(feature = "performance")]
         let queue_metrics = Arc::new(QueueMetrics::default());
         #[cfg(feature = "performance")]
         let reader_metrics = Arc::clone(&queue_metrics);
         let reader_thread = thread::spawn(move || {
-            let mut buf = [0_u8; 16 * 1024];
+            let mut buf = [0_u8; PTY_CHUNK_BYTES];
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => break,

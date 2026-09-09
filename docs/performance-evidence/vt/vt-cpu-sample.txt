@@ -1,0 +1,198 @@
+Analysis of sampling xtask (pid 88218) every 1 millisecond
+Process:         xtask [88218]
+Path:            /Users/USER/Desktop/*/xtask
+Load Address:    0x104948000
+Identifier:      xtask
+Version:         0
+Code Type:       ARM64
+Platform:        macOS
+Parent Process:  zsh [88213]
+Target Type:     live task
+
+Date/Time:       2026-09-07 21:59:35.840 -0700
+Launch Time:     2026-09-07 21:59:35.779 -0700
+OS Version:      macOS 26.5.2 (25F84)
+Report Version:  7
+Analysis Tool:   /usr/bin/sample
+
+Physical footprint:         11.7M
+Physical footprint (peak):  11.7M
+Idle exit:                  untracked
+----
+
+Call graph:
+    4034 Thread_16400664   DispatchQueue_1: com.apple.main-thread  (serial)
+      3998 start  (in dyld) + 6992  [0x18fcc3e00]
+      + 3998 main  (in xtask) + 864  [0x104971984]
+      +   3998 _RINvNtNtCsa9BKTri5B3M_3std3sys9backtrace28___rust_begin_short_backtraceFEINtNtCsgtPOCBgevO_4core6result6ResultuNtCs63iSwWMogVE_6anyhow5ErrorEB19_ECsjv6ZfDJjkQr_5xtask  (in xtask) + 12  [0x104951d18]  backtrace.rs:166
+      +     3998 _RNvCsjv6ZfDJjkQr_5xtask4main  (in xtask) + 5592  [0x104a87a3c]  main.rs:51
+      +       3998 _RNvNtCsjv6ZfDJjkQr_5xtask8vt_bench3run  (in xtask) + 4732  [0x104962eb0]  vt_bench.rs:70
+      +         2855 _RINvMs_Cshc1DUQJPuu8_3vteINtB5_6ParserKj400_E7advanceNtNtCshllL7epoEPD_8ratty_vt7perform13WrappedScreenECsjv6ZfDJjkQr_5xtask  (in xtask) + 3768  [0x10494ba3c]  lib.rs:119
+      +         ! 1396 _RNvMs_NtCshllL7epoEPD_8ratty_vt6screenNtB4_6Screen4text  (in xtask) + 760  [0x1049ddd78]  screen.rs:896
+      +         ! : 690 _RNvNtCshllL7epoEPD_8ratty_vt6screen13clusters_with  (in xtask) + 704,988,...  [0x1049d6f9c,0x1049d70b8,...]  screen.rs:85
+      +         ! : 246 _RNvNtCshllL7epoEPD_8ratty_vt6screen13clusters_with  (in xtask) + 1740,1864,...  [0x1049d73a8,0x1049d7424,...]  screen.rs:88
+      +         ! : 124 _RNvNtCshllL7epoEPD_8ratty_vt6screen13clusters_with  (in xtask) + 424,296,...  [0x1049d6e84,0x1049d6e04,...]  screen.rs:75
+      +         ! : 90 _RNvNtCshllL7epoEPD_8ratty_vt6screen13clusters_with  (in xtask) + 3372  [0x1049d7a08]  screen.rs:88
+      +         ! : | 70 _RNvMs4_NtCsk6DEhx1mkOP_20unicode_segmentation8graphemeNtB5_14GraphemeCursor17grapheme_category  (in xtask) + 372  [0x104a84bf8]  grapheme.rs:346
+      +         ! : | 18 _RNvMs4_NtCsk6DEhx1mkOP_20unicode_segmentation8graphemeNtB5_14GraphemeCursor17grapheme_category  (in xtask) + 0  [0x104a84a84]  grapheme.rs:320
+      +         ! : | 2 _RNvMs4_NtCsk6DEhx1mkOP_20unicode_segmentation8graphemeNtB5_14GraphemeCursor17grapheme_category  (in xtask) + 16  [0x104a84a94]  grapheme.rs:331
+      +         ! : 70 _RNvNtCshllL7epoEPD_8ratty_vt6screen13clusters_with  (in xtask) + 1840  [0x1049d740c]  screen.rs:88
+      +         ! : | 42 _RNvMs4_NtCsk6DEhx1mkOP_20unicode_segmentation8graphemeNtB5_14GraphemeCursor17grapheme_category  (in xtask) + 372  [0x104a84bf8]  grapheme.rs:346
+      +         ! : | 23 _RNvMs4_NtCsk6DEhx1mkOP_20unicode_segmentation8graphemeNtB5_14GraphemeCursor17grapheme_category  (in xtask) + 0  [0x104a84a84]  grapheme.rs:320
+      +         ! : | 5 _RNvMs4_NtCsk6DEhx1mkOP_20unicode_segmentation8graphemeNtB5_14GraphemeCursor17grapheme_category  (in xtask) + 16  [0x104a84a94]  grapheme.rs:331
+      +         ! : 63 _RNvNtCshllL7epoEPD_8ratty_vt6screen13clusters_with  (in xtask) + 952  [0x1049d7094]  screen.rs:85
+      +         ! : | 25 _RNvMs4_NtCsk6DEhx1mkOP_20unicode_segmentation8graphemeNtB5_14GraphemeCursor17grapheme_category  (in xtask) + 0  [0x104a84a84]  grapheme.rs:320
+      +         ! : | 22 _RNvMs4_NtCsk6DEhx1mkOP_20unicode_segmentation8graphemeNtB5_14GraphemeCursor17grapheme_category  (in xtask) + 372  [0x104a84bf8]  grapheme.rs:346
+      +         ! : | 16 _RNvMs4_NtCsk6DEhx1mkOP_20unicode_segmentation8graphemeNtB5_14GraphemeCursor17grapheme_category  (in xtask) + 44  [0x104a84ab0]  grapheme.rs:329
+      +         ! : 46 _RNvNtCshllL7epoEPD_8ratty_vt6screen13clusters_with  (in xtask) + 664,620,...  [0x1049d6f74,0x1049d6f48,...]  screen.rs:83
+      +         ! : 34 _RNvNtCshllL7epoEPD_8ratty_vt6screen13clusters_with  (in xtask) + 24,4,...  [0x1049d6cf4,0x1049d6ce0,...]  screen.rs:69
+      +         ! : 24 _RNvNtCshllL7epoEPD_8ratty_vt6screen13clusters_with  (in xtask) + 456  [0x1049d6ea4]  screen.rs:81
+      +         ! : 4 _RNvNtCshllL7epoEPD_8ratty_vt6screen13clusters_with  (in xtask) + 600  [0x1049d6f34]  methods.rs:0
+      +         ! : 2 _RNvNtCshllL7epoEPD_8ratty_vt6screen13clusters_with  (in xtask) + 3484  [0x1049d7a78]  grapheme.rs:0
+      +         ! : 1 _RNvNtCshllL7epoEPD_8ratty_vt6screen13clusters_with  (in xtask) + 40  [0x1049d6d04]  screen.rs:72
+      +         ! : 1 _RNvNtCshllL7epoEPD_8ratty_vt6screen13clusters_with  (in xtask) + 468  [0x1049d6eb0]  screen.rs:82
+      +         ! : 1 _RNvNtCshllL7epoEPD_8ratty_vt6screen13clusters_with  (in xtask) + 64  [0x1049d6d1c]  screen.rs:95
+      +         ! 502 _RNvMs_NtCshllL7epoEPD_8ratty_vt6screenNtB4_6Screen4text  (in xtask) + 488,156,...  [0x1049ddc68,0x1049ddb1c,...]  screen.rs:896
+      +         ! 279 _RNvMs_NtCshllL7epoEPD_8ratty_vt6screenNtB4_6Screen4text  (in xtask) + 1980  [0x1049de23c]  screen.rs:1061
+      +         ! : 179 _RNvMCs5xX0w5KXfpg_11compact_strNtB2_13CompactString4push  (in xtask) + 212,564,...  [0x1049ba13c,0x1049ba29c,...]  lib.rs:640
+      +         ! : 100 _RNvMCs5xX0w5KXfpg_11compact_strNtB2_13CompactString4push  (in xtask) + 552  [0x1049ba290]  lib.rs:640
+      +         ! :   73 _platform_memmove  (in libsystem_platform.dylib) + 12,460,...  [0x19008b36c,0x19008b52c,...]
+      +         ! :   27 DYLD-STUB$$memcpy  (in xtask) + 4  [0x104a98c78]
+      +         ! 102 _RNvMs_NtCshllL7epoEPD_8ratty_vt6screenNtB4_6Screen4text  (in xtask) + 1156,1168  [0x1049ddf04,0x1049ddf10]  screen.rs:925
+      +         ! 78 _RNvMs_NtCshllL7epoEPD_8ratty_vt6screenNtB4_6Screen4text  (in xtask) + 1208,1196,...  [0x1049ddf38,0x1049ddf2c,...]  screen.rs:1001
+      +         ! 64 _RNvMs_NtCshllL7epoEPD_8ratty_vt6screenNtB4_6Screen4text  (in xtask) + 1980,1912,...  [0x1049de23c,0x1049de1f8,...]  screen.rs:1061
+      +         ! 56 _RNvMs_NtCshllL7epoEPD_8ratty_vt6screenNtB4_6Screen4text  (in xtask) + 1672  [0x1049de108]  screen.rs:1027
+      +         ! 45 _RNvMs_NtCshllL7epoEPD_8ratty_vt6screenNtB4_6Screen4text  (in xtask) + 1680,1712,...  [0x1049de110,0x1049de130,...]  screen.rs:1028
+      +         ! 45 _RNvMs_NtCshllL7epoEPD_8ratty_vt6screenNtB4_6Screen4text  (in xtask) + 80,72,...  [0x1049ddad0,0x1049ddac8,...]  screen.rs:879
+      +         ! 44 _RNvMs_NtCshllL7epoEPD_8ratty_vt6screenNtB4_6Screen4text  (in xtask) + 1000,868,...  [0x1049dde68,0x1049ddde4,...]  screen.rs:924
+      +         ! 35 _RNvMs_NtCshllL7epoEPD_8ratty_vt6screenNtB4_6Screen4text  (in xtask) + 2168,2136,...  [0x1049de2f8,0x1049de2d8,...]  screen.rs:1068
+      +         ! 31 _RNvMs_NtCshllL7epoEPD_8ratty_vt6screenNtB4_6Screen4text  (in xtask) + 1868,1888,...  [0x1049de1cc,0x1049de1e0,...]  screen.rs:1055
+      +         ! 29 _RNvMs_NtCshllL7epoEPD_8ratty_vt6screenNtB4_6Screen4text  (in xtask) + 24,8,...  [0x1049dda98,0x1049dda88,...]  screen.rs:876
+      +         ! 27 _RNvNtCshllL7epoEPD_8ratty_vt6screen13clusters_with  (in xtask) + 88,76,...  [0x1049d6d34,0x1049d6d28,...]  screen.rs:95
+      +         ! 26 _RNvMs_NtCshllL7epoEPD_8ratty_vt6screenNtB4_6Screen4text  (in xtask) + 2056,2064,...  [0x1049de288,0x1049de290,...]  screen.rs:1062
+      +         ! 25 _RNvMCs5xX0w5KXfpg_11compact_strNtB2_13CompactString4push  (in xtask) + 820,808,...  [0x1049ba39c,0x1049ba390,...]  lib.rs:641
+      +         ! 24 _RNvMs_NtCshllL7epoEPD_8ratty_vt6screenNtB4_6Screen4text  (in xtask) + 1724  [0x1049de13c]  screen.rs:1034
+      +         ! 17 _RNvMs_NtCshllL7epoEPD_8ratty_vt6screenNtB4_6Screen4text  (in xtask) + 772,40,...  [0x1049ddd84,0x1049ddaa8,...]  screen.rs:877
+      +         ! 13 _RNvMs_NtCshllL7epoEPD_8ratty_vt6screenNtB4_6Screen4text  (in xtask) + 100  [0x1049ddae4]  tables.rs:0
+      +         ! 6 _RNvMs_NtCshllL7epoEPD_8ratty_vt6screenNtB4_6Screen4text  (in xtask) + 1220  [0x1049ddf44]  screen.rs:1007
+      +         ! 5 _RNvMs_NtCshllL7epoEPD_8ratty_vt6screenNtB4_6Screen4text  (in xtask) + 976  [0x1049dde50]  screen.rs:0
+      +         ! 3 _RNvMs_NtCshllL7epoEPD_8ratty_vt6screenNtB4_6Screen4text  (in xtask) + 1860  [0x1049de1c4]  screen.rs:1054
+      +         ! 3 _RNvMs_NtCshllL7epoEPD_8ratty_vt6screenNtB4_6Screen4text  (in xtask) + 96,84  [0x1049ddae0,0x1049ddad4]  screen.rs:881
+      +         982 _RINvMs_Cshc1DUQJPuu8_3vteINtB5_6ParserKj400_E7advanceNtNtCshllL7epoEPD_8ratty_vt7perform13WrappedScreenECsjv6ZfDJjkQr_5xtask  (in xtask) + 3584  [0x10494b984]  lib.rs:119
+      +         ! 547 _RNvMNtCshllL7epoEPD_8ratty_vt4gridNtB2_4Grid9scroll_up  (in xtask) + 116  [0x1049dcb9c]  grid.rs:757
+      +         ! : 504 _RNvMNtCshllL7epoEPD_8ratty_vt3rowNtB2_3Row3new  (in xtask) + 124  [0x1049d974c]  row.rs:19
+      +         ! : | 494 _RNvMs3_NtCslJsSqIQKwiA_5alloc3vecINtB5_3VecNtNtCshllL7epoEPD_8ratty_vt4cell4CellE11extend_withBJ_  (in xtask) + 172,100,...  [0x1049d9ba4,0x1049d9b5c,...]  mod.rs:3660
+      +         ! : | 6 _RNvMs3_NtCslJsSqIQKwiA_5alloc3vecINtB5_3VecNtNtCshllL7epoEPD_8ratty_vt4cell4CellE11extend_withBJ_  (in xtask) + 188,192,...  [0x1049d9bb4,0x1049d9bb8,...]  mod.rs:3659
+      +         ! : | 2 _RNvMs3_NtCslJsSqIQKwiA_5alloc3vecINtB5_3VecNtNtCshllL7epoEPD_8ratty_vt4cell4CellE11extend_withBJ_  (in xtask) + 212  [0x1049d9bcc]  mod.rs:0
+      +         ! : | 1 _RNvMs3_NtCslJsSqIQKwiA_5alloc3vecINtB5_3VecNtNtCshllL7epoEPD_8ratty_vt4cell4CellE11extend_withBJ_  (in xtask) + 60  [0x1049d9b34]  mod.rs:3652
+      +         ! : | 1 _RNvMs3_NtCslJsSqIQKwiA_5alloc3vecINtB5_3VecNtNtCshllL7epoEPD_8ratty_vt4cell4CellE11extend_withBJ_  (in xtask) + 276  [0x1049d9c0c]  mod.rs:3668
+      +         ! : 35 _RNvMNtCshllL7epoEPD_8ratty_vt3rowNtB2_3Row3new  (in xtask) + 52  [0x1049d9704]  row.rs:19
+      +         ! : | 16 _xzm_xzone_malloc_small_freelist  (in libsystem_malloc.dylib) + 176,680,...  [0x18fea4380,0x18fea4578,...]
+      +         ! : | 13 _xzm_xzone_malloc  (in libsystem_malloc.dylib) + 184,0,...  [0x18fe9e978,0x18fe9e8c0,...]
+      +         ! : | 3 <deduplicated_symbol>  (in libsystem_malloc.dylib) + 212,112  [0x18fe9e1a8,0x18fe9e144]
+      +         ! : | 1 _malloc_zone_malloc  (in libsystem_malloc.dylib) + 100  [0x18feae09c]
+      +         ! : | 1 _xzm_xzone_malloc_freelist_outlined  (in libsystem_malloc.dylib) + 248  [0x18fea5730]
+      +         ! : | + 1 _xzm_xzone_malloc_from_freelist_chunk  (in libsystem_malloc.dylib) + 656  [0x18fea5da8]
+      +         ! : | 1 xzm_malloc_zone_malloc_type_malloc  (in libsystem_malloc.dylib) + 0  [0x18feaa11c]
+      +         ! : 4 _RNvMs3_NtCslJsSqIQKwiA_5alloc3vecINtB5_3VecNtNtCshllL7epoEPD_8ratty_vt4cell4CellE11extend_withBJ_  (in xtask) + 312,320  [0x1049d9c30,0x1049d9c38]  mod.rs:3674
+      +         ! : 2 _RNvMNtCshllL7epoEPD_8ratty_vt3rowNtB2_3Row3new  (in xtask) + 4,8  [0x1049d96d4,0x1049d96d8]  row.rs:17
+      +         ! : 2 _RNvMNtCshllL7epoEPD_8ratty_vt3rowNtB2_3Row3new  (in xtask) + 52,104  [0x1049d9704,0x1049d9738]  row.rs:19
+      +         ! 306 _RNvMNtCshllL7epoEPD_8ratty_vt4gridNtB2_4Grid9scroll_up  (in xtask) + 480,468,...  [0x1049dcd08,0x1049dccfc,...]  grid.rs:762
+      +         ! 62 _RNvMNtCshllL7epoEPD_8ratty_vt4gridNtB2_4Grid9scroll_up  (in xtask) + 532  [0x1049dcd3c]  grid.rs:762
+      +         ! : 35 _xzm_free_outlined  (in libsystem_malloc.dylib) + 80,204,...  [0x18fea7464,0x18fea74e0,...]
+      +         ! : 10 _xzm_xzone_free_freelist  (in libsystem_malloc.dylib) + 400,708,...  [0x18fea7c68,0x18fea7d9c,...]
+      +         ! : 9 _free  (in libsystem_malloc.dylib) + 0,4,...  [0x18feaec4c,0x18feaec50,...]
+      +         ! : 7 _xzm_free  (in libsystem_malloc.dylib) + 1580  [0x18fe9f698]
+      +         ! : 1 free  (in libsystem_malloc.dylib) + 0  [0x18fe756b8]
+      +         ! 39 _RNvMNtCshllL7epoEPD_8ratty_vt4gridNtB2_4Grid9scroll_up  (in xtask) + 244  [0x1049dcc1c]  grid.rs:758
+      +         ! : 36 _platform_memmove  (in libsystem_platform.dylib) + 372,396,...  [0x19008b4d4,0x19008b4ec,...]
+      +         ! : 3 DYLD-STUB$$memmove  (in xtask) + 4,0  [0x104a98c84,0x104a98c80]
+      +         ! 8 _RNvXs0_NtCshllL7epoEPD_8ratty_vt7performNtB5_13WrappedScreenNtCshc1DUQJPuu8_3vte7Perform7executeCsjv6ZfDJjkQr_5xtask  (in xtask) + 0,156  [0x104966f08,0x104966fa4]  perform.rs:34
+      +         ! 7 _RNvMNtCshllL7epoEPD_8ratty_vt4gridNtB2_4Grid9scroll_up  (in xtask) + 116,128,...  [0x1049dcb9c,0x1049dcba8,...]  grid.rs:757
+      +         ! 2 _RNvMNtCshllL7epoEPD_8ratty_vt4gridNtB2_4Grid9scroll_up  (in xtask) + 84  [0x1049dcb7c]  grid.rs:755
+      +         ! 2 _RNvMNtCshllL7epoEPD_8ratty_vt4gridNtB2_4Grid9scroll_up  (in xtask) + 280,288  [0x1049dcc40,0x1049dcc48]  grid.rs:759
+      +         ! 2 _RNvMNtCshllL7epoEPD_8ratty_vt4gridNtB2_4Grid9scroll_up  (in xtask) + 320  [0x1049dcc68]  grid.rs:760
+      +         ! 2 _RNvXs0_NtCshllL7epoEPD_8ratty_vt7performNtB5_13WrappedScreenNtCshc1DUQJPuu8_3vte7Perform7executeCsjv6ZfDJjkQr_5xtask  (in xtask) + 140  [0x104966f94]  perform.rs:38
+      +         ! 1 _RNvMNtCshllL7epoEPD_8ratty_vt4gridNtB2_4Grid9scroll_up  (in xtask) + 20  [0x1049dcb3c]  grid.rs:754
+      +         ! 1 _RNvMNtCshllL7epoEPD_8ratty_vt4gridNtB2_4Grid9scroll_up  (in xtask) + 628  [0x1049dcd9c]  grid.rs:764
+      +         ! 1 _RNvXs0_NtCshllL7epoEPD_8ratty_vt7performNtB5_13WrappedScreenNtCshc1DUQJPuu8_3vte7Perform7executeCsjv6ZfDJjkQr_5xtask  (in xtask) + 204  [0x104966fd4]  perform.rs:41
+      +         ! 1 _xzm_free  (in libsystem_malloc.dylib) + 1616  [0x18fe9f6bc]
+      +         ! 1 _xzm_xzone_free_freelist  (in libsystem_malloc.dylib) + 1104  [0x18fea7f28]
+      +         115 _RINvMs_Cshc1DUQJPuu8_3vteINtB5_6ParserKj400_E7advanceNtNtCshllL7epoEPD_8ratty_vt7perform13WrappedScreenECsjv6ZfDJjkQr_5xtask  (in xtask) + 3596,3608,...  [0x10494b990,0x10494b99c,...]  lib.rs:119
+      +         42 _RNvMs_NtCshllL7epoEPD_8ratty_vt6screenNtB4_6Screen4text  (in xtask) + 2704,2692  [0x1049de510,0x1049de504]  screen.rs:1127
+      +         3 _RNvMNtCshllL7epoEPD_8ratty_vt4gridNtB2_4Grid9scroll_up  (in xtask) + 672,688  [0x1049dcdc8,0x1049dcdd8]  grid.rs:769
+      +         1 _RINvMs_Cshc1DUQJPuu8_3vteINtB5_6ParserKj400_E7advanceNtNtCshllL7epoEPD_8ratty_vt7perform13WrappedScreenECsjv6ZfDJjkQr_5xtask  (in xtask) + 3224  [0x10494b81c]  lib.rs:119
+      +           1 _RNvNtNtCsgtPOCBgevO_4core3str8converts9from_utf8  (in xtask) + 80  [0x1049bc424]  converts.rs:91
+      35 _RNvMs_NtCshllL7epoEPD_8ratty_vt6screenNtB4_6Screen4text  (in xtask) + 1980  [0x1049de23c]  screen.rs:1061
+      + 35 _RNvMCs5xX0w5KXfpg_11compact_strNtB2_13CompactString4push  (in xtask) + 20,8,...  [0x1049ba07c,0x1049ba070,...]  lib.rs:639
+      1 ???  (in <unknown binary>)  [0x12c0]
+        1 _RNvMs_NtCshllL7epoEPD_8ratty_vt6screenNtB4_6Screen4text  (in xtask) + 1980  [0x1049de23c]  screen.rs:1061
+          1 _RNvMCs5xX0w5KXfpg_11compact_strNtB2_13CompactString4push  (in xtask) + 4  [0x1049ba06c]  lib.rs:639
+
+Total number in stack (recursive counted multiple, when >=5):
+
+Sort by top of stack, same collapsed (when >= 5):
+        _RNvNtCshllL7epoEPD_8ratty_vt6screen13clusters_with  (in xtask)        1200
+        _RNvMs_NtCshllL7epoEPD_8ratty_vt6screenNtB4_6Screen4text  (in xtask)        1170
+        _RNvMs3_NtCslJsSqIQKwiA_5alloc3vecINtB5_3VecNtNtCshllL7epoEPD_8ratty_vt4cell4CellE11extend_withBJ_  (in xtask)        508
+        _RNvMNtCshllL7epoEPD_8ratty_vt4gridNtB2_4Grid9scroll_up  (in xtask)        324
+        _RNvMCs5xX0w5KXfpg_11compact_strNtB2_13CompactString4push  (in xtask)        240
+        _RNvMs4_NtCsk6DEhx1mkOP_20unicode_segmentation8graphemeNtB5_14GraphemeCursor17grapheme_category  (in xtask)        223
+        _RINvMs_Cshc1DUQJPuu8_3vteINtB5_6ParserKj400_E7advanceNtNtCshllL7epoEPD_8ratty_vt7perform13WrappedScreenECsjv6ZfDJjkQr_5xtask  (in xtask)        115
+        _platform_memmove  (in libsystem_platform.dylib)        109
+        _xzm_free_outlined  (in libsystem_malloc.dylib)        35
+        DYLD-STUB$$memcpy  (in xtask)        27
+        _xzm_xzone_malloc_small_freelist  (in libsystem_malloc.dylib)        16
+        _xzm_xzone_malloc  (in libsystem_malloc.dylib)        13
+        _RNvXs0_NtCshllL7epoEPD_8ratty_vt7performNtB5_13WrappedScreenNtCshc1DUQJPuu8_3vte7Perform7executeCsjv6ZfDJjkQr_5xtask  (in xtask)        11
+        _xzm_xzone_free_freelist  (in libsystem_malloc.dylib)        11
+        _free  (in libsystem_malloc.dylib)        9
+        _xzm_free  (in libsystem_malloc.dylib)        8
+
+Binary Images:
+       0x104948000 -        0x104b2bff7 +xtask (0) <EFAAA8AD-45AE-3895-85DC-D19ED2CD2B30> /Users/*/Desktop/*/xtask
+       0x18fc1c000 -        0x18fc6eb4b  libobjc.A.dylib (951.7) <FF1D8AE4-ABEF-35F1-A30A-1183B9CB414F> /usr/lib/libobjc.A.dylib
+       0x18fc6f000 -        0x18fca3d07  libdyld.dylib (1378) <B147D877-D0C2-388F-B38D-D3132E39905F> /usr/lib/system/libdyld.dylib
+       0x18fca4000 -        0x18fd4a217  dyld (1.0.0 - 1378) <F924BDD3-4365-3466-9580-8B1B3FA8F857> /usr/lib/dyld
+       0x18fd4b000 -        0x18fd4e228  libsystem_blocks.dylib (96) <CC947089-488D-316B-A9C7-46DEC0F73145> /usr/lib/system/libsystem_blocks.dylib
+       0x18fd4f000 -        0x18fda355f  libxpc.dylib (3102.120.13) <C40FCAE8-7A17-3D82-87CB-3DA4802ADEF1> /usr/lib/system/libxpc.dylib
+       0x18fda4000 -        0x18fdc49ff  libsystem_trace.dylib (1861.120.4) <D0FABAB3-5AE7-3F10-8C62-60CBF5D70850> /usr/lib/system/libsystem_trace.dylib
+       0x18fdc5000 -        0x18fe735f7  libcorecrypto.dylib (1922.121.1) <A01A158D-6FE7-3B1C-A2C4-6BCB90D7314A> /usr/lib/system/libcorecrypto.dylib
+       0x18fe74000 -        0x18fec41d7  libsystem_malloc.dylib (812.100.31) <5FAE4807-4D2B-3A95-A63A-DD96D3DA11B4> /usr/lib/system/libsystem_malloc.dylib
+       0x18fec5000 -        0x18ff0c23f  libdispatch.dylib (1542.100.32) <F071EFE4-299F-3089-ACC4-0025B8FFB52A> /usr/lib/system/libdispatch.dylib
+       0x18ff0d000 -        0x18ff0fffb  libsystem_featureflags.dylib (103) <71FCFFBD-85F8-3365-AFE0-BECEA4369122> /usr/lib/system/libsystem_featureflags.dylib
+       0x18ff10000 -        0x18ff90d9f  libsystem_c.dylib (1752.120.2) <694B7881-1BF3-3D0F-8F19-B50AE4E8EF8A> /usr/lib/system/libsystem_c.dylib
+       0x18ff91000 -        0x190021ae7  libc++.1.dylib (2100.43) <5013C0F8-84A9-3B56-9FEB-C353816A750F> /usr/lib/libc++.1.dylib
+       0x190022000 -        0x19003c75f  libc++abi.dylib (2100.43) <E482D257-E5A0-3816-BD97-7B39342958DA> /usr/lib/libc++abi.dylib
+       0x19003d000 -        0x19007a2af  libsystem_kernel.dylib (12377.121.10) <FCA53B98-3D6A-38B2-A0EC-DF0F7E05F171> /usr/lib/system/libsystem_kernel.dylib
+       0x19007b000 -        0x190087b3b  libsystem_pthread.dylib (539.100.4) <4F33683C-18C8-39A1-800B-2E3BD43BCC13> /usr/lib/system/libsystem_pthread.dylib
+       0x190088000 -        0x190090963  libsystem_platform.dylib (375.120.2) <160FD864-8D15-36FC-9E97-9725388CFAFE> /usr/lib/system/libsystem_platform.dylib
+       0x190091000 -        0x1900c06eb  libsystem_info.dylib (600) <3D62F2D9-F516-31BF-83C7-E203D872300B> /usr/lib/system/libsystem_info.dylib
+       0x194058000 -        0x194061e5f  libsystem_darwin.dylib (1752.120.2) <8858F025-745A-388E-9544-080781CC9A69> /usr/lib/system/libsystem_darwin.dylib
+       0x1944c3000 -        0x1944d51b6  libsystem_notify.dylib (348.120.4) <64D76451-1E0C-369B-A631-54DA3140E083> /usr/lib/system/libsystem_notify.dylib
+       0x196790000 -        0x1967aaf7b  libsystem_networkextension.dylib (2226.121.1) <0331EE20-A1FB-3C0D-990A-F65939CFF505> /usr/lib/system/libsystem_networkextension.dylib
+       0x19682d000 -        0x196844fdf  libsystem_asl.dylib (406) <F40838DF-2F15-3F62-970F-DEE25706BF1B> /usr/lib/system/libsystem_asl.dylib
+       0x1983eb000 -        0x1983f3387  libsystem_symptoms.dylib (2169.120.7) <F5029F5C-1BF3-31C7-892E-BC8606AC829E> /usr/lib/system/libsystem_symptoms.dylib
+       0x19c68f000 -        0x19c6c7257  libsystem_containermanager.dylib (725.120.2) <518BE44D-AA31-31E6-B44B-A37AD5E47040> /usr/lib/system/libsystem_containermanager.dylib
+       0x19daa0000 -        0x19daa45d7  libsystem_configuration.dylib (1405.120.5) <0F7BBC1C-3D50-3E59-A31F-E4672A80BCEB> /usr/lib/system/libsystem_configuration.dylib
+       0x19daa5000 -        0x19daab8cf  libsystem_sandbox.dylib (2680.120.12) <EC3A75EA-44C0-3A0B-9BF7-71C117B0A9C6> /usr/lib/system/libsystem_sandbox.dylib
+       0x19f0ff000 -        0x19f1021fb  libquarantine.dylib (196.120.2) <5849009B-ACA3-3796-94C4-BBDF8D300EBA> /usr/lib/system/libquarantine.dylib
+       0x19f89e000 -        0x19f8a4d03  libsystem_coreservices.dylib (191.4.5) <9576143B-C303-35A3-BA63-1FD06EDA2BB1> /usr/lib/system/libsystem_coreservices.dylib
+       0x19fe29000 -        0x19fe66a77  libsystem_m.dylib (3312.100.1) <A7E0863C-101A-31A0-922B-ED9B02626151> /usr/lib/system/libsystem_m.dylib
+       0x19fe68000 -        0x19fe6b527  libmacho.dylib (1378) <755441B4-C034-3E3A-8E3C-F424FBB28261> /usr/lib/system/libmacho.dylib
+       0x19fe85000 -        0x19fe923a7  libcommonCrypto.dylib (600035) <CE357BB1-2D49-37CC-9FFE-D093936B1475> /usr/lib/system/libcommonCrypto.dylib
+       0x19fe93000 -        0x19fe9cca3  libunwind.dylib (2100.2) <FC8F0C4E-6FB0-3E27-ABEF-B0FA720CD5E4> /usr/lib/system/libunwind.dylib
+       0x19fea5000 -        0x19feaf7ff  libcopyfile.dylib (240) <8ACFAC7A-88E9-3EF4-853F-A9140FF110E5> /usr/lib/system/libcopyfile.dylib
+       0x19feb0000 -        0x19feb3987  libcompiler_rt.dylib (103.3) <AA79151F-C19D-3C7C-92F8-B10F04D82C1C> /usr/lib/system/libcompiler_rt.dylib
+       0x19feb4000 -        0x19feb878b  libsystem_collections.dylib (1752.120.2) <72DB5BE7-EF78-37D0-8AAD-53E37CFE4287> /usr/lib/system/libsystem_collections.dylib
+       0x19feb9000 -        0x19febc4cf  libsystem_secinit.dylib (168.100.7) <E525C566-CDA4-3D99-B12B-1615FD54A1F3> /usr/lib/system/libsystem_secinit.dylib
+       0x19febd000 -        0x19febfbf7  libremovefile.dylib (85.100.6) <635E661D-80A7-340D-A165-3F7D318FDFC9> /usr/lib/system/libremovefile.dylib
+       0x19fec0000 -        0x19fec0f27  libkeymgr.dylib (31) <8C08891A-DF1C-3DCC-AB64-4742FD6BE9BA> /usr/lib/system/libkeymgr.dylib
+       0x19fec1000 -        0x19fec9e37  libsystem_dnssd.dylib (2881.120.11) <6F45DF3F-233B-3BC3-BA8C-B43E7DA884BF> /usr/lib/system/libsystem_dnssd.dylib
+       0x19feca000 -        0x19fecf09b  libcache.dylib (95) <189B576E-6176-3F82-8FA4-5914B0BEAEE7> /usr/lib/system/libcache.dylib
+       0x19fed0000 -        0x19fed1ce3  libSystem.B.dylib (1356) <BA6A669A-3BB9-3BC7-85E8-8F0C1E68351E> /usr/lib/libSystem.B.dylib
+       0x29318c000 -        0x293193349  libRosetta.dylib (367.9) <8651ED4F-6506-3788-B56B-32EE414A85CA> /usr/lib/libRosetta.dylib
+       0x294da9000 -        0x294daca4b  libsystem_darwindirectory.dylib (122) <CF277A2C-C818-3F16-8B3F-3C7B39FCD164> /usr/lib/system/libsystem_darwindirectory.dylib
+       0x294dad000 -        0x294db65d3  libsystem_eligibility.dylib (319.121.1) <DDAC0531-0262-3DDC-8EC8-80EB9438847A> /usr/lib/system/libsystem_eligibility.dylib
+       0x294db7000 -        0x294dbe88b  libsystem_sanitizers.dylib (26.1) <44C4234F-8B2D-38D3-A774-B4B3C75AF3A7> /usr/lib/system/libsystem_sanitizers.dylib
+       0x294dbf000 -        0x294dbfbb7  libsystem_trial.dylib (474.2.18.2) <68C583BA-AFF5-3916-86AE-6E38BFEF98D6> /usr/lib/system/libsystem_trial.dylib

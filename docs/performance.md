@@ -114,7 +114,8 @@ blocked reader send. All PTY reports include
 receipt. A scheduling gap between receipt and subtraction can temporarily count
 an eighteenth chunk, so this metric is an upper bound on backlog, not exact
 channel occupancy. Unread kernel PTY and producer bytes are excluded, so this
-does not bound total end-to-end backlog. Each run checks the 288 KiB accounting bound and zero bytes
+does not bound total end-to-end backlog. Each run checks the 288 KiB accounting bound (`PTY_QUEUE_ACCOUNTING_BOUND`, derived
+from the runtime's channel and chunk constants) and zero bytes
 outstanding after EOF. The fixed reader buffer, parser history, inline assets,
 and other process memory are excluded; this does not replace RSS measurements.
 Counters are enabled only by the `performance` feature and must be identical in
@@ -303,6 +304,4 @@ the captures alongside automated state checks after rendering changes.
 The runner kills and reaps a capture that exceeds its outer timeout. As with the
 previous runner, this is not proof of cleanup for an arbitrary PTY descendant
 ignoring hangup; the capture binary's own deadline normally shuts down its runtime
-first. The `vte` dependency also has an existing chunk-dependent distinction in
-callbacks for UTF-8-encoded C1 controls; the data-loss workaround does not claim to
-change that callback classification.
+first.

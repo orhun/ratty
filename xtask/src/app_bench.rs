@@ -221,7 +221,9 @@ pub fn run(args: Args) -> Result<()> {
             let consumed = runtime.processed_bytes() - initial_bytes;
             let (queued, peak_queued) = runtime.queued_bytes();
             ensure!(
-                queued == 0 && peak_queued > 0 && peak_queued <= 18 * 16 * 1024,
+                queued == 0
+                    && peak_queued > 0
+                    && peak_queued <= ratty::runtime::PTY_QUEUE_ACCOUNTING_BOUND,
                 "PTY queue accounting out of bounds"
             );
             ensure!(

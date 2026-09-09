@@ -115,11 +115,11 @@ fn main() -> anyhow::Result<()> {
 
     #[cfg(feature = "performance")]
     {
-        if let Some(recording) = recording {
-            recording.check()?;
-        }
         if let AppExit::Error(code) = _exit {
             anyhow::bail!("application exited with error {code}");
+        }
+        if let Some(recording) = recording {
+            recording.check()?;
         }
     }
 

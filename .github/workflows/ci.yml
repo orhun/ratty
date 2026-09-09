@@ -92,6 +92,8 @@ jobs:
         uses: Swatinem/rust-cache@v2
       - name: Run workspace tests and doctests
         run: cargo test --workspace --all-features --locked
+      - name: Test the application without optional features
+        run: cargo test -p ratty --locked
       - name: Exercise benchmark harness (no timing threshold)
         run: cargo run --locked -p xtask -- bench-vt --filter ascii/80x24/chunk-4096 --samples 1 --rounds 1 --output "$RUNNER_TEMP/vt-bench.json"
       - name: Exercise CPU drawing and PTY harness (no timing threshold)
@@ -187,4 +189,4 @@ jobs:
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
       - name: Run clippy
-        run: cargo clippy --workspace --all-targets --locked --manifest-path ${{ matrix.manifest }} -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked --manifest-path ${{ matrix.manifest }} -- -D warnings

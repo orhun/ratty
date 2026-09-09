@@ -264,7 +264,7 @@ build commands, validation, profiling, and measurement methodology.
 
 ```sh
 cargo test -p ratty-vt --locked      # Engine tests without building Bevy
-cargo test --workspace --locked     # Application, engine, and doctests
+cargo test --workspace --all-features --locked  # Application, engine, tooling, and doctests
 cargo package --workspace --exclude xtask --locked  # Verify distributable crates
 ```
 
