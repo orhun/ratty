@@ -134,7 +134,14 @@ mod tests {
             assert_eq!(object_id, 710);
             assert_eq!((image.width, image.height), (128, 128));
             assert_eq!(image.rgba.len(), 128 * 128 * 4);
-            assert!(image.rgba.chunks_exact(4).all(|actual| actual == pixel));
+            assert!(
+                image
+                    .rgba
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .all(|actual| actual == &pixel)
+            );
             assert_eq!(
                 (anchor.row, anchor.col, anchor.columns, anchor.rows),
                 (2, 1, 8, 4)
