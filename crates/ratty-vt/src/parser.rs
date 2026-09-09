@@ -1,11 +1,8 @@
 /// A parser for terminal output which produces an in-memory representation of
 /// the terminal contents.
 pub struct Parser<CB: crate::callbacks::Callbacks = ()> {
-    parser: vte::Parser,
+    parser: ratty_vte::Parser,
     screen: crate::perform::WrappedScreen<CB>,
-    // Conservative count of continuation bytes needed by the last input suffix.
-    // vte 0.15 can skip bytes after completing a partial scalar in a bulk call.
-    utf8_remaining: u8,
 }
 
 impl Parser {
@@ -14,9 +11,8 @@ impl Parser {
     #[must_use]
     pub fn new(rows: u16, cols: u16, scrollback_len: usize) -> Self {
         Self {
-            parser: vte::Parser::new(),
+            parser: ratty_vte::Parser::new(),
             screen: crate::perform::WrappedScreen::new(rows, cols, scrollback_len),
-            utf8_remaining: 0,
         }
     }
 }
@@ -28,39 +24,20 @@ impl<CB: crate::callbacks::Callbacks> Parser<CB> {
     /// implementation.
     pub fn new_with_callbacks(rows: u16, cols: u16, scrollback_len: usize, callbacks: CB) -> Self {
         Self {
-            parser: vte::Parser::new(),
+            parser: ratty_vte::Parser::new(),
             screen: crate::perform::WrappedScreen::new_with_callbacks(
                 rows,
                 cols,
                 scrollback_len,
                 callbacks,
             ),
-            utf8_remaining: 0,
         }
     }
 
     /// Processes the contents of the given byte string, and updates the
     /// in-memory terminal state.
-    pub fn process(&mut self, mut bytes: &[u8]) {
-        // Complete a possibly split scalar one byte at a time. In vte 0.15,
-        // advance_partial_utf8 can print only its first scalar but consume
-        // additional valid bytes before the next incomplete scalar. For example,
-        // [C3] + [A9, 'x', C3, A9] loses 'x'. Once the prefix is complete we
-        // retain bulk parsing for the rest of the chunk, with no buffering.
-        while self.utf8_remaining > 0 && !bytes.is_empty() {
-            let byte = bytes[0];
-            self.parser.advance(&mut self.screen, &bytes[..1]);
-            self.utf8_remaining = match byte {
-                0x80..=0xbf => self.utf8_remaining.saturating_sub(1),
-                _ => continuation_count(byte),
-            };
-            bytes = &bytes[1..];
-        }
-        if bytes.is_empty() {
-            return;
-        }
+    pub fn process(&mut self, bytes: &[u8]) {
         self.parser.advance(&mut self.screen, bytes);
-        self.utf8_remaining = incomplete_suffix(bytes);
     }
 
     /// Returns a reference to a [`Screen`](crate::Screen) object containing
@@ -89,24 +66,6 @@ impl<CB: crate::callbacks::Callbacks> Parser<CB> {
     pub fn callbacks_mut(&mut self) -> &mut CB {
         &mut self.screen.callbacks
     }
-}
-
-fn continuation_count(lead: u8) -> u8 {
-    match lead {
-        0xc2..=0xdf => 1,
-        0xe0..=0xef => 2,
-        0xf0..=0xf4 => 3,
-        _ => 0,
-    }
-}
-
-fn incomplete_suffix(bytes: &[u8]) -> u8 {
-    for (continuations, &byte) in bytes.iter().rev().take(4).enumerate() {
-        if !(0x80..=0xbf).contains(&byte) {
-            return continuation_count(byte).saturating_sub(continuations as u8);
-        }
-    }
-    0
 }
 
 impl Default for Parser {
@@ -182,25 +141,7 @@ mod tests {
                     parser.screen().contents().ends_with("END"),
                     "prefix={prefix:?}, chunk={chunk}"
                 );
-                assert_eq!(parser.utf8_remaining, 0);
             }
-        }
-    }
-
-    #[test]
-    fn suffix_tracking_distinguishes_complete_and_partial_scalars() {
-        for c in ['é', '界', '💻'] {
-            let mut buf = [0; 4];
-            let bytes = c.encode_utf8(&mut buf).as_bytes();
-            for len in 1..=bytes.len() {
-                assert_eq!(
-                    usize::from(incomplete_suffix(&bytes[..len])),
-                    bytes.len() - len
-                );
-            }
-        }
-        for bytes in [&b"ascii"[..], &b"\x80\x80"[..], &b"\xff"[..], &b"\xf5"[..]] {
-            assert_eq!(incomplete_suffix(bytes), 0);
         }
     }
 

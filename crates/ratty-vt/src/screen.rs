@@ -1477,7 +1477,11 @@ impl Screen {
     }
 
     // CSI ? h
-    pub(crate) fn decset(&mut self, params: &vte::Params, mut unhandled: impl FnMut(&mut Self)) {
+    pub(crate) fn decset(
+        &mut self,
+        params: &ratty_vte::Params,
+        mut unhandled: impl FnMut(&mut Self),
+    ) {
         for param in params {
             match param {
                 [1] => self.set_mode(MODE_APPLICATION_CURSOR),
@@ -1510,7 +1514,11 @@ impl Screen {
     }
 
     // CSI ? l
-    pub(crate) fn decrst(&mut self, params: &vte::Params, mut unhandled: impl FnMut(&mut Self)) {
+    pub(crate) fn decrst(
+        &mut self,
+        params: &ratty_vte::Params,
+        mut unhandled: impl FnMut(&mut Self),
+    ) {
         for param in params {
             match param {
                 [1] => self.clear_mode(MODE_APPLICATION_CURSOR),
@@ -1546,9 +1554,9 @@ impl Screen {
     }
 
     // CSI m
-    pub(crate) fn sgr(&mut self, params: &vte::Params, mut unhandled: impl FnMut(&mut Self)) {
+    pub(crate) fn sgr(&mut self, params: &ratty_vte::Params, mut unhandled: impl FnMut(&mut Self)) {
         // XXX really i want to just be able to pass in a default Params
-        // instance with a 0 in it, but vte doesn't allow creating new Params
+        // instance with a 0 in it, but ratty-vte doesn't allow creating new Params
         // instances
         if params.is_empty() {
             self.attrs = crate::attrs::Attrs::default();

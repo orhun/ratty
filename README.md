@@ -243,7 +243,7 @@ and [Bevy](https://bevyengine.org/) for scene presentation.
 
 Current workflow:
 
-1. PTY output is parsed by the [`ratty-vt` workspace crate](crates/ratty-vt/README.md) (Ratty's fork of [`vt100`](https://github.com/doy/vt100-rust)) and drawn into a Ratatui buffer on CPU
+1. PTY output is parsed by the [`ratty-vt` workspace crate](crates/ratty-vt/README.md) (Ratty's fork of [`vt100`](https://github.com/doy/vt100-rust), on top of [`ratty-vte`](crates/ratty-vte/README.md), Ratty's fork of [`vte`](https://github.com/alacritty/vte)) and drawn into a Ratatui buffer on CPU
 2. `bevy_terminal_ratatui` translates Ratatui's changed cells into a retained terminal surface
 3. `bevy_terminal` shapes text with Bevy's font system and incrementally builds compact background,
    decoration, cursor, and glyph quads
@@ -255,8 +255,9 @@ world to the render world each frame is compact scene data, not pixels.
 
 ### Workspace development
 
-The Cargo workspace contains the Ratty application and the independent
-[`ratty-vt`](crates/ratty-vt/README.md) terminal engine. The widget remains a
+The Cargo workspace contains the Ratty application, the independent
+[`ratty-vt`](crates/ratty-vt/README.md) terminal engine, and its
+[`ratty-vte`](crates/ratty-vte/README.md) escape sequence parser. The widget remains a
 separate package under `widget/` with its own lockfile.
 The unpublished `xtask` workspace member provides the Rust smoke-test runner and
 performance workloads; run `cargo run -p xtask -- --help` for the available

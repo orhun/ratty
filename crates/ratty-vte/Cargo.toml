@@ -1,0 +1,21 @@
+[package]
+name = "ratty-vte"
+version = "0.1.0"
+description = "ANSI escape sequence parser for Ratty, forked from vte"
+authors = ["Joe Wilm <joe@jwilm.com>", "Christian Duerr <contact@christianduerr.com>", "Orhun Parmaksız <orhunparmaksiz@gmail.com>"]
+license = "Apache-2.0 OR MIT"
+readme = "README.md"
+homepage = "https://github.com/orhun/ratty"
+repository = "https://github.com/orhun/ratty"
+keywords = ["ansi", "vte", "parser", "terminal"]
+categories = ["parsing", "no-std"]
+edition = "2024"
+include = ["src/**", "Cargo.toml", "README.md", "LICENSE-APACHE", "LICENSE-MIT"]
+
+[features]
+default = ["std"]
+std = ["memchr/std"]
+
+[dependencies]
+arrayvec = { version = "0.7.2", default-features = false }
+memchr = { version = "2.7.4", default-features = false }
