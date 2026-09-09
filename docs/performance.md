@@ -114,9 +114,9 @@ blocked reader send. All PTY reports include
 receipt. A scheduling gap between receipt and subtraction can temporarily count
 an eighteenth chunk, so this metric is an upper bound on backlog, not exact
 channel occupancy. Unread kernel PTY and producer bytes are excluded, so this
-does not bound total end-to-end backlog. Each run checks the 288 KiB accounting bound (`PTY_QUEUE_ACCOUNTING_BOUND`, derived
-from the runtime's channel and chunk constants) and zero bytes
-outstanding after EOF. The fixed reader buffer, parser history, inline assets,
+does not bound total end-to-end backlog. Each run checks the 288 KiB accounting bound
+(`PTY_QUEUE_ACCOUNTING_BOUND`, derived from the runtime's channel and chunk
+constants) and zero bytes outstanding after EOF. The fixed reader buffer, parser history, inline assets,
 and other process memory are excluded; this does not replace RSS measurements.
 Counters are enabled only by the `performance` feature and must be identical in
 baseline and candidate builds.
