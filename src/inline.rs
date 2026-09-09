@@ -80,6 +80,20 @@ pub struct TerminalInlineObjects {
 }
 
 impl TerminalInlineObjects {
+    /// Registered object and placement counts for optional lifecycle recording.
+    #[cfg(feature = "performance")]
+    pub fn object_counts(&self) -> (usize, usize) {
+        (self.objects.len(), self.anchors.len())
+    }
+
+    /// Placement row, column, and yaw for an explicitly tracked benchmark object.
+    #[cfg(feature = "performance")]
+    pub fn placement_state(&self, object_id: u32) -> Option<(u16, u16, f32)> {
+        self.anchors
+            .get(&object_id)
+            .map(|anchor| (anchor.row, anchor.col, anchor.style.rotation[1]))
+    }
+
     /// Consumes PTY output and extracts inline object control sequences.
     pub fn consume_pty_output(
         &mut self,

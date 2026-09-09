@@ -12,6 +12,7 @@ on:
         default: ratty
         options:
           - ratty
+          - ratty-vte
           - ratty-vt
 
 env:

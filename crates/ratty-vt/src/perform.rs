@@ -21,7 +21,7 @@ impl<CB: crate::callbacks::Callbacks> WrappedScreen<CB> {
     }
 }
 
-impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
+impl<CB: crate::callbacks::Callbacks> ratty_vte::Perform for WrappedScreen<CB> {
     fn print(&mut self, c: char) {
         if c == '\u{fffd}' || ('\u{80}'..'\u{a0}').contains(&c) {
             self.callbacks.unhandled_char(&mut self.screen, c);
@@ -71,7 +71,13 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
         }
     }
 
-    fn csi_dispatch(&mut self, params: &vte::Params, intermediates: &[u8], _ignore: bool, c: char) {
+    fn csi_dispatch(
+        &mut self,
+        params: &ratty_vte::Params,
+        intermediates: &[u8],
+        _ignore: bool,
+        c: char,
+    ) {
         let unhandled = |screen: &mut crate::screen::Screen| {
             self.callbacks.unhandled_csi(
                 screen,
@@ -229,12 +235,12 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
     }
 }
 
-fn canonicalize_params_1(params: &vte::Params, default: u16) -> u16 {
+fn canonicalize_params_1(params: &ratty_vte::Params, default: u16) -> u16 {
     let first = params.iter().next().map_or(0, |x| *x.first().unwrap_or(&0));
     if first == 0 { default } else { first }
 }
 
-fn canonicalize_params_2(params: &vte::Params, default1: u16, default2: u16) -> (u16, u16) {
+fn canonicalize_params_2(params: &ratty_vte::Params, default1: u16, default2: u16) -> (u16, u16) {
     let mut iter = params.iter();
     let first = iter.next().map_or(0, |x| *x.first().unwrap_or(&0));
     let first = if first == 0 { default1 } else { first };
@@ -245,7 +251,7 @@ fn canonicalize_params_2(params: &vte::Params, default1: u16, default2: u16) -> 
     (first, second)
 }
 
-fn canonicalize_params_decstbm(params: &vte::Params, size: crate::grid::Size) -> (u16, u16) {
+fn canonicalize_params_decstbm(params: &ratty_vte::Params, size: crate::grid::Size) -> (u16, u16) {
     let mut iter = params.iter();
     let top = iter.next().map_or(0, |x| *x.first().unwrap_or(&0));
     let top = if top == 0 { 1 } else { top };
