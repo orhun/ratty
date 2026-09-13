@@ -548,10 +548,11 @@ pub(crate) fn sync_terminal_render_output(mut params: SyncRenderOutputParams) {
         plane_back_query,
         frame_dirty,
     } = &mut params;
-    let (Some(texture), Ok(mut window)) = (
-        textures.single().ok().and_then(TerminalTexture::measured),
-        primary_window.single_mut(),
-    ) else {
+    let (Some(texture), Ok(mut window)) = (textures.single().ok(), primary_window.single_mut())
+    else {
+        return;
+    };
+    let Some(geometry) = texture.measured() else {
         return;
     };
     // Minimizing the window reports a 0x0 size. Skip the reflow (mirroring
@@ -571,7 +572,7 @@ pub(crate) fn sync_terminal_render_output(mut params: SyncRenderOutputParams) {
     }
     terminal.set_changed();
     let previous_grid = (terminal.cols, terminal.rows);
-    let layout = reflow_terminal(terminal, runtime, window_size, texture.raster_scale);
+    let layout = reflow_terminal(terminal, runtime, window_size, geometry.raster_scale());
     sync_terminal_layout(layout, viewport, plane_query, plane_back_query);
     frame_dirty.0 = true;
     if previous_grid != (layout.cols, layout.rows) {
@@ -580,7 +581,7 @@ pub(crate) fn sync_terminal_render_output(mut params: SyncRenderOutputParams) {
     // The first measured texture may still represent the configured startup
     // grid. If measurement changes the fitted grid, keep the native window
     // hidden until the renderer has produced the correctly sized texture.
-    if !window.visible && texture.size == terminal.pixmap_dimensions() {
+    if !window.visible && geometry.size() == terminal.pixmap_dimensions() {
         window.visible = true;
     }
 }
