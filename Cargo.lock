@@ -1434,10 +1434,10 @@ dependencies = [
 [[package]]
 name = "bevy_terminal"
 version = "0.7.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "452db150b569c986619f0974d2311d8ab11667f171a8c8db29b4f61a103f1370"
+source = "git+https://github.com/gold-silver-copper/bevy_terminal?branch=main#0042ac5b8fbaa3871a1cf61c659769c739123d79"
 dependencies = [
  "bevy",
+ "bitflags 2.13.0",
  "skrifa",
  "smol_str",
 ]
@@ -1445,8 +1445,7 @@ dependencies = [
 [[package]]
 name = "bevy_terminal_ratatui"
 version = "0.7.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed8ec4408ff2a61597875d54aa5ba56d726861d901ffd2f878d4ad694dd8e971"
+source = "git+https://github.com/gold-silver-copper/bevy_terminal?branch=main#0042ac5b8fbaa3871a1cf61c659769c739123d79"
 dependencies = [
  "bevy",
  "bevy_terminal",

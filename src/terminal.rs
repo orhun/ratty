@@ -9,8 +9,8 @@ use bevy::prelude::*;
 use bevy::text::FontCx;
 use bevy_terminal_ratatui::RatatuiTerminal;
 use bevy_terminal_ratatui::prelude::{
-    BlinkConfig, CellSizing, CursorConfig, CursorStyle, FontFaces, FontSizing, FontSource,
-    RasterConfig, TerminalRenderConfig, TerminalRenderScale, TerminalTexture, TerminalTheme,
+    BlinkConfig, CursorConfig, CursorStyle, FontFaces, FontSource, RasterConfig,
+    TerminalRenderConfig, TerminalRenderScale, TerminalSizing, TerminalTexture, TerminalTheme,
     font_family,
 };
 use ratatui::buffer::{Buffer, CellDiffOption};
@@ -210,8 +210,7 @@ pub struct TerminalSurface {
     font_size: i32,
     render_config: TerminalRenderConfig,
     render_scale: f32,
-    cell_size: Vec2,
-    rendered_texture_size: Option<UVec2>,
+    render_output: Option<TerminalTexture>,
 }
 
 impl TerminalSurface {
@@ -223,7 +222,7 @@ impl TerminalSurface {
     pub fn new(config: &AppConfig) -> anyhow::Result<Self> {
         let cols = config.terminal.default_cols;
         let rows = config.terminal.default_rows;
-        let (mut tui, _) = RatatuiTerminal::new(cols, rows);
+        let mut tui = RatatuiTerminal::new(cols, rows);
         let Ok(()) = tui.clear();
         if config.cursor.model.visible {
             let Ok(()) = tui.hide_cursor();
@@ -251,8 +250,7 @@ impl TerminalSurface {
             render_config,
             render_scale,
             // No geometry is inferred before the renderer measures the loaded font.
-            cell_size: Vec2::ONE,
-            rendered_texture_size: None,
+            render_output: None,
         })
     }
 
@@ -266,7 +264,9 @@ impl TerminalSurface {
             return false;
         }
 
-        self.render_config.font_size = FontSizing::Px(points_to_logical_pixels(new_size));
+        if let TerminalSizing::FromFont { font_size, .. } = &mut self.render_config.sizing {
+            *font_size = points_to_logical_pixels(new_size);
+        }
         self.font_size = new_size;
         true
     }
@@ -294,8 +294,10 @@ impl TerminalSurface {
 
         // The renderer sizes its texture with the same exported helper, so
         // the PTY grid and the rendered grid cannot disagree by a cell.
-        let grid =
-            bevy_terminal_ratatui::render::grid_for(logical_size.max(Vec2::ONE), self.cell_size);
+        let grid = bevy_terminal_ratatui::render::grid_for(
+            logical_size.max(Vec2::ONE),
+            self.char_dimensions(),
+        );
         let (cols, rows) = (grid.width, grid.height);
         if cols != self.cols || rows != self.rows {
             self.resize(cols, rows);
@@ -322,23 +324,27 @@ impl TerminalSurface {
 
     /// Returns the rendered cell size in logical pixels.
     ///
-    /// Always at least 1x1: every writer of `cell_size` (the constructor and
-    /// `update_render_output`) floors it, so consumers need no re-clamp.
+    /// Uses the renderer's effective logical geometry, including fractional
+    /// logical cells on high-DPI displays. Before measurement this is 1x1.
     pub fn char_dimensions(&self) -> Vec2 {
-        self.cell_size
+        self.render_output
+            .as_ref()
+            .map_or(Vec2::ONE, |output| output.cell_size)
     }
 
     /// Whether the renderer has supplied authoritative font and cell metrics.
     pub fn is_measured(&self) -> bool {
-        self.rendered_texture_size.is_some()
+        self.render_output.is_some()
     }
 
     /// Returns the terminal pixmap dimensions in pixels.
     pub fn pixmap_dimensions(&self) -> UVec2 {
-        (Vec2::new(self.cols as f32, self.rows as f32) * self.cell_size * self.render_scale)
-            .round()
-            .max(Vec2::ONE)
-            .as_uvec2()
+        (Vec2::new(self.cols as f32, self.rows as f32)
+            * self.char_dimensions()
+            * self.measured_scale())
+        .round()
+        .max(Vec2::ONE)
+        .as_uvec2()
     }
 
     /// Returns the current terminal layout.
@@ -347,8 +353,14 @@ impl TerminalSurface {
             self.cols,
             self.rows,
             self.pixmap_dimensions(),
-            self.render_scale,
+            self.measured_scale(),
         )
+    }
+
+    fn measured_scale(&self) -> f32 {
+        self.render_output
+            .as_ref()
+            .map_or(self.render_scale, |output| output.raster_scale)
     }
 
     /// Returns the render configuration derived from Ratty's settings.
@@ -363,19 +375,16 @@ impl TerminalSurface {
     /// renderer, comparing first and writing only on change; returns whether
     /// anything changed.
     pub fn update_render_output(&mut self, texture: &TerminalTexture) -> bool {
-        let cell_size = texture.cell_size.max(Vec2::ONE);
-        let render_scale = texture.raster_scale.max(1.0);
-        let changed = self.image_handle.as_ref() != Some(&texture.image)
-            || self.rendered_texture_size != Some(texture.size)
-            || self.cell_size != cell_size
-            || self.render_scale != render_scale;
-        if changed {
-            self.image_handle = Some(texture.image.clone());
-            self.rendered_texture_size = Some(texture.size);
-            self.cell_size = cell_size;
-            self.render_scale = render_scale;
+        let Some(texture) = texture.measured() else {
+            return false;
+        };
+        if self.render_output.as_ref() == Some(texture) {
+            return false;
         }
-        changed
+        self.image_handle = Some(texture.image.clone());
+        self.tui.backend_mut().set_pixel_size(texture.size);
+        self.render_output = Some(texture.clone());
+        true
     }
 }
 
@@ -420,11 +429,11 @@ fn build_terminal_render_config(
         // Cell width and height come from the loaded face's measured advance
         // and line box; Ratty supplies no independent geometry estimate, only
         // the user's line-height multiplier.
-        cell_size: CellSizing::FromFont {
+        sizing: TerminalSizing::FromFont {
+            font_size: points_to_logical_pixels(font.size),
             line_height: line_height_multiplier(font.line_height),
         },
         font: FontFaces::regular(font_family(&font.family)),
-        font_size: FontSizing::Px(points_to_logical_pixels(font.size)),
         theme,
         cursor: CursorConfig {
             style: CursorStyle::Block,
@@ -760,7 +769,7 @@ mod tests {
     #[test]
     fn successive_draws_replace_wide_continuation_cells() {
         let (rows, cols) = (2, 8);
-        let (mut tui, _) = RatatuiTerminal::new(cols, rows);
+        let mut tui = RatatuiTerminal::new(cols, rows);
 
         draw_input(&mut tui, rows, cols, b"abcdefgh");
         draw_input(
@@ -792,7 +801,7 @@ mod tests {
     #[test]
     fn scrollback_redraws_wide_graphemes_without_artifacts() {
         let (rows, cols) = (2, 8);
-        let (mut tui, _) = RatatuiTerminal::new(cols, rows);
+        let mut tui = RatatuiTerminal::new(cols, rows);
         let mut parser = parse(
             rows,
             cols,
@@ -889,7 +898,7 @@ mod tests {
     /// `Modifier::HIDDEN` to `StyleFlags::HIDDEN`, which the renderer skips.
     #[test]
     fn hidden_text_reaches_the_renderer_concealed() {
-        let (mut tui, _) = RatatuiTerminal::new(20, 2);
+        let mut tui = RatatuiTerminal::new(20, 2);
         draw_input(&mut tui, 2, 20, b"ab\x1b[8mXY\x1b[28mcd");
         let snapshot = tui.snapshot();
         let hidden = snapshot.cell((2, 0)).expect("cell");
@@ -946,16 +955,22 @@ mod tests {
             TerminalSurface::new(&config)
                 .expect("surface")
                 .render_config()
-                .cell_size,
-            CellSizing::FromFont { line_height: 1.0 }
+                .sizing,
+            TerminalSizing::FromFont {
+                font_size: points_to_logical_pixels(config.font.size),
+                line_height: 1.0
+            }
         );
         config.font.line_height = 0.85;
         assert_eq!(
             TerminalSurface::new(&config)
                 .expect("surface")
                 .render_config()
-                .cell_size,
-            CellSizing::FromFont { line_height: 0.85 }
+                .sizing,
+            TerminalSizing::FromFont {
+                font_size: points_to_logical_pixels(config.font.size),
+                line_height: 0.85
+            }
         );
         assert_eq!(line_height_multiplier(0.0), 1.0);
         assert_eq!(line_height_multiplier(f32::NAN), 1.0);
@@ -968,7 +983,7 @@ mod tests {
         let before = surface.render_config().clone();
         assert!(surface.adjust_font_size(2));
         assert_eq!(surface.font_size(), AppConfig::default().font.size + 2);
-        assert_ne!(surface.render_config().font_size, before.font_size);
+        assert_ne!(surface.render_config().sizing, before.sizing);
         assert!(!surface.is_measured());
         // Zoom never moves the grid on its own: the renderer's measurement
         // reports the new cell size and the reflow follows that.
@@ -980,6 +995,7 @@ mod tests {
     fn render_output_adoption_reports_changes_once() {
         let mut surface = TerminalSurface::new(&AppConfig::default()).expect("surface");
         let texture = TerminalTexture {
+            status: bevy_terminal_ratatui::prelude::TerminalStatus::Ready,
             image: Handle::default(),
             size: UVec2::new(800, 600),
             logical_size: Vec2::new(400.0, 300.0),
@@ -996,6 +1012,52 @@ mod tests {
         assert_eq!((layout.cols, layout.rows), (50, 18));
         assert_eq!(layout.texture_size, UVec2::new(800, 576));
         assert_eq!(layout.logical_size, Vec2::new(400.0, 288.0));
+    }
+
+    #[test]
+    fn measured_output_survives_pending_dpi_and_failed_measurements() {
+        use bevy_terminal_ratatui::prelude::TerminalStatus;
+
+        let mut surface = TerminalSurface::new(&AppConfig::default()).expect("surface");
+        let mut texture = TerminalTexture {
+            status: TerminalStatus::Loading,
+            image: Handle::default(),
+            size: UVec2::new(1200, 648),
+            logical_size: Vec2::new(600.0, 324.0),
+            raster_scale: 2.0,
+            cell_size: Vec2::new(7.5, 13.5),
+            font_size: 12.5,
+        };
+        assert!(!surface.update_render_output(&texture));
+        assert!(!surface.is_measured());
+
+        texture.status = TerminalStatus::Ready;
+        assert!(surface.update_render_output(&texture));
+        let layout = surface.resize_to_fit(Vec2::new(600.0, 324.0), 2.0);
+        assert_eq!((layout.cols, layout.rows), (80, 24));
+        assert_eq!(surface.char_dimensions(), Vec2::new(7.5, 13.5));
+        assert_eq!(layout.texture_size, texture.size);
+
+        assert!(surface.set_render_scale(3.0));
+        assert_eq!(
+            surface.render_config().raster.scale,
+            TerminalRenderScale::Fixed(3.0)
+        );
+        assert_eq!(surface.layout().texture_size, layout.texture_size);
+        assert_eq!(surface.layout().logical_size, layout.logical_size);
+        for status in [
+            TerminalStatus::Loading,
+            TerminalStatus::FontFailed,
+            TerminalStatus::ShapingFailed,
+        ] {
+            texture.status = status;
+            texture.raster_scale = 3.0;
+            texture.cell_size = Vec2::ONE;
+            assert!(!surface.update_render_output(&texture));
+            assert_eq!(surface.layout().texture_size, layout.texture_size);
+            assert_eq!(surface.layout().logical_size, layout.logical_size);
+            assert_eq!(surface.char_dimensions(), Vec2::new(7.5, 13.5));
+        }
     }
 
     #[test]
@@ -1086,8 +1148,8 @@ mod tests {
                     app.world()
                         .resource::<TerminalSurface>()
                         .render_config()
-                        .font_size,
-                    FontSizing::Px(requested)
+                        .sizing,
+                    TerminalSizing::font(requested)
                 );
                 assert!(texture.font_size.is_finite() && texture.font_size >= 1.0);
                 let measured = texture.cell_size;
@@ -1115,8 +1177,13 @@ mod tests {
             .get::<TerminalRenderConfig>(entity)
             .expect("render config");
         assert_eq!(render_config.font.regular, FontSource::Monospace);
-        assert_eq!(render_config.cell_size, CellSizing::FROM_FONT);
-        assert!(matches!(render_config.font_size, FontSizing::Px(_)));
+        assert!(matches!(
+            render_config.sizing,
+            TerminalSizing::FromFont {
+                line_height: 1.0,
+                ..
+            }
+        ));
         let texture = app
             .world()
             .get::<TerminalTexture>(entity)
@@ -1146,10 +1213,9 @@ mod tests {
             ..default()
         };
         let mut terminal = TerminalSurface::new(&config).expect("measured terminal");
-        assert_eq!(terminal.render_config().cell_size, CellSizing::FROM_FONT);
         assert_eq!(
-            terminal.render_config().font_size,
-            FontSizing::Px(points_to_logical_pixels(20))
+            terminal.render_config().sizing,
+            TerminalSizing::font(points_to_logical_pixels(20))
         );
         assert_eq!(
             terminal.render_config().raster.scale,
