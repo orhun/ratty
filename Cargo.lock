@@ -1434,18 +1434,17 @@ dependencies = [
 [[package]]
 name = "bevy_terminal"
 version = "0.7.3"
-source = "git+https://github.com/gold-silver-copper/bevy_terminal?branch=main#409b7f29a78a1805c045d353096846c82d2b2c5e"
+source = "git+https://github.com/gold-silver-copper/bevy_terminal?branch=main#12b035ceb0b317ce8c529485b80c6b0317cf67ec"
 dependencies = [
  "bevy",
  "bitflags 2.13.0",
  "skrifa",
- "smol_str",
 ]
 
 [[package]]
 name = "bevy_terminal_ratatui"
 version = "0.7.3"
-source = "git+https://github.com/gold-silver-copper/bevy_terminal?branch=main#409b7f29a78a1805c045d353096846c82d2b2c5e"
+source = "git+https://github.com/gold-silver-copper/bevy_terminal?branch=main#12b035ceb0b317ce8c529485b80c6b0317cf67ec"
 dependencies = [
  "bevy",
  "bevy_terminal",

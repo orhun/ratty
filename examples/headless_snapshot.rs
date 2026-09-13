@@ -23,7 +23,7 @@
 //! PTY step, shared), the `TerminalWidget` draw in
 //! `ratty::systems::render_terminal_widget` (`pump_and_draw` here), and the
 //! texture adoption in `ratty::systems::sync_terminal_render_output`
-//! (`adopt_texture` here). Scene mode runs Ratty's real plugin instead.
+//! (`adopt_output` here). Scene mode runs Ratty's real plugin instead.
 //!
 //! Requires a GPU (Metal/Vulkan/DX12).
 
@@ -43,8 +43,7 @@ use bevy::window::{PrimaryWindow, WindowResolution};
 use bevy::winit::WinitPlugin;
 use bevy_terminal_ratatui::TerminalRenderer;
 use bevy_terminal_ratatui::prelude::{
-    TerminalPlugin, TerminalReady, TerminalRemeasured, TerminalRenderConfig, TerminalStats,
-    TerminalSystems, TerminalTexture,
+    TerminalPlugin, TerminalRenderConfig, TerminalStats, TerminalSystems, TerminalTexture,
 };
 use clap::Parser;
 
@@ -416,8 +415,12 @@ fn main() -> anyhow::Result<()> {
                     render_config.clone(),
                 ));
             })
-            .add_observer(on_ready)
-            .add_observer(on_remeasured)
+            .add_systems(
+                Update,
+                adopt_output
+                    .after(TerminalSystems::Sync)
+                    .before(track_idle_frames),
+            )
             .add_systems(
                 Update,
                 (sync_texture_font_config, pump_and_draw)
@@ -453,45 +456,26 @@ fn retarget_cameras(
     commands.insert_resource(SceneTarget(handle, size));
 }
 
-fn on_ready(
-    ready: On<TerminalReady>,
-    textures: Query<&TerminalTexture>,
+fn adopt_output(
+    textures: Query<&TerminalTexture, With<Target>>,
     mut terminal: ResMut<TerminalSurface>,
     mut runtime: ResMut<TerminalRuntime>,
     mut gate: ResMut<CaptureGate>,
 ) {
-    let Ok(texture) = textures.get(ready.entity) else {
+    let Ok(texture) = textures.single() else {
         return;
     };
-    adopt_texture(texture, &mut terminal, &mut runtime, &mut gate);
-}
-
-fn on_remeasured(
-    remeasured: On<TerminalRemeasured>,
-    textures: Query<&TerminalTexture>,
-    mut terminal: ResMut<TerminalSurface>,
-    mut runtime: ResMut<TerminalRuntime>,
-    mut gate: ResMut<CaptureGate>,
-) {
-    let Ok(texture) = textures.get(remeasured.entity) else {
-        return;
-    };
-    adopt_texture(texture, &mut terminal, &mut runtime, &mut gate);
-}
-
-/// Keep the configured grid while adopting the renderer's measured pixels,
-/// including later font registrations that change those measurements.
-fn adopt_texture(
-    texture: &TerminalTexture,
-    terminal: &mut TerminalSurface,
-    runtime: &mut TerminalRuntime,
-    gate: &mut CaptureGate,
-) {
     let Some(geometry) = texture.measured() else {
         return;
     };
+    if !terminal
+        .bypass_change_detection()
+        .update_render_output(texture)
+    {
+        return;
+    }
+    terminal.set_changed();
     gate.idle_frames = 0;
-    terminal.update_render_output(texture);
     let logical =
         Vec2::new(terminal.cols as f32, terminal.rows as f32) * terminal.char_dimensions();
     let layout = terminal.resize_to_fit(logical, 1.0);

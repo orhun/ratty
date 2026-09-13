@@ -10,8 +10,7 @@ use bevy::text::FontCx;
 use bevy_terminal_ratatui::RatatuiTerminal;
 use bevy_terminal_ratatui::prelude::{
     BlinkConfig, CursorConfig, CursorStyle, FontFaces, FontSource, RasterConfig, TerminalGeometry,
-    TerminalRenderConfig, TerminalRenderScale, TerminalSizing, TerminalTexture, TerminalTheme,
-    font_family,
+    TerminalRenderConfig, TerminalSizing, TerminalTexture, TerminalTheme, font_family,
 };
 use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::layout::Rect;
@@ -284,7 +283,7 @@ impl TerminalSurface {
         }
 
         self.render_scale = render_scale;
-        self.render_config.raster.scale = TerminalRenderScale::Fixed(render_scale);
+        self.render_config.raster.scale = render_scale;
         true
     }
 
@@ -294,7 +293,7 @@ impl TerminalSurface {
 
         // The renderer sizes its texture with the same exported helper, so
         // the PTY grid and the rendered grid cannot disagree by a cell.
-        let grid = bevy_terminal_ratatui::render::grid_for(
+        let grid = bevy_terminal_ratatui::bevy_terminal::render::grid_for(
             logical_size.max(Vec2::ONE),
             self.char_dimensions(),
         );
@@ -394,12 +393,15 @@ impl TerminalSurface {
 
 /// Computes the physical render scale for a Bevy window.
 ///
-/// Delegates to the renderer's exported helper so the scale the PTY layout
-/// uses is the exact scale the renderer rasterizes with. It derives from the
-/// window's actual framebuffer ratio rather than the reported scale factor,
-/// which keeps mixed-DPI setups from over-sizing the texture.
+/// Uses the actual framebuffer ratio rather than the reported scale factor,
+/// preserving the application's layout on mixed-DPI setups. The same explicit
+/// scale is supplied to the renderer through `RasterConfig`.
 pub fn render_scale_for_window(window: &Window) -> f32 {
-    bevy_terminal_ratatui::render::raster_scale_for_window(window)
+    let logical = window.resolution.size().max(Vec2::ONE);
+    let physical = window.resolution.physical_size().as_vec2();
+    (physical.x / logical.x)
+        .min(physical.y / logical.y)
+        .max(1.0)
 }
 
 /// Returns the logical size for a physical terminal texture.
@@ -449,7 +451,7 @@ fn build_terminal_render_config(
             rapid_hz: Some(2.0),
         },
         raster: RasterConfig {
-            scale: TerminalRenderScale::Fixed(render_scale.max(1.0)),
+            scale: render_scale.max(1.0),
             ..default()
         },
     }
@@ -1017,10 +1019,7 @@ mod tests {
                         cell_size,
                         font_size: 6.0,
                     },
-                    raster: RasterConfig {
-                        scale: TerminalRenderScale::Fixed(scale),
-                        ..default()
-                    },
+                    raster: RasterConfig { scale, ..default() },
                     ..default()
                 },
             ))
@@ -1035,6 +1034,20 @@ mod tests {
             .clone();
         assert!(texture.measured().is_some());
         texture
+    }
+
+    #[test]
+    fn window_dpi_is_forwarded_to_explicit_renderer_scale() {
+        let mut window = Window::default();
+        window.resolution.set_scale_factor(2.0);
+        window.resolution.set(1200.0, 800.0);
+        let mut surface = TerminalSurface::new(&AppConfig::default()).expect("surface");
+        assert!(surface.set_render_scale(render_scale_for_window(&window)));
+        assert_eq!(surface.render_config().raster.scale, 2.0);
+        // The renderer and PTY layout both use the same minimum scale.
+        window.resolution.set_scale_factor(0.5);
+        assert!(surface.set_render_scale(render_scale_for_window(&window)));
+        assert_eq!(surface.render_config().raster.scale, 1.0);
     }
 
     #[test]
@@ -1074,10 +1087,7 @@ mod tests {
         );
 
         assert!(surface.set_render_scale(3.0));
-        assert_eq!(
-            surface.render_config().raster.scale,
-            TerminalRenderScale::Fixed(3.0)
-        );
+        assert_eq!(surface.render_config().raster.scale, 3.0);
         assert_eq!(surface.layout().texture_size, layout.texture_size);
         assert_eq!(surface.layout().logical_size, layout.logical_size);
         for status in [
@@ -1255,10 +1265,7 @@ mod tests {
             terminal.render_config().sizing,
             TerminalSizing::font(points_to_logical_pixels(20))
         );
-        assert_eq!(
-            terminal.render_config().raster.scale,
-            TerminalRenderScale::Fixed(2.0)
-        );
+        assert_eq!(terminal.render_config().raster.scale, 2.0);
 
         let unmeasured_cell = terminal.char_dimensions();
         assert!(terminal.adjust_font_size(2));
