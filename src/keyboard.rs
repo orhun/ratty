@@ -171,7 +171,7 @@ fn default_bindings() -> Vec<KeyBinding> {
             KeyCode::KeyC,
             BindingModifiers {
                 control: true,
-                alt: true,
+                shift: true,
                 ..default()
             },
             BindingAction::Copy,
@@ -180,7 +180,7 @@ fn default_bindings() -> Vec<KeyBinding> {
             KeyCode::KeyV,
             BindingModifiers {
                 control: true,
-                alt: true,
+                shift: true,
                 ..default()
             },
             BindingAction::Paste,
