@@ -487,6 +487,9 @@ fn adopt_texture(
     runtime: &mut TerminalRuntime,
     gate: &mut CaptureGate,
 ) {
+    let Some(geometry) = texture.measured() else {
+        return;
+    };
     gate.idle_frames = 0;
     terminal.update_render_output(texture);
     let logical =
@@ -498,7 +501,10 @@ fn adopt_texture(
     }
     info!(
         "terminal ready: {}x{} cells, texture {:?}, cell {:?}",
-        layout.cols, layout.rows, texture.size, texture.cell_size
+        layout.cols,
+        layout.rows,
+        geometry.size(),
+        geometry.cell_size()
     );
 }
 
@@ -561,11 +567,14 @@ fn request_texture_capture(params: CaptureParams, textures: Query<&TerminalTextu
     let Ok(texture) = textures.single() else {
         return;
     };
+    let Some(geometry) = texture.measured() else {
+        return;
+    };
     state.requested = true;
     if options.diagnose {
         diagnose(&terminal, &runtime);
     }
-    schedule_readback(commands, texture.image.clone(), texture.size);
+    schedule_readback(commands, texture.image.clone(), geometry.size());
 }
 
 #[derive(SystemParam)]

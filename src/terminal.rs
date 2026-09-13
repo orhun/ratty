@@ -9,7 +9,7 @@ use bevy::prelude::*;
 use bevy::text::FontCx;
 use bevy_terminal_ratatui::RatatuiTerminal;
 use bevy_terminal_ratatui::prelude::{
-    BlinkConfig, CursorConfig, CursorStyle, FontFaces, FontSource, RasterConfig,
+    BlinkConfig, CursorConfig, CursorStyle, FontFaces, FontSource, RasterConfig, TerminalGeometry,
     TerminalRenderConfig, TerminalRenderScale, TerminalSizing, TerminalTexture, TerminalTheme,
     font_family,
 };
@@ -210,7 +210,7 @@ pub struct TerminalSurface {
     font_size: i32,
     render_config: TerminalRenderConfig,
     render_scale: f32,
-    render_output: Option<TerminalTexture>,
+    render_output: Option<TerminalGeometry>,
 }
 
 impl TerminalSurface {
@@ -329,7 +329,7 @@ impl TerminalSurface {
     pub fn char_dimensions(&self) -> Vec2 {
         self.render_output
             .as_ref()
-            .map_or(Vec2::ONE, |output| output.cell_size)
+            .map_or(Vec2::ONE, |output| output.cell_size())
     }
 
     /// Whether the renderer has supplied authoritative font and cell metrics.
@@ -360,7 +360,7 @@ impl TerminalSurface {
     fn measured_scale(&self) -> f32 {
         self.render_output
             .as_ref()
-            .map_or(self.render_scale, |output| output.raster_scale)
+            .map_or(self.render_scale, |output| output.raster_scale())
     }
 
     /// Returns the render configuration derived from Ratty's settings.
@@ -375,15 +375,19 @@ impl TerminalSurface {
     /// renderer, comparing first and writing only on change; returns whether
     /// anything changed.
     pub fn update_render_output(&mut self, texture: &TerminalTexture) -> bool {
-        let Some(texture) = texture.measured() else {
+        let Some(geometry) = texture.measured() else {
             return false;
         };
-        if self.render_output.as_ref() == Some(texture) {
+        if self.render_output.as_ref() == Some(geometry)
+            && self.image_handle.as_ref() == Some(&texture.image)
+        {
+            return false;
+        }
+        if !self.tui.backend_mut().set_geometry(geometry) {
             return false;
         }
         self.image_handle = Some(texture.image.clone());
-        self.tui.backend_mut().set_pixel_size(texture.size);
-        self.render_output = Some(texture.clone());
+        self.render_output = Some(geometry.clone());
         true
     }
 }
@@ -991,18 +995,52 @@ mod tests {
         assert!(!surface.adjust_font_size(0));
     }
 
+    fn fixed_measurement(
+        surface: &TerminalSurface,
+        cell_size: Vec2,
+        scale: f32,
+    ) -> TerminalTexture {
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            bevy::asset::AssetPlugin::default(),
+            bevy::text::TextPlugin,
+        ))
+        .init_asset::<Image>()
+        .add_plugins(bevy_terminal_ratatui::prelude::TerminalPlugin);
+        let entity = app
+            .world_mut()
+            .spawn((
+                bevy_terminal_ratatui::TerminalRenderer::new(surface.tui.surface()),
+                TerminalRenderConfig {
+                    sizing: TerminalSizing::Fixed {
+                        cell_size,
+                        font_size: 6.0,
+                    },
+                    raster: RasterConfig {
+                        scale: TerminalRenderScale::Fixed(scale),
+                        ..default()
+                    },
+                    ..default()
+                },
+            ))
+            .id();
+        for _ in 0..4 {
+            app.update();
+        }
+        let texture = app
+            .world()
+            .get::<TerminalTexture>(entity)
+            .expect("fixed measured texture")
+            .clone();
+        assert!(texture.measured().is_some());
+        texture
+    }
+
     #[test]
     fn render_output_adoption_reports_changes_once() {
         let mut surface = TerminalSurface::new(&AppConfig::default()).expect("surface");
-        let texture = TerminalTexture {
-            status: bevy_terminal_ratatui::prelude::TerminalStatus::Ready,
-            image: Handle::default(),
-            size: UVec2::new(800, 600),
-            logical_size: Vec2::new(400.0, 300.0),
-            raster_scale: 2.0,
-            cell_size: Vec2::new(8.0, 16.0),
-            font_size: 16.0,
-        };
+        let texture = fixed_measurement(&surface, Vec2::new(8.0, 16.0), 2.0);
         assert!(surface.update_render_output(&texture));
         assert!(!surface.update_render_output(&texture));
         assert!(surface.is_measured());
@@ -1019,15 +1057,8 @@ mod tests {
         use bevy_terminal_ratatui::prelude::TerminalStatus;
 
         let mut surface = TerminalSurface::new(&AppConfig::default()).expect("surface");
-        let mut texture = TerminalTexture {
-            status: TerminalStatus::Loading,
-            image: Handle::default(),
-            size: UVec2::new(1200, 648),
-            logical_size: Vec2::new(600.0, 324.0),
-            raster_scale: 2.0,
-            cell_size: Vec2::new(7.5, 13.5),
-            font_size: 12.5,
-        };
+        let mut texture = fixed_measurement(&surface, Vec2::new(7.5, 13.5), 2.0);
+        texture.status = TerminalStatus::Loading;
         assert!(!surface.update_render_output(&texture));
         assert!(!surface.is_measured());
 
@@ -1036,7 +1067,11 @@ mod tests {
         let layout = surface.resize_to_fit(Vec2::new(600.0, 324.0), 2.0);
         assert_eq!((layout.cols, layout.rows), (80, 24));
         assert_eq!(surface.char_dimensions(), Vec2::new(7.5, 13.5));
-        assert_eq!(layout.texture_size, texture.size);
+        assert_eq!(layout.texture_size, UVec2::new(1200, 648));
+        assert!(
+            texture.measured().is_none(),
+            "reflow invalidates the old grid measurement"
+        );
 
         assert!(surface.set_render_scale(3.0));
         assert_eq!(
@@ -1051,8 +1086,6 @@ mod tests {
             TerminalStatus::ShapingFailed,
         ] {
             texture.status = status;
-            texture.raster_scale = 3.0;
-            texture.cell_size = Vec2::ONE;
             assert!(!surface.update_render_output(&texture));
             assert_eq!(surface.layout().texture_size, layout.texture_size);
             assert_eq!(surface.layout().logical_size, layout.logical_size);
@@ -1129,7 +1162,9 @@ mod tests {
                 .world()
                 .get::<TerminalTexture>(entity)
                 .expect("initial measured texture")
-                .cell_size;
+                .measured()
+                .expect("initial measured geometry")
+                .cell_size();
             let initial = previous;
             for size in 9..=24 {
                 assert!(
@@ -1151,8 +1186,9 @@ mod tests {
                         .sizing,
                     TerminalSizing::font(requested)
                 );
-                assert!(texture.font_size.is_finite() && texture.font_size >= 1.0);
-                let measured = texture.cell_size;
+                let geometry = texture.measured().expect("remeasured geometry");
+                assert!(geometry.font_size().is_finite() && geometry.font_size() >= 1.0);
+                let measured = geometry.cell_size();
                 assert!(
                     measured.cmpge(previous).all(),
                     "cell shrank at size {size} (scale {render_scale}): \
@@ -1189,10 +1225,12 @@ mod tests {
             .get::<TerminalTexture>(entity)
             .expect("measured terminal texture")
             .clone();
-        assert!(texture.cell_size.cmpgt(Vec2::ONE).all());
-        assert!(texture.cell_size.y >= points_to_logical_pixels(12));
-
-        let cell_size = texture.cell_size;
+        let cell_size = texture
+            .measured()
+            .expect("fallback measured geometry")
+            .cell_size();
+        assert!(cell_size.cmpgt(Vec2::ONE).all());
+        assert!(cell_size.y >= points_to_logical_pixels(12));
         let mut terminal = app.world_mut().resource_mut::<TerminalSurface>();
         assert!(terminal.update_render_output(&texture));
         let layout = terminal.resize_to_fit(cell_size * Vec2::new(4.9, 3.9), 1.0);
