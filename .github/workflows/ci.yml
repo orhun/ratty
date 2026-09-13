@@ -105,8 +105,11 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
-      - name: Verify package
-        run: cargo package --workspace --locked
+      # Ratty tracks the renderer's unreleased main API. Cargo packaging
+      # strips Git sources, so only the independently released VT crate can
+      # be packaged until a matching renderer version is on crates.io.
+      - name: Verify VT package
+        run: cargo package -p ratty-vt --locked
 
   gpu-smoke:
     name: Headless renderer smoke

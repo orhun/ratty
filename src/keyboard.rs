@@ -551,7 +551,7 @@ pub fn handle_keyboard_input(
                     };
                     if resized {
                         // The renderer remeasures the cell from the new font
-                        // size and reports it through `TerminalRemeasured`;
+                        // size and updates its measured `TerminalTexture`;
                         // that sync owns the PTY reflow, so zoom never
                         // resizes from an estimate first.
                         params.redraw.request();

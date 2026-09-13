@@ -262,12 +262,20 @@ separate package under `widget/` with its own lockfile.
 ```sh
 cargo test -p ratty-vt --locked      # Engine tests without building Bevy
 cargo test --workspace --locked     # Application, engine, and doctests
-cargo package --workspace --locked  # Verify both packages together
+cargo package -p ratty-vt --locked  # Verify the independently published engine
 ```
 
 Ratty uses a local path dependency during development and a versioned
 `ratty-vt` dependency when published. See the engine's
 [publishing instructions](crates/ratty-vt/README.md#publishing) for release order.
+
+The application currently uses `bevy_terminal_ratatui` from
+[`bevy_terminal` main](https://github.com/gold-silver-copper/bevy_terminal), with
+the exact revision recorded in `Cargo.lock`. Builds with `--locked` use that
+revision. Its measured-output and sizing APIs are not yet published on
+crates.io, so packaging or publishing the Ratty application requires switching
+to a matching released renderer version first. Git builds and binary builds
+use the locked Git dependency directly; CI continues packaging `ratty-vt`.
 
 ## Touchscreen
 
