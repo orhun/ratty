@@ -165,7 +165,7 @@ fn capture_due(time: &Time<Real>, options: &Options, gate: &CaptureGate) -> bool
 /// cell whose visible symbol differs.
 fn report_stale_cells(terminal: &TerminalSurface, runtime: &TerminalRuntime) {
     let screen = runtime.screen();
-    let snapshot = terminal.tui.snapshot();
+    let snapshot = terminal.tui.surface().snapshot();
     let (rows, cols) = screen.size();
     let mut stale = 0;
     for row in 0..rows {

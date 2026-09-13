@@ -10,7 +10,7 @@ use bevy::text::FontCx;
 use bevy_terminal_ratatui::RatatuiTerminal;
 use bevy_terminal_ratatui::prelude::{
     BlinkConfig, CursorConfig, CursorStyle, FontFaces, FontSource, RasterConfig, TerminalGeometry,
-    TerminalRenderConfig, TerminalSizing, TerminalTexture, TerminalTheme, font_family,
+    TerminalRenderConfig, TerminalSizing, TerminalTexture, TerminalTheme,
 };
 use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::layout::Rect;
@@ -103,7 +103,7 @@ pub fn load_configured_font_faces(
     ];
     if explicit.iter().all(Option::is_none) {
         return Ok(ConfiguredFontFaces {
-            faces: FontFaces::regular(font_family(&font.family)),
+            faces: FontFaces::regular(FontSource::Family(font.family.clone().into())),
             system_family: Some(font.family.clone()),
         });
     }
@@ -439,7 +439,7 @@ fn build_terminal_render_config(
             font_size: points_to_logical_pixels(font.size),
             line_height: line_height_multiplier(font.line_height),
         },
-        font: FontFaces::regular(font_family(&font.family)),
+        font: FontFaces::regular(FontSource::Family(font.family.clone().into())),
         theme,
         cursor: CursorConfig {
             style: CursorStyle::Block,
@@ -785,7 +785,7 @@ mod tests {
             "\x1b[42m\u{4f60}\u{1f600}\x1b[0m".as_bytes(),
         );
 
-        let snapshot = tui.snapshot();
+        let snapshot = tui.surface().snapshot();
         assert_eq!(symbol(&snapshot, 0, 0), "\u{4f60}");
         assert!(snapshot.cell((1, 0)).is_some_and(|c| c.is_continuation()));
         assert_eq!(symbol(&snapshot, 2, 0), "\u{1f600}");
@@ -818,7 +818,7 @@ mod tests {
             parser.screen_mut().set_scrollback(offset);
             draw_screen(&mut tui, parser.screen());
 
-            let snapshot = tui.snapshot();
+            let snapshot = tui.surface().snapshot();
             if offset == 2 {
                 assert_eq!(symbol(&snapshot, 0, 0), "\u{4f60}");
                 assert!(snapshot.cell((1, 0)).is_some_and(|c| c.is_continuation()));
@@ -906,7 +906,7 @@ mod tests {
     fn hidden_text_reaches_the_renderer_concealed() {
         let mut tui = RatatuiTerminal::new(20, 2);
         draw_input(&mut tui, 2, 20, b"ab\x1b[8mXY\x1b[28mcd");
-        let snapshot = tui.snapshot();
+        let snapshot = tui.surface().snapshot();
         let hidden = snapshot.cell((2, 0)).expect("cell");
         assert!(
             hidden
