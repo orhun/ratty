@@ -72,13 +72,16 @@ is not vendored; the two tests that consume it are omitted.
 
 The crate has its own version. When releasing engine changes, bump this
 crate's version and Ratty's `ratty-vt` version requirement together. Verify
-both packages with `cargo package --workspace --locked` from the repository
-root; Cargo can verify their archives together before the new engine version
-exists on crates.io.
+all packages with `cargo package --workspace --exclude xtask --locked` from the
+repository root; Cargo can verify their archives together before the new engine
+version exists on crates.io.
 
-Publish `ratty-vt` before releasing a Ratty version that depends on it:
+`ratty-vt` depends on [`ratty-vte`](../ratty-vte/README.md) by path and
+version. Publish `ratty-vte` first when it changed, then `ratty-vt`, before
+releasing a Ratty version that depends on them:
 
 ```sh
+cargo publish -p ratty-vte --locked
 cargo publish -p ratty-vt --locked
 ```
 
