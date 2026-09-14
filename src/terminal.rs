@@ -2,21 +2,22 @@
 
 use std::fs;
 use std::num::NonZeroU16;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use bevy::prelude::*;
 use bevy::text::FontCx;
 use bevy_terminal_ratatui::RatatuiTerminal;
 use bevy_terminal_ratatui::prelude::{
-    BlinkConfig, CellSizing, CursorConfig, CursorStyle, FontFaces, FontSizing, FontSource,
-    RasterConfig, TerminalRenderConfig, TerminalRenderScale, TerminalTexture, TerminalTheme,
-    font_family,
+    BlinkConfig, CursorConfig, CursorStyle, FontFaces, FontSource, GridSize, RasterConfig,
+    TerminalGeometry, TerminalRenderConfig, TerminalSizing, TerminalStatus, TerminalTexture,
+    TerminalTheme,
 };
 use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::layout::Rect;
 use ratatui::style::{Color as TuiColor, Modifier, Style};
 use ratatui::widgets::Widget;
+use std::collections::HashMap;
 
 use crate::config::{AppConfig, FontConfig, FontStyleConfig, ThemeConfig};
 use crate::mouse::TerminalSelection;
@@ -84,6 +85,80 @@ impl ConfiguredFontFaces {
             self.faces.clone()
         }
     }
+
+    /// Faces for a named system family.
+    pub fn system_family(family: String) -> Self {
+        Self {
+            faces: FontFaces::regular(FontSource::Family(family.clone().into())),
+            system_family: Some(family),
+        }
+    }
+
+    /// Short description for logs: the system family or the explicit files.
+    pub fn describe(&self) -> String {
+        match &self.system_family {
+            Some(family) => format!("family {family:?}"),
+            None => format!("explicit font files {:?}", self.faces),
+        }
+    }
+}
+
+/// Font files loaded through OSC 50, keyed by canonical path, so switching
+/// back to a file reuses its `Font` assets instead of adding new ones.
+#[derive(Resource, Default)]
+pub struct LoadedFontFiles(HashMap<PathBuf, ConfiguredFontFaces>);
+
+impl LoadedFontFiles {
+    /// Returns the faces for `regular`, loading the file and its siblings on
+    /// first use (see [`load_font_file_faces`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the path cannot be canonicalized or is not a font.
+    pub fn load(
+        &mut self,
+        fonts: &mut Assets<Font>,
+        regular: &Path,
+    ) -> anyhow::Result<ConfiguredFontFaces> {
+        let key = regular
+            .canonicalize()
+            .with_context(|| format!("failed to resolve font path {}", regular.display()))?;
+        if let Some(faces) = self.0.get(&key) {
+            return Ok(faces.clone());
+        }
+        let faces = load_font_file_faces(fonts, &key)?;
+        self.0.insert(key, faces.clone());
+        Ok(faces)
+    }
+}
+
+/// What the renderer last reported about the render target, and the faces to
+/// restore if a font switch requested over OSC 50 never becomes usable.
+#[derive(Resource, Default)]
+pub struct RendererStatusWatch {
+    /// The most recent status observed after renderer synchronization.
+    pub last: Option<TerminalStatus>,
+    /// The faces in use before a pending OSC 50 switch; cleared once the
+    /// renderer is `Ready` again or the switch has been reverted.
+    pub faces_before_switch: Option<ConfiguredFontFaces>,
+}
+
+impl RendererStatusWatch {
+    /// Records a status; returns the previous one when it changed.
+    pub fn observe(&mut self, status: TerminalStatus) -> Option<Option<TerminalStatus>> {
+        if self.last == Some(status) {
+            return None;
+        }
+        Some(self.last.replace(status))
+    }
+
+    /// Whether `status` is a font problem an OSC 50 switch should be reverted for.
+    pub fn is_font_failure(status: TerminalStatus) -> bool {
+        matches!(
+            status,
+            TerminalStatus::FontFailed | TerminalStatus::ShapingFailed
+        )
+    }
 }
 
 /// Loads explicit font files into Bevy, or retains the configured system family.
@@ -103,10 +178,7 @@ pub fn load_configured_font_faces(
         font.bold_italic.as_deref(),
     ];
     if explicit.iter().all(Option::is_none) {
-        return Ok(ConfiguredFontFaces {
-            faces: FontFaces::regular(font_family(&font.family)),
-            system_family: Some(font.family.clone()),
-        });
+        return Ok(ConfiguredFontFaces::system_family(font.family.clone()));
     }
 
     let regular = font
@@ -138,6 +210,67 @@ pub fn load_configured_font_faces(
         },
         system_family: None,
     })
+}
+
+/// Loads the font file `regular` and any bold/italic siblings found next to it
+/// (see [`sibling_font_faces`]); missing styles are synthesized.
+///
+/// # Errors
+///
+/// Returns an error when `regular` or a discovered sibling is not a font.
+pub fn load_font_file_faces(
+    fonts: &mut Assets<Font>,
+    regular: &Path,
+) -> anyhow::Result<ConfiguredFontFaces> {
+    let [bold, italic, bold_italic] = sibling_font_faces(regular);
+    let mut load = |path: &Path| read_font_face(path).map(|font| fonts.add(font));
+    let regular = load(regular)?;
+    let bold = bold.as_deref().map(&mut load).transpose()?;
+    let italic = italic.as_deref().map(&mut load).transpose()?;
+    let bold_italic = bold_italic.as_deref().map(&mut load).transpose()?;
+    Ok(ConfiguredFontFaces {
+        faces: FontFaces {
+            regular: FontSource::Handle(regular),
+            bold: bold.map(FontSource::Handle),
+            italic: italic.map(FontSource::Handle),
+            bold_italic: bold_italic.map(FontSource::Handle),
+            synthesize: true,
+        },
+        system_family: None,
+    })
+}
+
+/// Finds the `[bold, italic, bold_italic]` files that sit next to the font
+/// file `regular`, following common naming (`Hack-Regular.ttf` →
+/// `Hack-Bold.ttf`, `SourceCodePro-It.ttf`, `DejaVuSansMono-BoldOblique.ttf`,
+/// `SFNSMonoItalic.ttf`).
+fn sibling_font_faces(regular: &Path) -> [Option<PathBuf>; 3] {
+    let (Some(stem), Some(dir)) = (
+        regular.file_stem().and_then(|s| s.to_str()),
+        regular.parent(),
+    ) else {
+        return [None, None, None];
+    };
+    let extension = regular
+        .extension()
+        .and_then(|e| e.to_str())
+        .map_or(String::new(), |e| format!(".{e}"));
+    let base = stem
+        .strip_suffix("-Regular")
+        .or_else(|| stem.strip_suffix("Regular"))
+        .unwrap_or(stem);
+    let find = |suffixes: &[&str]| {
+        suffixes
+            .iter()
+            .flat_map(|suffix| [format!("-{suffix}"), (*suffix).to_string()])
+            .map(|suffix| dir.join(format!("{base}{suffix}{extension}")))
+            .find(|path| path.is_file())
+    };
+    [
+        find(&["Bold"]),
+        find(&["Italic", "It", "Oblique"]),
+        find(&["BoldItalic", "BoldIt", "BoldOblique"]),
+    ]
 }
 
 fn read_font_face(path: &Path) -> anyhow::Result<Font> {
@@ -210,8 +343,7 @@ pub struct TerminalSurface {
     font_size: i32,
     render_config: TerminalRenderConfig,
     render_scale: f32,
-    cell_size: Vec2,
-    rendered_texture_size: Option<UVec2>,
+    render_output: Option<TerminalGeometry>,
 }
 
 impl TerminalSurface {
@@ -223,7 +355,7 @@ impl TerminalSurface {
     pub fn new(config: &AppConfig) -> anyhow::Result<Self> {
         let cols = config.terminal.default_cols;
         let rows = config.terminal.default_rows;
-        let (mut tui, _) = RatatuiTerminal::new(cols, rows);
+        let mut tui = RatatuiTerminal::new(cols, rows);
         let Ok(()) = tui.clear();
         if config.cursor.model.visible {
             let Ok(()) = tui.hide_cursor();
@@ -251,8 +383,7 @@ impl TerminalSurface {
             render_config,
             render_scale,
             // No geometry is inferred before the renderer measures the loaded font.
-            cell_size: Vec2::ONE,
-            rendered_texture_size: None,
+            render_output: None,
         })
     }
 
@@ -266,7 +397,10 @@ impl TerminalSurface {
             return false;
         }
 
-        self.render_config.font_size = FontSizing::Px(points_to_logical_pixels(new_size));
+        let TerminalSizing::FromFont { font_size, .. } = &mut self.render_config.sizing else {
+            return false;
+        };
+        *font_size = points_to_logical_pixels(new_size);
         self.font_size = new_size;
         true
     }
@@ -284,7 +418,7 @@ impl TerminalSurface {
         }
 
         self.render_scale = render_scale;
-        self.render_config.raster.scale = TerminalRenderScale::Fixed(render_scale);
+        self.render_config.raster.scale = render_scale;
         true
     }
 
@@ -294,8 +428,10 @@ impl TerminalSurface {
 
         // The renderer sizes its texture with the same exported helper, so
         // the PTY grid and the rendered grid cannot disagree by a cell.
-        let grid =
-            bevy_terminal_ratatui::render::grid_for(logical_size.max(Vec2::ONE), self.cell_size);
+        let grid = bevy_terminal_ratatui::bevy_terminal::render::grid_for(
+            logical_size.max(Vec2::ONE),
+            self.char_dimensions(),
+        );
         let (cols, rows) = (grid.width, grid.height);
         if cols != self.cols || rows != self.rows {
             self.resize(cols, rows);
@@ -322,23 +458,36 @@ impl TerminalSurface {
 
     /// Returns the rendered cell size in logical pixels.
     ///
-    /// Always at least 1x1: every writer of `cell_size` (the constructor and
-    /// `update_render_output`) floors it, so consumers need no re-clamp.
+    /// Uses the renderer's effective logical geometry, including fractional
+    /// logical cells on high-DPI displays. Before measurement this is 1x1.
     pub fn char_dimensions(&self) -> Vec2 {
-        self.cell_size
+        self.render_output
+            .as_ref()
+            .map_or(Vec2::ONE, |output| output.cell_size())
     }
 
     /// Whether the renderer has supplied authoritative font and cell metrics.
     pub fn is_measured(&self) -> bool {
-        self.rendered_texture_size.is_some()
+        self.render_output.is_some()
     }
 
-    /// Returns the terminal pixmap dimensions in pixels.
+    /// Returns the terminal pixmap dimensions in physical pixels.
+    ///
+    /// The renderer's measured size is exact while it describes the current
+    /// grid; between a reflow and its remeasurement the new grid is sized
+    /// with the measured physical cell; before any measurement cells are 1x1.
     pub fn pixmap_dimensions(&self) -> UVec2 {
-        (Vec2::new(self.cols as f32, self.rows as f32) * self.cell_size * self.render_scale)
-            .round()
-            .max(Vec2::ONE)
-            .as_uvec2()
+        let grid = Vec2::new(f32::from(self.cols), f32::from(self.rows));
+        match &self.render_output {
+            Some(output) if output.grid() == self.grid() => output.size(),
+            Some(output) => (grid * output.physical_cell_size()).as_uvec2(),
+            None => (grid * self.render_scale).round().max(Vec2::ONE).as_uvec2(),
+        }
+    }
+
+    /// The current grid.
+    pub const fn grid(&self) -> GridSize {
+        GridSize::new(self.cols, self.rows)
     }
 
     /// Returns the current terminal layout.
@@ -347,8 +496,14 @@ impl TerminalSurface {
             self.cols,
             self.rows,
             self.pixmap_dimensions(),
-            self.render_scale,
+            self.measured_scale(),
         )
+    }
+
+    fn measured_scale(&self) -> f32 {
+        self.render_output
+            .as_ref()
+            .map_or(self.render_scale, |output| output.raster_scale())
     }
 
     /// Returns the render configuration derived from Ratty's settings.
@@ -363,30 +518,35 @@ impl TerminalSurface {
     /// renderer, comparing first and writing only on change; returns whether
     /// anything changed.
     pub fn update_render_output(&mut self, texture: &TerminalTexture) -> bool {
-        let cell_size = texture.cell_size.max(Vec2::ONE);
-        let render_scale = texture.raster_scale.max(1.0);
-        let changed = self.image_handle.as_ref() != Some(&texture.image)
-            || self.rendered_texture_size != Some(texture.size)
-            || self.cell_size != cell_size
-            || self.render_scale != render_scale;
-        if changed {
-            self.image_handle = Some(texture.image.clone());
-            self.rendered_texture_size = Some(texture.size);
-            self.cell_size = cell_size;
-            self.render_scale = render_scale;
+        let Some(geometry) = texture.measured() else {
+            return false;
+        };
+        if self.render_output.as_ref() == Some(geometry)
+            && self.image_handle.as_ref() == Some(&texture.image)
+        {
+            return false;
         }
-        changed
+        if !self.tui.backend_mut().set_geometry(geometry) {
+            return false;
+        }
+        self.image_handle = Some(texture.image.clone());
+        self.render_output = Some(geometry.clone());
+        true
     }
 }
 
 /// Computes the physical render scale for a Bevy window.
 ///
-/// Delegates to the renderer's exported helper so the scale the PTY layout
-/// uses is the exact scale the renderer rasterizes with. It derives from the
-/// window's actual framebuffer ratio rather than the reported scale factor,
-/// which keeps mixed-DPI setups from over-sizing the texture.
+/// Uses the actual framebuffer ratio rather than the reported scale factor,
+/// preserving the application's layout on mixed-DPI setups. The same explicit
+/// scale is supplied to the renderer through `RasterConfig`, bounded to the
+/// range the renderer accepts.
 pub fn render_scale_for_window(window: &Window) -> f32 {
-    bevy_terminal_ratatui::render::raster_scale_for_window(window)
+    let logical = window.resolution.size().max(Vec2::ONE);
+    let physical = window.resolution.physical_size().as_vec2();
+    (physical.x / logical.x)
+        .min(physical.y / logical.y)
+        .clamp(1.0, 8.0)
 }
 
 /// Returns the logical size for a physical terminal texture.
@@ -420,11 +580,11 @@ fn build_terminal_render_config(
         // Cell width and height come from the loaded face's measured advance
         // and line box; Ratty supplies no independent geometry estimate, only
         // the user's line-height multiplier.
-        cell_size: CellSizing::FromFont {
+        sizing: TerminalSizing::FromFont {
+            font_size: points_to_logical_pixels(font.size),
             line_height: line_height_multiplier(font.line_height),
         },
-        font: FontFaces::regular(font_family(&font.family)),
-        font_size: FontSizing::Px(points_to_logical_pixels(font.size)),
+        font: FontFaces::regular(FontSource::Family(font.family.clone().into())),
         theme,
         cursor: CursorConfig {
             style: CursorStyle::Block,
@@ -436,7 +596,7 @@ fn build_terminal_render_config(
             rapid_hz: Some(2.0),
         },
         raster: RasterConfig {
-            scale: TerminalRenderScale::Fixed(render_scale.max(1.0)),
+            scale: render_scale.max(1.0),
             ..default()
         },
     }
@@ -760,7 +920,7 @@ mod tests {
     #[test]
     fn successive_draws_replace_wide_continuation_cells() {
         let (rows, cols) = (2, 8);
-        let (mut tui, _) = RatatuiTerminal::new(cols, rows);
+        let mut tui = RatatuiTerminal::new(cols, rows);
 
         draw_input(&mut tui, rows, cols, b"abcdefgh");
         draw_input(
@@ -770,7 +930,7 @@ mod tests {
             "\x1b[42m\u{4f60}\u{1f600}\x1b[0m".as_bytes(),
         );
 
-        let snapshot = tui.snapshot();
+        let snapshot = tui.surface().snapshot();
         assert_eq!(symbol(&snapshot, 0, 0), "\u{4f60}");
         assert!(snapshot.cell((1, 0)).is_some_and(|c| c.is_continuation()));
         assert_eq!(symbol(&snapshot, 2, 0), "\u{1f600}");
@@ -792,7 +952,7 @@ mod tests {
     #[test]
     fn scrollback_redraws_wide_graphemes_without_artifacts() {
         let (rows, cols) = (2, 8);
-        let (mut tui, _) = RatatuiTerminal::new(cols, rows);
+        let mut tui = RatatuiTerminal::new(cols, rows);
         let mut parser = parse(
             rows,
             cols,
@@ -803,7 +963,7 @@ mod tests {
             parser.screen_mut().set_scrollback(offset);
             draw_screen(&mut tui, parser.screen());
 
-            let snapshot = tui.snapshot();
+            let snapshot = tui.surface().snapshot();
             if offset == 2 {
                 assert_eq!(symbol(&snapshot, 0, 0), "\u{4f60}");
                 assert!(snapshot.cell((1, 0)).is_some_and(|c| c.is_continuation()));
@@ -889,9 +1049,9 @@ mod tests {
     /// `Modifier::HIDDEN` to `StyleFlags::HIDDEN`, which the renderer skips.
     #[test]
     fn hidden_text_reaches_the_renderer_concealed() {
-        let (mut tui, _) = RatatuiTerminal::new(20, 2);
+        let mut tui = RatatuiTerminal::new(20, 2);
         draw_input(&mut tui, 2, 20, b"ab\x1b[8mXY\x1b[28mcd");
-        let snapshot = tui.snapshot();
+        let snapshot = tui.surface().snapshot();
         let hidden = snapshot.cell((2, 0)).expect("cell");
         assert!(
             hidden
@@ -946,16 +1106,22 @@ mod tests {
             TerminalSurface::new(&config)
                 .expect("surface")
                 .render_config()
-                .cell_size,
-            CellSizing::FromFont { line_height: 1.0 }
+                .sizing,
+            TerminalSizing::FromFont {
+                font_size: points_to_logical_pixels(config.font.size),
+                line_height: 1.0
+            }
         );
         config.font.line_height = 0.85;
         assert_eq!(
             TerminalSurface::new(&config)
                 .expect("surface")
                 .render_config()
-                .cell_size,
-            CellSizing::FromFont { line_height: 0.85 }
+                .sizing,
+            TerminalSizing::FromFont {
+                font_size: points_to_logical_pixels(config.font.size),
+                line_height: 0.85
+            }
         );
         assert_eq!(line_height_multiplier(0.0), 1.0);
         assert_eq!(line_height_multiplier(f32::NAN), 1.0);
@@ -968,7 +1134,7 @@ mod tests {
         let before = surface.render_config().clone();
         assert!(surface.adjust_font_size(2));
         assert_eq!(surface.font_size(), AppConfig::default().font.size + 2);
-        assert_ne!(surface.render_config().font_size, before.font_size);
+        assert_ne!(surface.render_config().sizing, before.sizing);
         assert!(!surface.is_measured());
         // Zoom never moves the grid on its own: the renderer's measurement
         // reports the new cell size and the reflow follows that.
@@ -976,17 +1142,63 @@ mod tests {
         assert!(!surface.adjust_font_size(0));
     }
 
+    fn fixed_measurement(
+        surface: &TerminalSurface,
+        cell_size: Vec2,
+        scale: f32,
+    ) -> TerminalTexture {
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            bevy::asset::AssetPlugin::default(),
+            bevy::text::TextPlugin,
+        ))
+        .init_asset::<Image>()
+        .add_plugins(bevy_terminal_ratatui::prelude::TerminalPlugin);
+        let entity = app
+            .world_mut()
+            .spawn((
+                bevy_terminal_ratatui::TerminalRenderer::new(surface.tui.surface()),
+                TerminalRenderConfig {
+                    sizing: TerminalSizing::Fixed {
+                        cell_size,
+                        font_size: 6.0,
+                    },
+                    raster: RasterConfig { scale, ..default() },
+                    ..default()
+                },
+            ))
+            .id();
+        for _ in 0..4 {
+            app.update();
+        }
+        let texture = app
+            .world()
+            .get::<TerminalTexture>(entity)
+            .expect("fixed measured texture")
+            .clone();
+        assert!(texture.measured().is_some());
+        texture
+    }
+
+    #[test]
+    fn window_dpi_is_forwarded_to_explicit_renderer_scale() {
+        let mut window = Window::default();
+        window.resolution.set_scale_factor(2.0);
+        window.resolution.set(1200.0, 800.0);
+        let mut surface = TerminalSurface::new(&AppConfig::default()).expect("surface");
+        assert!(surface.set_render_scale(render_scale_for_window(&window)));
+        assert_eq!(surface.render_config().raster.scale, 2.0);
+        // The renderer and PTY layout both use the same minimum scale.
+        window.resolution.set_scale_factor(0.5);
+        assert!(surface.set_render_scale(render_scale_for_window(&window)));
+        assert_eq!(surface.render_config().raster.scale, 1.0);
+    }
+
     #[test]
     fn render_output_adoption_reports_changes_once() {
         let mut surface = TerminalSurface::new(&AppConfig::default()).expect("surface");
-        let texture = TerminalTexture {
-            image: Handle::default(),
-            size: UVec2::new(800, 600),
-            logical_size: Vec2::new(400.0, 300.0),
-            raster_scale: 2.0,
-            cell_size: Vec2::new(8.0, 16.0),
-            font_size: 16.0,
-        };
+        let texture = fixed_measurement(&surface, Vec2::new(8.0, 16.0), 2.0);
         assert!(surface.update_render_output(&texture));
         assert!(!surface.update_render_output(&texture));
         assert!(surface.is_measured());
@@ -996,6 +1208,184 @@ mod tests {
         assert_eq!((layout.cols, layout.rows), (50, 18));
         assert_eq!(layout.texture_size, UVec2::new(800, 576));
         assert_eq!(layout.logical_size, Vec2::new(400.0, 288.0));
+    }
+
+    #[test]
+    fn measured_output_survives_pending_dpi_and_failed_measurements() {
+        use bevy_terminal_ratatui::prelude::TerminalStatus;
+
+        let mut surface = TerminalSurface::new(&AppConfig::default()).expect("surface");
+        let mut texture = fixed_measurement(&surface, Vec2::new(7.5, 13.5), 2.0);
+        texture.status = TerminalStatus::Loading;
+        assert!(!surface.update_render_output(&texture));
+        assert!(!surface.is_measured());
+
+        texture.status = TerminalStatus::Ready;
+        assert!(surface.update_render_output(&texture));
+        let layout = surface.resize_to_fit(Vec2::new(600.0, 324.0), 2.0);
+        assert_eq!((layout.cols, layout.rows), (80, 24));
+        assert_eq!(surface.char_dimensions(), Vec2::new(7.5, 13.5));
+        assert_eq!(layout.texture_size, UVec2::new(1200, 648));
+        assert!(
+            texture.measured().is_none(),
+            "reflow invalidates the old grid measurement"
+        );
+
+        assert!(surface.set_render_scale(3.0));
+        assert_eq!(surface.render_config().raster.scale, 3.0);
+        assert_eq!(surface.layout().texture_size, layout.texture_size);
+        assert_eq!(surface.layout().logical_size, layout.logical_size);
+        for status in [
+            TerminalStatus::Loading,
+            TerminalStatus::FontFailed,
+            TerminalStatus::ShapingFailed,
+        ] {
+            texture.status = status;
+            assert!(!surface.update_render_output(&texture));
+            assert_eq!(surface.layout().texture_size, layout.texture_size);
+            assert_eq!(surface.layout().logical_size, layout.logical_size);
+            assert_eq!(surface.char_dimensions(), Vec2::new(7.5, 13.5));
+        }
+    }
+
+    #[test]
+    fn font_file_siblings_follow_common_naming() {
+        let dir = std::env::temp_dir().join(format!("ratty-siblings-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("temp dir");
+        for name in [
+            "Hack-Regular.ttf",
+            "Hack-Bold.ttf",
+            "Hack-BoldItalic.ttf",
+            "Hack-Italic.ttf",
+            "SourceCodePro-Regular.ttf",
+            "SourceCodePro-It.ttf",
+            "DejaVuSansMono.ttf",
+            "DejaVuSansMono-BoldOblique.ttf",
+            "SFNSMono.ttf",
+            "SFNSMonoItalic.ttf",
+        ] {
+            fs::write(dir.join(name), b"").expect("sibling file");
+        }
+        let names = |regular: &str| {
+            sibling_font_faces(&dir.join(regular)).map(|path| {
+                path.map(|path| {
+                    path.file_name()
+                        .expect("file name")
+                        .to_string_lossy()
+                        .into_owned()
+                })
+            })
+        };
+
+        assert_eq!(
+            names("Hack-Regular.ttf"),
+            [
+                Some("Hack-Bold.ttf".into()),
+                Some("Hack-Italic.ttf".into()),
+                Some("Hack-BoldItalic.ttf".into())
+            ]
+        );
+        assert_eq!(
+            names("SourceCodePro-Regular.ttf"),
+            [None, Some("SourceCodePro-It.ttf".into()), None]
+        );
+        assert_eq!(
+            names("DejaVuSansMono.ttf"),
+            [None, None, Some("DejaVuSansMono-BoldOblique.ttf".into())]
+        );
+        assert_eq!(
+            names("SFNSMono.ttf"),
+            [None, Some("SFNSMonoItalic.ttf".into()), None]
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pixmap_dimensions_are_exact_once_the_grid_is_measured() {
+        let mut surface = TerminalSurface::new(&AppConfig::default()).expect("surface");
+        let texture = fixed_measurement(&surface, Vec2::new(7.5, 13.5), 2.0);
+        let measured = texture.measured().expect("measured").clone();
+        assert!(surface.update_render_output(&texture));
+        assert_eq!(surface.grid(), measured.grid());
+        assert_eq!(surface.pixmap_dimensions(), measured.size());
+        // A reflow to another grid falls back to the reconstructed size until
+        // the renderer measures the new grid.
+        let layout = surface.resize_to_fit(Vec2::new(600.0, 324.0), 2.0);
+        assert_ne!(surface.grid(), measured.grid());
+        assert_eq!(
+            surface.pixmap_dimensions(),
+            (Vec2::new(f32::from(layout.cols), f32::from(layout.rows))
+                * Vec2::new(7.5, 13.5)
+                * 2.0)
+                .round()
+                .as_uvec2()
+        );
+    }
+
+    #[test]
+    fn renderer_status_transitions_are_observed_once_and_font_failures_revert_a_switch() {
+        use bevy_terminal_ratatui::prelude::TerminalStatus;
+
+        let mut watch = RendererStatusWatch::default();
+        assert_eq!(watch.observe(TerminalStatus::Loading), Some(None));
+        assert_eq!(watch.observe(TerminalStatus::Loading), None);
+        assert_eq!(
+            watch.observe(TerminalStatus::Ready),
+            Some(Some(TerminalStatus::Loading))
+        );
+        assert!(RendererStatusWatch::is_font_failure(
+            TerminalStatus::FontFailed
+        ));
+        assert!(!RendererStatusWatch::is_font_failure(
+            TerminalStatus::TextureTooLarge
+        ));
+
+        // Drive the observer system: a failed status after an OSC 50 switch
+        // restores the previous faces; the failed texture is never measured.
+        let surface = TerminalSurface::new(&AppConfig::default()).expect("surface");
+        let mut texture = fixed_measurement(&surface, Vec2::new(8.0, 16.0), 1.0);
+        texture.status = TerminalStatus::FontFailed;
+        assert!(texture.measured().is_none());
+        let before = ConfiguredFontFaces::system_family("Before Mono".into());
+        let mut app = App::new();
+        app.insert_resource(ConfiguredFontFaces::system_family("Broken Mono".into()))
+            .insert_resource(RendererStatusWatch {
+                last: Some(TerminalStatus::Ready),
+                faces_before_switch: Some(before.clone()),
+            });
+        app.world_mut().spawn((texture, TerminalRenderTarget));
+        app.add_systems(Update, crate::systems::observe_renderer_status);
+        app.update();
+        let watch = app.world().resource::<RendererStatusWatch>();
+        assert_eq!(watch.last, Some(TerminalStatus::FontFailed));
+        assert!(watch.faces_before_switch.is_none());
+        let faces = app.world().resource::<ConfiguredFontFaces>();
+        assert_eq!(faces.system_family, before.system_family);
+        assert_eq!(faces.faces, before.faces);
+    }
+
+    #[test]
+    fn font_files_are_loaded_once_per_path() {
+        let Some(font) = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+            "/System/Library/Fonts/Menlo.ttc",
+        ]
+        .into_iter()
+        .map(Path::new)
+        .find(|path| path.is_file()) else {
+            eprintln!("skipping: no known system font file on this host");
+            return;
+        };
+        let mut fonts = Assets::<Font>::default();
+        let mut files = LoadedFontFiles::default();
+        let first = files.load(&mut fonts, font).expect("font loads");
+        let count = fonts.len();
+        let again = files.load(&mut fonts, font).expect("cached font");
+        assert_eq!(fonts.len(), count, "no new assets for a cached path");
+        assert_eq!(first.faces, again.faces);
+        assert!(first.system_family.is_none());
+        let bogus = std::env::temp_dir().join("ratty-missing-font.ttf");
+        assert!(files.load(&mut fonts, &bogus).is_err());
     }
 
     #[test]
@@ -1067,7 +1457,9 @@ mod tests {
                 .world()
                 .get::<TerminalTexture>(entity)
                 .expect("initial measured texture")
-                .cell_size;
+                .measured()
+                .expect("initial measured geometry")
+                .cell_size();
             let initial = previous;
             for size in 9..=24 {
                 assert!(
@@ -1086,11 +1478,12 @@ mod tests {
                     app.world()
                         .resource::<TerminalSurface>()
                         .render_config()
-                        .font_size,
-                    FontSizing::Px(requested)
+                        .sizing,
+                    TerminalSizing::font(requested)
                 );
-                assert!(texture.font_size.is_finite() && texture.font_size >= 1.0);
-                let measured = texture.cell_size;
+                let geometry = texture.measured().expect("remeasured geometry");
+                assert!(geometry.font_size().is_finite() && geometry.font_size() >= 1.0);
+                let measured = geometry.cell_size();
                 assert!(
                     measured.cmpge(previous).all(),
                     "cell shrank at size {size} (scale {render_scale}): \
@@ -1115,17 +1508,24 @@ mod tests {
             .get::<TerminalRenderConfig>(entity)
             .expect("render config");
         assert_eq!(render_config.font.regular, FontSource::Monospace);
-        assert_eq!(render_config.cell_size, CellSizing::FROM_FONT);
-        assert!(matches!(render_config.font_size, FontSizing::Px(_)));
+        assert!(matches!(
+            render_config.sizing,
+            TerminalSizing::FromFont {
+                line_height: 1.0,
+                ..
+            }
+        ));
         let texture = app
             .world()
             .get::<TerminalTexture>(entity)
             .expect("measured terminal texture")
             .clone();
-        assert!(texture.cell_size.cmpgt(Vec2::ONE).all());
-        assert!(texture.cell_size.y >= points_to_logical_pixels(12));
-
-        let cell_size = texture.cell_size;
+        let cell_size = texture
+            .measured()
+            .expect("fallback measured geometry")
+            .cell_size();
+        assert!(cell_size.cmpgt(Vec2::ONE).all());
+        assert!(cell_size.y >= points_to_logical_pixels(12));
         let mut terminal = app.world_mut().resource_mut::<TerminalSurface>();
         assert!(terminal.update_render_output(&texture));
         let layout = terminal.resize_to_fit(cell_size * Vec2::new(4.9, 3.9), 1.0);
@@ -1146,15 +1546,11 @@ mod tests {
             ..default()
         };
         let mut terminal = TerminalSurface::new(&config).expect("measured terminal");
-        assert_eq!(terminal.render_config().cell_size, CellSizing::FROM_FONT);
         assert_eq!(
-            terminal.render_config().font_size,
-            FontSizing::Px(points_to_logical_pixels(20))
+            terminal.render_config().sizing,
+            TerminalSizing::font(points_to_logical_pixels(20))
         );
-        assert_eq!(
-            terminal.render_config().raster.scale,
-            TerminalRenderScale::Fixed(2.0)
-        );
+        assert_eq!(terminal.render_config().raster.scale, 2.0);
 
         let unmeasured_cell = terminal.char_dimensions();
         assert!(terminal.adjust_font_size(2));
