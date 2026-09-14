@@ -23,6 +23,7 @@
 //! object systems rebuild or reposition scene entities that depend on the terminal grid.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::mpsc::TryRecvError;
 
 use crate::camera::{
@@ -46,7 +47,7 @@ use crate::scene::{
 };
 use crate::terminal::{
     ConfiguredFontFaces, TerminalRedrawState, TerminalRenderTarget, TerminalSurface,
-    TerminalWidget, render_scale_for_window,
+    TerminalWidget, load_font_file_faces, render_scale_for_window,
 };
 use bevy::app::AppExit;
 use bevy::asset::AssetMut;
@@ -167,9 +168,29 @@ pub fn pump_pty_output(
     mut camera_update_writer: MessageWriter<TerminalCameraUpdate>,
     mut app_exit: MessageWriter<AppExit>,
     mut redraw: ResMut<TerminalRedrawState>,
+    configured_faces: Option<ResMut<ConfiguredFontFaces>>,
+    mut fonts: ResMut<Assets<Font>>,
 ) {
     let mut camera_updates = Vec::new();
     let drained = drain_pty_output(&mut runtime, &mut inline_objects, &mut camera_updates);
+    if let Some(family) = runtime.take_font_family_request()
+        && let Some(mut faces) = configured_faces
+    {
+        // A path to an existing file loads that font file; anything else
+        // names a system family.
+        if Path::new(&family).is_file() {
+            match load_font_file_faces(&mut fonts, Path::new(&family)) {
+                Ok(loaded) => {
+                    info!("switching font to file {family:?} (OSC 50)");
+                    *faces = loaded;
+                }
+                Err(error) => warn!("ignoring OSC 50 font file: {error:#}"),
+            }
+        } else {
+            info!("switching font family to {family:?} (OSC 50)");
+            *faces = ConfiguredFontFaces::system_family(family);
+        }
+    }
     for update in camera_updates {
         camera_update_writer.write(update);
     }

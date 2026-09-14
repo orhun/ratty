@@ -6,46 +6,89 @@
 //! ```text
 //! cargo run --manifest-path widget/Cargo.toml --example render_test
 //! ```
+//!
+//! The "font" button in the header (or `f`) cycles through [`FONTS`] by
+//! sending OSC 50 with a font file from the gitignored `fonts/` directory,
+//! which Ratty loads in place of a system font.
 
-use std::io;
+use std::io::{self, Write};
+use std::path::Path;
 
-use crossterm::event::{self, Event, KeyCode};
+use crossterm::{
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, MouseButton, MouseEventKind,
+    },
+    execute,
+};
 use ratatui::{
     DefaultTerminal, Frame,
     buffer::Buffer,
-    layout::{Constraint, Layout},
+    layout::{Constraint, Layout, Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Paragraph, Widget},
 };
 
+/// Fonts the font button cycles through, as `(label, file)` with `file`
+/// relative to the gitignored `fonts/` directory at the repository root.
+const FONTS: &[(&str, &str)] = &[
+    ("DejaVu Sans Mono", "dejavu/DejaVuSansMono.ttf"),
+    ("JetBrains Mono", "jetbrains-mono/JetBrainsMono-Regular.ttf"),
+    ("Fira Code", "fira-code/FiraCode-Regular.ttf"),
+    ("Iosevka", "iosevka/Iosevka-Regular.ttf"),
+    ("Menlo", "menlo/Menlo.ttc"),
+    ("SF Mono", "sf-mono/SFNSMono.ttf"),
+    ("Hack", "hack/Hack-Regular.ttf"),
+    ("Source Code Pro", "source-code-pro/SourceCodePro-Regular.ttf"),
+    ("Cascadia Code", "cascadia-code/CascadiaCode-Regular.ttf"),
+];
+
 fn main() -> io::Result<()> {
     let mut terminal = ratatui::init();
+    execute!(io::stdout(), EnableMouseCapture)?;
     let result = run(&mut terminal);
+    execute!(io::stdout(), DisableMouseCapture)?;
     ratatui::restore();
     result
+}
+
+/// Asks the terminal to load the font `file` from `fonts/` (OSC 50 with a path).
+fn set_font(file: &str) -> io::Result<()> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fonts").join(file);
+    let mut stdout = io::stdout();
+    write!(stdout, "\x1b]50;{}\x1b\\", path.display())?;
+    stdout.flush()
 }
 
 fn run(terminal: &mut DefaultTerminal) -> io::Result<()> {
     let lines = fidelity_lines();
     let mut scroll = 0_u16;
+    let mut font = None::<usize>;
 
     loop {
         let mut page_height = 1;
+        let mut font_button = Rect::default();
         terminal.draw(|frame| {
-            page_height = render(frame, &lines, scroll);
+            (page_height, font_button) = render(frame, &lines, scroll, font);
         })?;
 
         let max_scroll = u16::try_from(lines.len().saturating_sub(usize::from(page_height.max(1))))
             .unwrap_or(u16::MAX);
         scroll = scroll.min(max_scroll);
 
-        if let Event::Key(key) = event::read()? {
-            if !key.is_press() {
-                continue;
-            }
-            match key.code {
+        let mut cycle_font = false;
+        match event::read()? {
+            Event::Mouse(mouse) => match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    cycle_font = font_button.contains(Position::new(mouse.column, mouse.row));
+                }
+                MouseEventKind::ScrollUp => scroll = scroll.saturating_sub(1),
+                MouseEventKind::ScrollDown => scroll = scroll.saturating_add(1).min(max_scroll),
+                _ => {}
+            },
+            Event::Key(key) if key.is_press() => match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+                KeyCode::Char('f') => cycle_font = true,
                 KeyCode::Up | KeyCode::Char('k') => scroll = scroll.saturating_sub(1),
                 KeyCode::Down | KeyCode::Char('j') => {
                     scroll = scroll.saturating_add(1).min(max_scroll);
@@ -57,12 +100,24 @@ fn run(terminal: &mut DefaultTerminal) -> io::Result<()> {
                 KeyCode::Home => scroll = 0,
                 KeyCode::End => scroll = max_scroll,
                 _ => {}
-            }
+            },
+            _ => {}
+        }
+        if cycle_font {
+            let next = font.map_or(0, |index| (index + 1) % FONTS.len());
+            font = Some(next);
+            set_font(FONTS[next].1)?;
         }
     }
 }
 
-fn render(frame: &mut Frame<'_>, lines: &[Line<'static>], scroll: u16) -> u16 {
+/// Draws the matrix and returns the page height and the font button's area.
+fn render(
+    frame: &mut Frame<'_>,
+    lines: &[Line<'static>],
+    scroll: u16,
+    font: Option<usize>,
+) -> (u16, Rect) {
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(3),
         Constraint::Min(3),
@@ -80,6 +135,24 @@ fn render(frame: &mut Frame<'_>, lines: &[Line<'static>], scroll: u16) -> u16 {
     .block(Block::bordered().title(" Ratty / Ratatui "))
     .render(header, frame.buffer_mut());
 
+    let font_label = format!(
+        " font: {} ▸ ",
+        font.map_or("configured", |index| FONTS[index].0)
+    );
+    let button_width = u16::try_from(font_label.chars().count())
+        .unwrap_or(u16::MAX)
+        .min(header.width.saturating_sub(4));
+    let font_button = Rect::new(
+        header.right().saturating_sub(button_width + 2),
+        header.y + 1,
+        button_width,
+        1,
+    )
+    .intersection(header);
+    Paragraph::new(font_label)
+        .style(Style::new().fg(Color::Black).bg(Color::Cyan).bold())
+        .render(font_button, frame.buffer_mut());
+
     let page_height = body.height.saturating_sub(2).max(1);
     let max_scroll =
         u16::try_from(lines.len().saturating_sub(usize::from(page_height))).unwrap_or(u16::MAX);
@@ -92,13 +165,13 @@ fn render(frame: &mut Frame<'_>, lines: &[Line<'static>], scroll: u16) -> u16 {
         )))
         .render(body, frame.buffer_mut());
 
-    Paragraph::new("↑/↓ or j/k: line  PgUp/PgDn: page  Home/End  q/Esc: quit")
+    Paragraph::new("↑/↓ or j/k: line  PgUp/PgDn: page  Home/End  f/click: font  q/Esc: quit")
         .centered()
         .render(footer, frame.buffer_mut());
 
     emit_hidden_sequences(frame.buffer_mut());
 
-    page_height
+    (page_height, font_button)
 }
 
 /// Wraps every run of [`Modifier::HIDDEN`] cells in SGR 8 / SGR 28.
@@ -385,7 +458,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("test terminal");
         let mut page_height = 0;
         terminal
-            .draw(|frame| page_height = render(frame, &lines, 0))
+            .draw(|frame| page_height = render(frame, &lines, 0, None).0)
             .expect("render first page");
         let first_page = rendered_text(&terminal);
         assert!(first_page.contains("Block, shade, and quadrant elements"));
@@ -394,7 +467,7 @@ mod tests {
             .unwrap_or(u16::MAX);
         terminal
             .draw(|frame| {
-                render(frame, &lines, last_page);
+                render(frame, &lines, last_page, Some(0));
             })
             .expect("render last page");
         let last_page = rendered_text(&terminal);

@@ -42,12 +42,18 @@ pub struct TerminalParserCallbacks {
     seen_csi: HashSet<String>,
     seen_escape: HashSet<String>,
     pending_replies: Vec<Vec<u8>>,
+    pending_font_family: Option<String>,
 }
 
 impl TerminalParserCallbacks {
     /// Drains any terminal replies queued by parser callbacks.
     pub fn take_replies(&mut self) -> Vec<Vec<u8>> {
         std::mem::take(&mut self.pending_replies)
+    }
+
+    /// Takes the most recent font family requested with OSC 50.
+    pub fn take_font_family_request(&mut self) -> Option<String> {
+        self.pending_font_family.take()
     }
 }
 
@@ -74,6 +80,23 @@ fn encoded_version() -> usize {
 }
 
 impl Callbacks for TerminalParserCallbacks {
+    fn unhandled_osc(&mut self, _: &mut Screen, params: &[&[u8]]) {
+        // OSC 50 ; family ST = xterm "set font". Font queries (`?`) and
+        // xterm's font-menu indices (`#`) are not supported.
+        let [b"50", name @ ..] = params else {
+            return;
+        };
+        let name = name
+            .iter()
+            .map(|part| String::from_utf8_lossy(part))
+            .collect::<Vec<_>>()
+            .join(";");
+        let name = name.trim();
+        if !name.is_empty() && !name.starts_with(['?', '#']) {
+            self.pending_font_family = Some(name.to_string());
+        }
+    }
+
     fn unhandled_csi(
         &mut self,
         screen: &mut Screen,
@@ -407,6 +430,11 @@ impl TerminalRuntime {
         self.parser.callbacks_mut().take_replies()
     }
 
+    /// Takes the most recent font family requested with OSC 50.
+    pub fn take_font_family_request(&mut self) -> Option<String> {
+        self.parser.callbacks_mut().take_font_family_request()
+    }
+
     /// Receives pending PTY output without blocking.
     pub fn try_recv(&mut self) -> Result<Vec<u8>, TryRecvError> {
         self.rx.get().try_recv()
@@ -541,6 +569,18 @@ mod tests {
 
     fn parser(rows: u16, cols: u16) -> Parser<TerminalParserCallbacks> {
         Parser::new_with_callbacks(rows, cols, 100, TerminalParserCallbacks::default())
+    }
+
+    #[test]
+    fn osc_50_requests_a_font_family() {
+        let mut parser = parser(24, 80);
+        parser.process(b"\x1b]50;JetBrains Mono\x1b\\");
+        assert_eq!(
+            parser.callbacks_mut().take_font_family_request().as_deref(),
+            Some("JetBrains Mono")
+        );
+        parser.process(b"\x1b]50;?\x07");
+        assert_eq!(parser.callbacks_mut().take_font_family_request(), None);
     }
 
     fn replies(parser: &mut Parser<TerminalParserCallbacks>) -> Vec<String> {
