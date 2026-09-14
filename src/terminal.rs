@@ -474,20 +474,15 @@ impl TerminalSurface {
     /// Returns the terminal pixmap dimensions in physical pixels.
     ///
     /// The renderer's measured size is exact while it describes the current
-    /// grid; before measurement, or between a reflow and its remeasurement,
-    /// the size is reconstructed from the last cell metrics.
+    /// grid; between a reflow and its remeasurement the new grid is sized
+    /// with the measured physical cell; before any measurement cells are 1x1.
     pub fn pixmap_dimensions(&self) -> UVec2 {
-        if let Some(output) = &self.render_output
-            && output.grid() == self.grid()
-        {
-            return output.size();
+        let grid = Vec2::new(f32::from(self.cols), f32::from(self.rows));
+        match &self.render_output {
+            Some(output) if output.grid() == self.grid() => output.size(),
+            Some(output) => (grid * output.physical_cell_size()).as_uvec2(),
+            None => (grid * self.render_scale).round().max(Vec2::ONE).as_uvec2(),
         }
-        (Vec2::new(self.cols as f32, self.rows as f32)
-            * self.char_dimensions()
-            * self.measured_scale())
-        .round()
-        .max(Vec2::ONE)
-        .as_uvec2()
     }
 
     /// The current grid.

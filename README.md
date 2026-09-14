@@ -269,7 +269,7 @@ Ratty uses a local path dependency during development and a versioned
 `ratty-vt` dependency when published. See the engine's
 [publishing instructions](crates/ratty-vt/README.md#publishing) for release order.
 
-The application uses `bevy_terminal_ratatui` 0.7.5 from crates.io.
+The application uses `bevy_terminal_ratatui` 0.7.7 from crates.io.
 `Cargo.lock` records the resolved renderer versions for reproducible builds.
 
 ## Touchscreen
