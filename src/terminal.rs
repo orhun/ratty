@@ -9,13 +9,15 @@ use bevy::prelude::*;
 use bevy::text::FontCx;
 use bevy_terminal_ratatui::RatatuiTerminal;
 use bevy_terminal_ratatui::prelude::{
-    BlinkConfig, CursorConfig, CursorStyle, FontFaces, FontSource, RasterConfig, TerminalGeometry,
-    TerminalRenderConfig, TerminalSizing, TerminalTexture, TerminalTheme,
+    BlinkConfig, CursorConfig, CursorStyle, FontFaces, FontSource, GridSize, RasterConfig,
+    TerminalGeometry, TerminalRenderConfig, TerminalSizing, TerminalStatus, TerminalTexture,
+    TerminalTheme,
 };
 use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::layout::Rect;
 use ratatui::style::{Color as TuiColor, Modifier, Style};
 use ratatui::widgets::Widget;
+use std::collections::HashMap;
 
 use crate::config::{AppConfig, FontConfig, FontStyleConfig, ThemeConfig};
 use crate::mouse::TerminalSelection;
@@ -90,6 +92,72 @@ impl ConfiguredFontFaces {
             faces: FontFaces::regular(FontSource::Family(family.clone().into())),
             system_family: Some(family),
         }
+    }
+
+    /// Short description for logs: the system family or the explicit files.
+    pub fn describe(&self) -> String {
+        match &self.system_family {
+            Some(family) => format!("family {family:?}"),
+            None => format!("explicit font files {:?}", self.faces),
+        }
+    }
+}
+
+/// Font files loaded through OSC 50, keyed by canonical path, so switching
+/// back to a file reuses its `Font` assets instead of adding new ones.
+#[derive(Resource, Default)]
+pub struct LoadedFontFiles(HashMap<PathBuf, ConfiguredFontFaces>);
+
+impl LoadedFontFiles {
+    /// Returns the faces for `regular`, loading the file and its siblings on
+    /// first use (see [`load_font_file_faces`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the path cannot be canonicalized or is not a font.
+    pub fn load(
+        &mut self,
+        fonts: &mut Assets<Font>,
+        regular: &Path,
+    ) -> anyhow::Result<ConfiguredFontFaces> {
+        let key = regular
+            .canonicalize()
+            .with_context(|| format!("failed to resolve font path {}", regular.display()))?;
+        if let Some(faces) = self.0.get(&key) {
+            return Ok(faces.clone());
+        }
+        let faces = load_font_file_faces(fonts, &key)?;
+        self.0.insert(key, faces.clone());
+        Ok(faces)
+    }
+}
+
+/// What the renderer last reported about the render target, and the faces to
+/// restore if a font switch requested over OSC 50 never becomes usable.
+#[derive(Resource, Default)]
+pub struct RendererStatusWatch {
+    /// The most recent status observed after renderer synchronization.
+    pub last: Option<TerminalStatus>,
+    /// The faces in use before a pending OSC 50 switch; cleared once the
+    /// renderer is `Ready` again or the switch has been reverted.
+    pub faces_before_switch: Option<ConfiguredFontFaces>,
+}
+
+impl RendererStatusWatch {
+    /// Records a status; returns the previous one when it changed.
+    pub fn observe(&mut self, status: TerminalStatus) -> Option<Option<TerminalStatus>> {
+        if self.last == Some(status) {
+            return None;
+        }
+        Some(self.last.replace(status))
+    }
+
+    /// Whether `status` is a font problem an OSC 50 switch should be reverted for.
+    pub fn is_font_failure(status: TerminalStatus) -> bool {
+        matches!(
+            status,
+            TerminalStatus::FontFailed | TerminalStatus::ShapingFailed
+        )
     }
 }
 
@@ -403,14 +471,28 @@ impl TerminalSurface {
         self.render_output.is_some()
     }
 
-    /// Returns the terminal pixmap dimensions in pixels.
+    /// Returns the terminal pixmap dimensions in physical pixels.
+    ///
+    /// The renderer's measured size is exact while it describes the current
+    /// grid; before measurement, or between a reflow and its remeasurement,
+    /// the size is reconstructed from the last cell metrics.
     pub fn pixmap_dimensions(&self) -> UVec2 {
+        if let Some(output) = &self.render_output
+            && output.grid() == self.grid()
+        {
+            return output.size();
+        }
         (Vec2::new(self.cols as f32, self.rows as f32)
             * self.char_dimensions()
             * self.measured_scale())
         .round()
         .max(Vec2::ONE)
         .as_uvec2()
+    }
+
+    /// The current grid.
+    pub const fn grid(&self) -> GridSize {
+        GridSize::new(self.cols, self.rows)
     }
 
     /// Returns the current terminal layout.
@@ -1221,6 +1303,94 @@ mod tests {
             [None, Some("SFNSMonoItalic.ttf".into()), None]
         );
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pixmap_dimensions_are_exact_once_the_grid_is_measured() {
+        let mut surface = TerminalSurface::new(&AppConfig::default()).expect("surface");
+        let texture = fixed_measurement(&surface, Vec2::new(7.5, 13.5), 2.0);
+        let measured = texture.measured().expect("measured").clone();
+        assert!(surface.update_render_output(&texture));
+        assert_eq!(surface.grid(), measured.grid());
+        assert_eq!(surface.pixmap_dimensions(), measured.size());
+        // A reflow to another grid falls back to the reconstructed size until
+        // the renderer measures the new grid.
+        let layout = surface.resize_to_fit(Vec2::new(600.0, 324.0), 2.0);
+        assert_ne!(surface.grid(), measured.grid());
+        assert_eq!(
+            surface.pixmap_dimensions(),
+            (Vec2::new(f32::from(layout.cols), f32::from(layout.rows))
+                * Vec2::new(7.5, 13.5)
+                * 2.0)
+                .round()
+                .as_uvec2()
+        );
+    }
+
+    #[test]
+    fn renderer_status_transitions_are_observed_once_and_font_failures_revert_a_switch() {
+        use bevy_terminal_ratatui::prelude::TerminalStatus;
+
+        let mut watch = RendererStatusWatch::default();
+        assert_eq!(watch.observe(TerminalStatus::Loading), Some(None));
+        assert_eq!(watch.observe(TerminalStatus::Loading), None);
+        assert_eq!(
+            watch.observe(TerminalStatus::Ready),
+            Some(Some(TerminalStatus::Loading))
+        );
+        assert!(RendererStatusWatch::is_font_failure(
+            TerminalStatus::FontFailed
+        ));
+        assert!(!RendererStatusWatch::is_font_failure(
+            TerminalStatus::TextureTooLarge
+        ));
+
+        // Drive the observer system: a failed status after an OSC 50 switch
+        // restores the previous faces; the failed texture is never measured.
+        let surface = TerminalSurface::new(&AppConfig::default()).expect("surface");
+        let mut texture = fixed_measurement(&surface, Vec2::new(8.0, 16.0), 1.0);
+        texture.status = TerminalStatus::FontFailed;
+        assert!(texture.measured().is_none());
+        let before = ConfiguredFontFaces::system_family("Before Mono".into());
+        let mut app = App::new();
+        app.insert_resource(ConfiguredFontFaces::system_family("Broken Mono".into()))
+            .insert_resource(RendererStatusWatch {
+                last: Some(TerminalStatus::Ready),
+                faces_before_switch: Some(before.clone()),
+            });
+        app.world_mut().spawn((texture, TerminalRenderTarget));
+        app.add_systems(Update, crate::systems::observe_renderer_status);
+        app.update();
+        let watch = app.world().resource::<RendererStatusWatch>();
+        assert_eq!(watch.last, Some(TerminalStatus::FontFailed));
+        assert!(watch.faces_before_switch.is_none());
+        let faces = app.world().resource::<ConfiguredFontFaces>();
+        assert_eq!(faces.system_family, before.system_family);
+        assert_eq!(faces.faces, before.faces);
+    }
+
+    #[test]
+    fn font_files_are_loaded_once_per_path() {
+        let Some(font) = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+            "/System/Library/Fonts/Menlo.ttc",
+        ]
+        .into_iter()
+        .map(Path::new)
+        .find(|path| path.is_file()) else {
+            eprintln!("skipping: no known system font file on this host");
+            return;
+        };
+        let mut fonts = Assets::<Font>::default();
+        let mut files = LoadedFontFiles::default();
+        let first = files.load(&mut fonts, font).expect("font loads");
+        let count = fonts.len();
+        let again = files.load(&mut fonts, font).expect("cached font");
+        assert_eq!(fonts.len(), count, "no new assets for a cached path");
+        assert_eq!(first.faces, again.faces);
+        assert!(first.system_family.is_none());
+        let bogus = std::env::temp_dir().join("ratty-missing-font.ttf");
+        assert!(files.load(&mut fonts, &bogus).is_err());
     }
 
     #[test]
