@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::num::NonZeroU16;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use bevy::prelude::*;
@@ -83,6 +83,14 @@ impl ConfiguredFontFaces {
             self.faces.clone()
         }
     }
+
+    /// Faces for a named system family.
+    pub fn system_family(family: String) -> Self {
+        Self {
+            faces: FontFaces::regular(FontSource::Family(family.clone().into())),
+            system_family: Some(family),
+        }
+    }
 }
 
 /// Loads explicit font files into Bevy, or retains the configured system family.
@@ -102,10 +110,7 @@ pub fn load_configured_font_faces(
         font.bold_italic.as_deref(),
     ];
     if explicit.iter().all(Option::is_none) {
-        return Ok(ConfiguredFontFaces {
-            faces: FontFaces::regular(FontSource::Family(font.family.clone().into())),
-            system_family: Some(font.family.clone()),
-        });
+        return Ok(ConfiguredFontFaces::system_family(font.family.clone()));
     }
 
     let regular = font
@@ -137,6 +142,67 @@ pub fn load_configured_font_faces(
         },
         system_family: None,
     })
+}
+
+/// Loads the font file `regular` and any bold/italic siblings found next to it
+/// (see [`sibling_font_faces`]); missing styles are synthesized.
+///
+/// # Errors
+///
+/// Returns an error when `regular` or a discovered sibling is not a font.
+pub fn load_font_file_faces(
+    fonts: &mut Assets<Font>,
+    regular: &Path,
+) -> anyhow::Result<ConfiguredFontFaces> {
+    let [bold, italic, bold_italic] = sibling_font_faces(regular);
+    let mut load = |path: &Path| read_font_face(path).map(|font| fonts.add(font));
+    let regular = load(regular)?;
+    let bold = bold.as_deref().map(&mut load).transpose()?;
+    let italic = italic.as_deref().map(&mut load).transpose()?;
+    let bold_italic = bold_italic.as_deref().map(&mut load).transpose()?;
+    Ok(ConfiguredFontFaces {
+        faces: FontFaces {
+            regular: FontSource::Handle(regular),
+            bold: bold.map(FontSource::Handle),
+            italic: italic.map(FontSource::Handle),
+            bold_italic: bold_italic.map(FontSource::Handle),
+            synthesize: true,
+        },
+        system_family: None,
+    })
+}
+
+/// Finds the `[bold, italic, bold_italic]` files that sit next to the font
+/// file `regular`, following common naming (`Hack-Regular.ttf` →
+/// `Hack-Bold.ttf`, `SourceCodePro-It.ttf`, `DejaVuSansMono-BoldOblique.ttf`,
+/// `SFNSMonoItalic.ttf`).
+fn sibling_font_faces(regular: &Path) -> [Option<PathBuf>; 3] {
+    let (Some(stem), Some(dir)) = (
+        regular.file_stem().and_then(|s| s.to_str()),
+        regular.parent(),
+    ) else {
+        return [None, None, None];
+    };
+    let extension = regular
+        .extension()
+        .and_then(|e| e.to_str())
+        .map_or(String::new(), |e| format!(".{e}"));
+    let base = stem
+        .strip_suffix("-Regular")
+        .or_else(|| stem.strip_suffix("Regular"))
+        .unwrap_or(stem);
+    let find = |suffixes: &[&str]| {
+        suffixes
+            .iter()
+            .flat_map(|suffix| [format!("-{suffix}"), (*suffix).to_string()])
+            .map(|suffix| dir.join(format!("{base}{suffix}{extension}")))
+            .find(|path| path.is_file())
+    };
+    [
+        find(&["Bold"]),
+        find(&["Italic", "It", "Oblique"]),
+        find(&["BoldItalic", "BoldIt", "BoldOblique"]),
+    ]
 }
 
 fn read_font_face(path: &Path) -> anyhow::Result<Font> {
@@ -1103,6 +1169,58 @@ mod tests {
             assert_eq!(surface.layout().logical_size, layout.logical_size);
             assert_eq!(surface.char_dimensions(), Vec2::new(7.5, 13.5));
         }
+    }
+
+    #[test]
+    fn font_file_siblings_follow_common_naming() {
+        let dir = std::env::temp_dir().join(format!("ratty-siblings-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("temp dir");
+        for name in [
+            "Hack-Regular.ttf",
+            "Hack-Bold.ttf",
+            "Hack-BoldItalic.ttf",
+            "Hack-Italic.ttf",
+            "SourceCodePro-Regular.ttf",
+            "SourceCodePro-It.ttf",
+            "DejaVuSansMono.ttf",
+            "DejaVuSansMono-BoldOblique.ttf",
+            "SFNSMono.ttf",
+            "SFNSMonoItalic.ttf",
+        ] {
+            fs::write(dir.join(name), b"").expect("sibling file");
+        }
+        let names = |regular: &str| {
+            sibling_font_faces(&dir.join(regular)).map(|path| {
+                path.map(|path| {
+                    path.file_name()
+                        .expect("file name")
+                        .to_string_lossy()
+                        .into_owned()
+                })
+            })
+        };
+
+        assert_eq!(
+            names("Hack-Regular.ttf"),
+            [
+                Some("Hack-Bold.ttf".into()),
+                Some("Hack-Italic.ttf".into()),
+                Some("Hack-BoldItalic.ttf".into())
+            ]
+        );
+        assert_eq!(
+            names("SourceCodePro-Regular.ttf"),
+            [None, Some("SourceCodePro-It.ttf".into()), None]
+        );
+        assert_eq!(
+            names("DejaVuSansMono.ttf"),
+            [None, None, Some("DejaVuSansMono-BoldOblique.ttf".into())]
+        );
+        assert_eq!(
+            names("SFNSMono.ttf"),
+            [None, Some("SFNSMonoItalic.ttf".into()), None]
+        );
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
