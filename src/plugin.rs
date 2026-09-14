@@ -23,10 +23,10 @@ use crate::scene::{
 use crate::systems::{
     TerminalFrameDirty, TerminalRedrawSet, animate_inline_kitty_planes, animate_mobius_transition,
     animate_terminal_plane_warp, apply_inline_objects, apply_instance_brightness,
-    finish_terminal_model_load, handle_window_resize, pump_pty_output, render_terminal_widget,
-    request_exit_on_primary_window_close, retry_pending_terminal_resize, reveal_window_fallback,
-    shutdown_terminal_runtime_on_exit, sync_asset_to_terminal_cursor, sync_inline_objects,
-    sync_rgp_objects, sync_terminal_materials, sync_terminal_render_output,
+    finish_terminal_model_load, handle_window_resize, observe_renderer_status, pump_pty_output,
+    render_terminal_widget, request_exit_on_primary_window_close, retry_pending_terminal_resize,
+    reveal_window_fallback, shutdown_terminal_runtime_on_exit, sync_asset_to_terminal_cursor,
+    sync_inline_objects, sync_rgp_objects, sync_terminal_materials, sync_terminal_render_output,
     sync_terminal_renderer_config,
 };
 use crate::terminal::TerminalRedrawState;
@@ -52,6 +52,8 @@ impl Plugin for TerminalPlugin {
             .init_resource::<TerminalRedrawState>()
             .init_resource::<TerminalKeyBindings>()
             .init_resource::<TerminalFrameDirty>()
+            .init_resource::<crate::terminal::LoadedFontFiles>()
+            .init_resource::<crate::terminal::RendererStatusWatch>()
             .init_non_send::<TerminalClipboard>()
             .add_message::<TerminalCameraUpdate>()
             .add_message::<ActivateTerminalCameraPreset>()
@@ -155,6 +157,7 @@ impl Plugin for TerminalPlugin {
             .add_systems(
                 Update,
                 (
+                    observe_renderer_status,
                     sync_terminal_render_output,
                     sync_terminal_materials,
                     finish_terminal_model_load,
