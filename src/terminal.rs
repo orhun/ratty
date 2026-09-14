@@ -263,9 +263,10 @@ impl TerminalSurface {
             return false;
         }
 
-        if let TerminalSizing::FromFont { font_size, .. } = &mut self.render_config.sizing {
-            *font_size = points_to_logical_pixels(new_size);
-        }
+        let TerminalSizing::FromFont { font_size, .. } = &mut self.render_config.sizing else {
+            return false;
+        };
+        *font_size = points_to_logical_pixels(new_size);
         self.font_size = new_size;
         true
     }
@@ -395,13 +396,14 @@ impl TerminalSurface {
 ///
 /// Uses the actual framebuffer ratio rather than the reported scale factor,
 /// preserving the application's layout on mixed-DPI setups. The same explicit
-/// scale is supplied to the renderer through `RasterConfig`.
+/// scale is supplied to the renderer through `RasterConfig`, bounded to the
+/// range the renderer accepts.
 pub fn render_scale_for_window(window: &Window) -> f32 {
     let logical = window.resolution.size().max(Vec2::ONE);
     let physical = window.resolution.physical_size().as_vec2();
     (physical.x / logical.x)
         .min(physical.y / logical.y)
-        .max(1.0)
+        .clamp(1.0, 8.0)
 }
 
 /// Returns the logical size for a physical terminal texture.
