@@ -39,7 +39,10 @@ const FONTS: &[(&str, &str)] = &[
     ("Menlo", "menlo/Menlo.ttc"),
     ("SF Mono", "sf-mono/SFNSMono.ttf"),
     ("Hack", "hack/Hack-Regular.ttf"),
-    ("Source Code Pro", "source-code-pro/SourceCodePro-Regular.ttf"),
+    (
+        "Source Code Pro",
+        "source-code-pro/SourceCodePro-Regular.ttf",
+    ),
     ("Cascadia Code", "cascadia-code/CascadiaCode-Regular.ttf"),
 ];
 
@@ -54,7 +57,9 @@ fn main() -> io::Result<()> {
 
 /// Asks the terminal to load the font `file` from `fonts/` (OSC 50 with a path).
 fn set_font(file: &str) -> io::Result<()> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fonts").join(file);
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../fonts")
+        .join(file);
     let mut stdout = io::stdout();
     write!(stdout, "\x1b]50;{}\x1b\\", path.display())?;
     stdout.flush()
