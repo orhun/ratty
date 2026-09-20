@@ -45,8 +45,8 @@ use crate::scene::{
     TerminalPresentationMode, TerminalViewport, sync_terminal_layout,
 };
 use crate::terminal::{
-    ConfiguredFontFaces, TerminalRedrawState, TerminalRenderTarget, TerminalSurface,
-    TerminalWidget, render_scale_for_window,
+    ConfiguredFontFaces, RendererStatusWatch, TerminalRedrawState, TerminalRenderTarget,
+    TerminalSurface, TerminalWidget, render_scale_for_window,
 };
 use bevy::app::AppExit;
 use bevy::asset::AssetMut;
@@ -61,9 +61,7 @@ use bevy::render::render_resource::PrimitiveTopology;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::text::FontCx;
 use bevy::window::{PrimaryWindow, Window, WindowCloseRequested, WindowResized};
-use bevy_terminal_ratatui::prelude::{
-    TerminalReady, TerminalRemeasured, TerminalRenderConfig, TerminalTexture,
-};
+use bevy_terminal_ratatui::prelude::{TerminalRenderConfig, TerminalStatus, TerminalTexture};
 
 struct InlineLayout {
     columns: u32,
@@ -330,45 +328,6 @@ pub(crate) fn handle_window_resize(
     redraw.request();
 }
 
-/// Marker on the render target once its `TerminalReady` has fired: the
-/// texture carries measured font geometry and may drive PTY layout.
-///
-/// A component rather than a resource, so it dies with a despawned target and
-/// a foreign `bevy_terminal` terminal (an embedder may run several) cannot
-/// vouch for Ratty's.
-#[derive(Component)]
-pub(crate) struct TerminalRendererReady;
-
-/// Set by the renderer's readiness and remeasure events; consumed by
-/// [`sync_terminal_render_output`], which adopts the texture that frame.
-#[derive(Resource, Default)]
-pub(crate) struct TerminalOutputPending(pub bool);
-
-/// Marks the renderer's measured texture as authoritative for layout.
-pub(crate) fn on_terminal_ready(
-    ready: On<TerminalReady>,
-    targets: Query<(), With<TerminalRenderTarget>>,
-    mut pending: ResMut<TerminalOutputPending>,
-    mut commands: Commands,
-) {
-    if targets.contains(ready.entity) {
-        commands.entity(ready.entity).insert(TerminalRendererReady);
-        pending.0 = true;
-    }
-}
-
-/// Schedules texture adoption after the renderer resized its texture in
-/// place (font load, zoom, or a raster-scale change).
-pub(crate) fn on_terminal_remeasured(
-    remeasured: On<TerminalRemeasured>,
-    targets: Query<(), With<TerminalRenderTarget>>,
-    mut pending: ResMut<TerminalOutputPending>,
-) {
-    if targets.contains(remeasured.entity) {
-        pending.0 = true;
-    }
-}
-
 /// Fits the grid to the window, pushes the result to the PTY, and returns the
 /// layout. The single reflow implementation shared by the resize handler and
 /// the render-output sync.
@@ -554,20 +513,46 @@ pub(crate) fn sync_terminal_renderer_config(
     }
 }
 
-/// The render target's texture, present only once the renderer has signaled
-/// readiness.
-type ReadyTerminalTextureQuery<'w, 's> = Query<
-    'w,
-    's,
-    &'static TerminalTexture,
-    (With<TerminalRenderTarget>, With<TerminalRendererReady>),
->;
+/// The render target's persistent output; consumers check measured state.
+type TerminalTextureQuery<'w, 's> =
+    Query<'w, 's, &'static TerminalTexture, With<TerminalRenderTarget>>;
+
+/// Reports renderer status transitions.
+///
+/// Logs once per transition: a warning when the renderer leaves `Ready` for a
+/// failure, an info line when it recovers.
+pub(crate) fn observe_renderer_status(
+    textures: TerminalTextureQuery,
+    mut watch: ResMut<RendererStatusWatch>,
+    configured_faces: Option<Res<ConfiguredFontFaces>>,
+) {
+    let Ok(texture) = textures.single() else {
+        return;
+    };
+    let status = texture.status;
+    let Some(previous) = watch.observe(status) else {
+        return;
+    };
+    match status {
+        TerminalStatus::Ready => {
+            if previous.is_some_and(|previous| previous != TerminalStatus::Loading) {
+                info!("terminal renderer recovered: {status:?}");
+            }
+        }
+        TerminalStatus::Loading => {}
+        failure => {
+            let described = configured_faces
+                .as_deref()
+                .map_or_else(|| "default faces".to_owned(), ConfiguredFontFaces::describe);
+            warn!("terminal renderer reports {failure:?} with {described}");
+        }
+    }
+}
 
 #[derive(SystemParam)]
 pub(crate) struct SyncRenderOutputParams<'w, 's> {
     primary_window: Query<'w, 's, &'static mut Window, With<PrimaryWindow>>,
-    textures: ReadyTerminalTextureQuery<'w, 's>,
-    pending: ResMut<'w, TerminalOutputPending>,
+    textures: TerminalTextureQuery<'w, 's>,
     runtime: ResMut<'w, TerminalRuntime>,
     terminal: ResMut<'w, TerminalSurface>,
     redraw: ResMut<'w, TerminalRedrawState>,
@@ -580,14 +565,13 @@ pub(crate) struct SyncRenderOutputParams<'w, 's> {
 /// Adopts the renderer-owned texture and reflows the PTY when measured font
 /// metrics change.
 ///
-/// Driven by the renderer's `TerminalReady` and `TerminalRemeasured` events
-/// (see [`on_terminal_ready`] and [`on_terminal_remeasured`]), which fire
-/// inside the `bevy_terminal` sync earlier in the same frame.
+/// Reads persistent measured output after renderer synchronization. Comparing
+/// before adoption also handles late consumers and a minimized window without
+/// event-history bookkeeping.
 pub(crate) fn sync_terminal_render_output(mut params: SyncRenderOutputParams) {
     let SyncRenderOutputParams {
         primary_window,
         textures,
-        pending,
         runtime,
         terminal,
         redraw,
@@ -596,24 +580,20 @@ pub(crate) fn sync_terminal_render_output(mut params: SyncRenderOutputParams) {
         plane_back_query,
         frame_dirty,
     } = &mut params;
-    if !pending.0 {
+    let (Some(texture), Ok(mut window)) = (textures.single().ok(), primary_window.single_mut())
+    else {
         return;
-    }
-    // The renderer inserts a provisional texture with estimated cell metrics
-    // before the font face has shaped. Adopting it would reflow the PTY to a
-    // wrong grid, so the query requires TerminalRendererReady, the renderer's
-    // own signal that the texture carries measured geometry.
-    let (Ok(texture), Ok(mut window)) = (textures.single(), primary_window.single_mut()) else {
+    };
+    let Some(geometry) = texture.measured() else {
         return;
     };
     // Minimizing the window reports a 0x0 size. Skip the reflow (mirroring
     // `handle_window_resize`) so a texture change landing on that frame does
-    // not collapse the terminal to a degenerate grid; the event stays pending.
+    // not collapse the terminal to a degenerate grid; output is checked again next frame.
     let window_size = window.resolution.size();
     if window_size.x < 1.0 || window_size.y < 1.0 {
         return;
     }
-    pending.0 = false;
     // Bypass change detection for a no-op adoption so an unchanged texture
     // does not bump the public resource's tick, then mark on real adoption.
     if !terminal
@@ -624,7 +604,7 @@ pub(crate) fn sync_terminal_render_output(mut params: SyncRenderOutputParams) {
     }
     terminal.set_changed();
     let previous_grid = (terminal.cols, terminal.rows);
-    let layout = reflow_terminal(terminal, runtime, window_size, texture.raster_scale);
+    let layout = reflow_terminal(terminal, runtime, window_size, geometry.raster_scale());
     sync_terminal_layout(layout, viewport, plane_query, plane_back_query);
     frame_dirty.0 = true;
     if previous_grid != (layout.cols, layout.rows) {
@@ -632,8 +612,8 @@ pub(crate) fn sync_terminal_render_output(mut params: SyncRenderOutputParams) {
     }
     // The first measured texture may still represent the configured startup
     // grid. If measurement changes the fitted grid, keep the native window
-    // hidden until the renderer has produced the correctly sized texture.
-    if !window.visible && texture.size == terminal.pixmap_dimensions() {
+    // hidden until the renderer has measured the fitted grid.
+    if !window.visible && geometry.grid() == terminal.grid() {
         window.visible = true;
     }
 }
@@ -660,6 +640,7 @@ const WINDOW_REVEAL_FALLBACK_SECS: f32 = 10.0;
 pub(crate) fn reveal_window_fallback(
     time: Res<Time<Real>>,
     terminal: Res<TerminalSurface>,
+    status_watch: Res<RendererStatusWatch>,
     mut primary_window: Query<&mut Window, With<PrimaryWindow>>,
     mut waited: Local<f32>,
     mut disarmed: Local<bool>,
@@ -681,8 +662,9 @@ pub(crate) fn reveal_window_fallback(
     }
     *disarmed = true;
     warn!(
-        "no measured terminal texture after {WINDOW_REVEAL_FALLBACK_SECS}s; \
-         window resizes are ignored until font measurement succeeds"
+        "no measured terminal texture after {WINDOW_REVEAL_FALLBACK_SECS}s (renderer status {:?}); \
+         window resizes are ignored until font measurement succeeds",
+        status_watch.last
     );
     if let Ok(mut window) = primary_window.single_mut()
         && !window.visible
