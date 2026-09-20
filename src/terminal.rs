@@ -371,8 +371,9 @@ impl TerminalSurface {
     /// Returns the terminal pixmap dimensions in physical pixels.
     ///
     /// The renderer's measured size is exact while it describes the current
-    /// grid; between a reflow and its remeasurement the new grid is sized
-    /// with the measured physical cell; before any measurement cells are 1x1.
+    /// grid; between a reflow and its remeasurement the new grid is sized with
+    /// the measured physical cell, which the renderer snaps to whole pixels;
+    /// before any measurement cells are 1x1.
     pub fn pixmap_dimensions(&self) -> UVec2 {
         let grid = Vec2::new(f32::from(self.cols), f32::from(self.rows));
         match &self.render_output {
@@ -424,6 +425,11 @@ impl TerminalSurface {
             return false;
         }
         if !self.tui.backend_mut().set_geometry(geometry) {
+            warn_once!(
+                "the renderer's measured geometry {:?} was rejected by the backend; \
+                 keeping the previous measurement",
+                geometry
+            );
             return false;
         }
         self.image_handle = Some(texture.image.clone());
@@ -1147,24 +1153,28 @@ mod tests {
 
     #[test]
     fn pixmap_dimensions_are_exact_once_the_grid_is_measured() {
+        // The fractional logical cell is the interesting case: the renderer
+        // snaps its physical cell to whole pixels, so the reconstructed size
+        // used between a reflow and its remeasurement stays pixel-exact.
+        let cell = Vec2::new(7.3, 13.7);
         let mut surface = TerminalSurface::new(&AppConfig::default()).expect("surface");
-        let texture = fixed_measurement(&surface, Vec2::new(7.5, 13.5), 2.0);
+        let texture = fixed_measurement(&surface, cell, 2.0);
         let measured = texture.measured().expect("measured").clone();
         assert!(surface.update_render_output(&texture));
         assert_eq!(surface.grid(), measured.grid());
         assert_eq!(surface.pixmap_dimensions(), measured.size());
+        let physical = measured.physical_cell_size();
+        assert_eq!(
+            physical,
+            physical.round(),
+            "the renderer rasterizes whole physical cells"
+        );
         // A reflow to another grid falls back to the reconstructed size until
         // the renderer measures the new grid.
         let layout = surface.resize_to_fit(Vec2::new(600.0, 324.0), 2.0);
         assert_ne!(surface.grid(), measured.grid());
-        assert_eq!(
-            surface.pixmap_dimensions(),
-            (Vec2::new(f32::from(layout.cols), f32::from(layout.rows))
-                * Vec2::new(7.5, 13.5)
-                * 2.0)
-                .round()
-                .as_uvec2()
-        );
+        let grid = Vec2::new(f32::from(layout.cols), f32::from(layout.rows));
+        assert_eq!(surface.pixmap_dimensions(), (grid * physical).as_uvec2());
     }
 
     #[test]
