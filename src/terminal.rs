@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::num::NonZeroU16;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use bevy::prelude::*;
@@ -17,6 +17,7 @@ use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::layout::Rect;
 use ratatui::style::{Color as TuiColor, Modifier, Style};
 use ratatui::widgets::Widget;
+use std::collections::HashMap;
 
 use crate::config::{AppConfig, FontConfig, FontStyleConfig, ThemeConfig};
 use crate::mouse::TerminalSelection;
@@ -102,11 +103,44 @@ impl ConfiguredFontFaces {
     }
 }
 
-/// What the renderer last reported about the render target.
+/// Font files loaded through OSC 50, keyed by canonical path, so switching
+/// back to a file reuses its `Font` assets instead of adding new ones.
+#[derive(Resource, Default)]
+pub struct LoadedFontFiles(HashMap<PathBuf, ConfiguredFontFaces>);
+
+impl LoadedFontFiles {
+    /// Returns the faces for `regular`, loading the file and its siblings on
+    /// first use (see [`load_font_file_faces`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the path cannot be canonicalized or is not a font.
+    pub fn load(
+        &mut self,
+        fonts: &mut Assets<Font>,
+        regular: &Path,
+    ) -> anyhow::Result<ConfiguredFontFaces> {
+        let key = regular
+            .canonicalize()
+            .with_context(|| format!("failed to resolve font path {}", regular.display()))?;
+        if let Some(faces) = self.0.get(&key) {
+            return Ok(faces.clone());
+        }
+        let faces = load_font_file_faces(fonts, &key)?;
+        self.0.insert(key, faces.clone());
+        Ok(faces)
+    }
+}
+
+/// What the renderer last reported about the render target, and the faces to
+/// restore if a font switch requested over OSC 50 never becomes usable.
 #[derive(Resource, Default)]
 pub struct RendererStatusWatch {
     /// The most recent status observed after renderer synchronization.
     pub last: Option<TerminalStatus>,
+    /// The faces in use before a pending OSC 50 switch; cleared once the
+    /// renderer is `Ready` again or the switch has been reverted.
+    pub faces_before_switch: Option<ConfiguredFontFaces>,
 }
 
 impl RendererStatusWatch {
@@ -116,6 +150,14 @@ impl RendererStatusWatch {
             return None;
         }
         Some(self.last.replace(status))
+    }
+
+    /// Whether `status` is a font problem an OSC 50 switch should be reverted for.
+    pub fn is_font_failure(status: TerminalStatus) -> bool {
+        matches!(
+            status,
+            TerminalStatus::FontFailed | TerminalStatus::ShapingFailed
+        )
     }
 }
 
@@ -168,6 +210,67 @@ pub fn load_configured_font_faces(
         },
         system_family: None,
     })
+}
+
+/// Loads the font file `regular` and any bold/italic siblings found next to it
+/// (see [`sibling_font_faces`]); missing styles are synthesized.
+///
+/// # Errors
+///
+/// Returns an error when `regular` or a discovered sibling is not a font.
+pub fn load_font_file_faces(
+    fonts: &mut Assets<Font>,
+    regular: &Path,
+) -> anyhow::Result<ConfiguredFontFaces> {
+    let [bold, italic, bold_italic] = sibling_font_faces(regular);
+    let mut load = |path: &Path| read_font_face(path).map(|font| fonts.add(font));
+    let regular = load(regular)?;
+    let bold = bold.as_deref().map(&mut load).transpose()?;
+    let italic = italic.as_deref().map(&mut load).transpose()?;
+    let bold_italic = bold_italic.as_deref().map(&mut load).transpose()?;
+    Ok(ConfiguredFontFaces {
+        faces: FontFaces {
+            regular: FontSource::Handle(regular),
+            bold: bold.map(FontSource::Handle),
+            italic: italic.map(FontSource::Handle),
+            bold_italic: bold_italic.map(FontSource::Handle),
+            synthesize: true,
+        },
+        system_family: None,
+    })
+}
+
+/// Finds the `[bold, italic, bold_italic]` files that sit next to the font
+/// file `regular`, following common naming (`Hack-Regular.ttf` →
+/// `Hack-Bold.ttf`, `SourceCodePro-It.ttf`, `DejaVuSansMono-BoldOblique.ttf`,
+/// `SFNSMonoItalic.ttf`).
+fn sibling_font_faces(regular: &Path) -> [Option<PathBuf>; 3] {
+    let (Some(stem), Some(dir)) = (
+        regular.file_stem().and_then(|s| s.to_str()),
+        regular.parent(),
+    ) else {
+        return [None, None, None];
+    };
+    let extension = regular
+        .extension()
+        .and_then(|e| e.to_str())
+        .map_or(String::new(), |e| format!(".{e}"));
+    let base = stem
+        .strip_suffix("-Regular")
+        .or_else(|| stem.strip_suffix("Regular"))
+        .unwrap_or(stem);
+    let find = |suffixes: &[&str]| {
+        suffixes
+            .iter()
+            .flat_map(|suffix| [format!("-{suffix}"), (*suffix).to_string()])
+            .map(|suffix| dir.join(format!("{base}{suffix}{extension}")))
+            .find(|path| path.is_file())
+    };
+    [
+        find(&["Bold"]),
+        find(&["Italic", "It", "Oblique"]),
+        find(&["BoldItalic", "BoldIt", "BoldOblique"]),
+    ]
 }
 
 fn read_font_face(path: &Path) -> anyhow::Result<Font> {
@@ -1152,6 +1255,58 @@ mod tests {
     }
 
     #[test]
+    fn font_file_siblings_follow_common_naming() {
+        let dir = std::env::temp_dir().join(format!("ratty-siblings-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("temp dir");
+        for name in [
+            "Hack-Regular.ttf",
+            "Hack-Bold.ttf",
+            "Hack-BoldItalic.ttf",
+            "Hack-Italic.ttf",
+            "SourceCodePro-Regular.ttf",
+            "SourceCodePro-It.ttf",
+            "DejaVuSansMono.ttf",
+            "DejaVuSansMono-BoldOblique.ttf",
+            "SFNSMono.ttf",
+            "SFNSMonoItalic.ttf",
+        ] {
+            fs::write(dir.join(name), b"").expect("sibling file");
+        }
+        let names = |regular: &str| {
+            sibling_font_faces(&dir.join(regular)).map(|path| {
+                path.map(|path| {
+                    path.file_name()
+                        .expect("file name")
+                        .to_string_lossy()
+                        .into_owned()
+                })
+            })
+        };
+
+        assert_eq!(
+            names("Hack-Regular.ttf"),
+            [
+                Some("Hack-Bold.ttf".into()),
+                Some("Hack-Italic.ttf".into()),
+                Some("Hack-BoldItalic.ttf".into())
+            ]
+        );
+        assert_eq!(
+            names("SourceCodePro-Regular.ttf"),
+            [None, Some("SourceCodePro-It.ttf".into()), None]
+        );
+        assert_eq!(
+            names("DejaVuSansMono.ttf"),
+            [None, None, Some("DejaVuSansMono-BoldOblique.ttf".into())]
+        );
+        assert_eq!(
+            names("SFNSMono.ttf"),
+            [None, Some("SFNSMonoItalic.ttf".into()), None]
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn pixmap_dimensions_are_exact_once_the_grid_is_measured() {
         // The fractional logical cell is the interesting case: the renderer
         // snaps its physical cell to whole pixels, so the reconstructed size
@@ -1178,7 +1333,7 @@ mod tests {
     }
 
     #[test]
-    fn renderer_status_transitions_are_observed_once() {
+    fn renderer_status_transitions_are_observed_once_and_font_failures_revert_a_switch() {
         use bevy_terminal_ratatui::prelude::TerminalStatus;
 
         let mut watch = RendererStatusWatch::default();
@@ -1188,25 +1343,59 @@ mod tests {
             watch.observe(TerminalStatus::Ready),
             Some(Some(TerminalStatus::Loading))
         );
+        assert!(RendererStatusWatch::is_font_failure(
+            TerminalStatus::FontFailed
+        ));
+        assert!(!RendererStatusWatch::is_font_failure(
+            TerminalStatus::TextureTooLarge
+        ));
 
-        // Drive the observer system: a failed status is recorded and its
-        // texture is never measured.
+        // Drive the observer system: a failed status after an OSC 50 switch
+        // restores the previous faces; the failed texture is never measured.
         let surface = TerminalSurface::new(&AppConfig::default()).expect("surface");
         let mut texture = fixed_measurement(&surface, Vec2::new(8.0, 16.0), 1.0);
         texture.status = TerminalStatus::FontFailed;
         assert!(texture.measured().is_none());
+        let before = ConfiguredFontFaces::system_family("Before Mono".into());
         let mut app = App::new();
         app.insert_resource(ConfiguredFontFaces::system_family("Broken Mono".into()))
             .insert_resource(RendererStatusWatch {
                 last: Some(TerminalStatus::Ready),
+                faces_before_switch: Some(before.clone()),
             });
         app.world_mut().spawn((texture, TerminalRenderTarget));
         app.add_systems(Update, crate::systems::observe_renderer_status);
         app.update();
-        assert_eq!(
-            app.world().resource::<RendererStatusWatch>().last,
-            Some(TerminalStatus::FontFailed)
-        );
+        let watch = app.world().resource::<RendererStatusWatch>();
+        assert_eq!(watch.last, Some(TerminalStatus::FontFailed));
+        assert!(watch.faces_before_switch.is_none());
+        let faces = app.world().resource::<ConfiguredFontFaces>();
+        assert_eq!(faces.system_family, before.system_family);
+        assert_eq!(faces.faces, before.faces);
+    }
+
+    #[test]
+    fn font_files_are_loaded_once_per_path() {
+        let Some(font) = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+            "/System/Library/Fonts/Menlo.ttc",
+        ]
+        .into_iter()
+        .map(Path::new)
+        .find(|path| path.is_file()) else {
+            eprintln!("skipping: no known system font file on this host");
+            return;
+        };
+        let mut fonts = Assets::<Font>::default();
+        let mut files = LoadedFontFiles::default();
+        let first = files.load(&mut fonts, font).expect("font loads");
+        let count = fonts.len();
+        let again = files.load(&mut fonts, font).expect("cached font");
+        assert_eq!(fonts.len(), count, "no new assets for a cached path");
+        assert_eq!(first.faces, again.faces);
+        assert!(first.system_family.is_none());
+        let bogus = std::env::temp_dir().join("ratty-missing-font.ttf");
+        assert!(files.load(&mut fonts, &bogus).is_err());
     }
 
     #[test]

@@ -23,6 +23,7 @@
 //! object systems rebuild or reposition scene entities that depend on the terminal grid.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::mpsc::TryRecvError;
 
 use crate::camera::{
@@ -45,8 +46,8 @@ use crate::scene::{
     TerminalPresentationMode, TerminalViewport, sync_terminal_layout,
 };
 use crate::terminal::{
-    ConfiguredFontFaces, RendererStatusWatch, TerminalRedrawState, TerminalRenderTarget,
-    TerminalSurface, TerminalWidget, render_scale_for_window,
+    ConfiguredFontFaces, LoadedFontFiles, RendererStatusWatch, TerminalRedrawState,
+    TerminalRenderTarget, TerminalSurface, TerminalWidget, render_scale_for_window,
 };
 use bevy::app::AppExit;
 use bevy::asset::AssetMut;
@@ -153,6 +154,16 @@ pub(crate) fn shutdown_terminal_runtime_on_exit(
     }
 }
 
+/// Font switching requested over OSC 50: the live faces, the font assets, the
+/// per-path cache, and the status watch that can revert a bad switch.
+#[derive(SystemParam)]
+pub struct FontSwitchParams<'w> {
+    configured_faces: Option<ResMut<'w, ConfiguredFontFaces>>,
+    fonts: ResMut<'w, Assets<Font>>,
+    font_files: ResMut<'w, LoadedFontFiles>,
+    status_watch: ResMut<'w, RendererStatusWatch>,
+}
+
 /// Pumps PTY output into the terminal parser.
 ///
 /// This runs early in the update schedule, before `render_terminal_widget`. It drains PTY output
@@ -167,9 +178,44 @@ pub fn pump_pty_output(
     mut camera_update_writer: MessageWriter<TerminalCameraUpdate>,
     mut app_exit: MessageWriter<AppExit>,
     mut redraw: ResMut<TerminalRedrawState>,
+    mut font_switch: FontSwitchParams,
 ) {
     let mut camera_updates = Vec::new();
     let drained = drain_pty_output(&mut runtime, &mut inline_objects, &mut camera_updates);
+    let FontSwitchParams {
+        configured_faces,
+        fonts,
+        font_files,
+        status_watch,
+    } = &mut font_switch;
+    if let Some(family) = runtime.take_font_family_request()
+        && let Some(faces) = configured_faces.as_mut()
+    {
+        // A path to an existing file loads that font file; anything else
+        // names a system family. The faces in use are kept so a switch the
+        // renderer cannot use is reverted (see `observe_renderer_status`).
+        let requested = if Path::new(&family).is_file() {
+            match font_files.load(fonts, Path::new(&family)) {
+                Ok(loaded) => {
+                    info!("switching font to file {family:?} (OSC 50)");
+                    Some(loaded)
+                }
+                Err(error) => {
+                    warn!("ignoring OSC 50 font file: {error:#}");
+                    None
+                }
+            }
+        } else {
+            info!("switching font family to {family:?} (OSC 50)");
+            Some(ConfiguredFontFaces::system_family(family))
+        };
+        if let Some(requested) = requested {
+            status_watch
+                .faces_before_switch
+                .get_or_insert_with(|| faces.clone());
+            **faces = requested;
+        }
+    }
     for update in camera_updates {
         camera_update_writer.write(update);
     }
@@ -517,14 +563,16 @@ pub(crate) fn sync_terminal_renderer_config(
 type TerminalTextureQuery<'w, 's> =
     Query<'w, 's, &'static TerminalTexture, With<TerminalRenderTarget>>;
 
-/// Reports renderer status transitions.
+/// Reports renderer status transitions and reverts an OSC 50 font switch the
+/// renderer cannot use.
 ///
 /// Logs once per transition: a warning when the renderer leaves `Ready` for a
-/// failure, an info line when it recovers.
+/// failure, an info line when it recovers. A `FontFailed` or `ShapingFailed`
+/// status while a switch is pending restores the faces in use before it.
 pub(crate) fn observe_renderer_status(
     textures: TerminalTextureQuery,
     mut watch: ResMut<RendererStatusWatch>,
-    configured_faces: Option<Res<ConfiguredFontFaces>>,
+    configured_faces: Option<ResMut<ConfiguredFontFaces>>,
 ) {
     let Ok(texture) = textures.single() else {
         return;
@@ -533,18 +581,31 @@ pub(crate) fn observe_renderer_status(
     let Some(previous) = watch.observe(status) else {
         return;
     };
+    let faces = configured_faces;
     match status {
         TerminalStatus::Ready => {
             if previous.is_some_and(|previous| previous != TerminalStatus::Loading) {
                 info!("terminal renderer recovered: {status:?}");
             }
+            watch.faces_before_switch = None;
         }
         TerminalStatus::Loading => {}
         failure => {
-            let described = configured_faces
+            let described = faces
                 .as_deref()
                 .map_or_else(|| "default faces".to_owned(), ConfiguredFontFaces::describe);
             warn!("terminal renderer reports {failure:?} with {described}");
+            if RendererStatusWatch::is_font_failure(failure)
+                && let Some(mut faces) = faces
+                && let Some(before) = watch.faces_before_switch.take()
+            {
+                warn!(
+                    "reverting the OSC 50 font switch to {}: the renderer cannot use {}",
+                    before.describe(),
+                    faces.describe()
+                );
+                *faces = before;
+            }
         }
     }
 }

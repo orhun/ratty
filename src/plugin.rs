@@ -52,6 +52,7 @@ impl Plugin for TerminalPlugin {
             .init_resource::<TerminalRedrawState>()
             .init_resource::<TerminalKeyBindings>()
             .init_resource::<TerminalFrameDirty>()
+            .init_resource::<crate::terminal::LoadedFontFiles>()
             .init_resource::<crate::terminal::RendererStatusWatch>()
             .init_non_send::<TerminalClipboard>()
             .add_message::<TerminalCameraUpdate>()
