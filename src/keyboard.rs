@@ -5,7 +5,6 @@ use bevy::ecs::world::FromWorld;
 use bevy::input::ButtonState;
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
-use bevy::window::{PrimaryWindow, Window};
 
 use arboard::Clipboard;
 
@@ -17,11 +16,10 @@ use crate::config::{AppConfig, BindingAction, FontConfig, KeyBindingConfig};
 use crate::mouse::{TerminalSelection, encode_mouse_wheel};
 use crate::runtime::TerminalRuntime;
 use crate::scene::{
-    MobiusEnterZoomFloor, MobiusTransition, TerminalPlaneBackLayoutQuery, TerminalPlaneLayoutQuery,
-    TerminalPlaneWarp, TerminalPresentationMode, TerminalViewport, sync_terminal_layout,
+    MobiusEnterZoomFloor, MobiusTransition, TerminalPlaneWarp, TerminalPresentationMode,
 };
-use crate::terminal::{TerminalRedrawState, TerminalSurface, render_scale_for_window};
-use crate::vt::{self, MouseProtocolMode};
+use crate::terminal::{TerminalRedrawState, TerminalSurface};
+use ratty_vt::MouseProtocolMode;
 
 /// Clipboard bridge for terminal copy and paste.
 pub struct TerminalClipboard {
@@ -173,7 +171,7 @@ fn default_bindings() -> Vec<KeyBinding> {
             KeyCode::KeyC,
             BindingModifiers {
                 control: true,
-                alt: true,
+                shift: true,
                 ..default()
             },
             BindingAction::Copy,
@@ -182,7 +180,7 @@ fn default_bindings() -> Vec<KeyBinding> {
             KeyCode::KeyV,
             BindingModifiers {
                 control: true,
-                alt: true,
+                shift: true,
                 ..default()
             },
             BindingAction::Paste,
@@ -381,10 +379,6 @@ pub struct KeyboardSystemParams<'w, 's> {
     clipboard: NonSendMut<'w, TerminalClipboard>,
     runtime: ResMut<'w, TerminalRuntime>,
     terminal: ResMut<'w, TerminalSurface>,
-    primary_window: Query<'w, 's, &'static Window, With<PrimaryWindow>>,
-    viewport: ResMut<'w, TerminalViewport>,
-    plane_query: TerminalPlaneLayoutQuery<'w, 's>,
-    plane_back_query: TerminalPlaneBackLayoutQuery<'w, 's>,
     bindings: Res<'w, TerminalKeyBindings>,
     redraw: ResMut<'w, TerminalRedrawState>,
     _marker: std::marker::PhantomData<&'s ()>,
@@ -401,7 +395,7 @@ pub fn handle_keyboard_input(
         let modifiers = current_modifiers(&params.keys).union(keyboard.modifiers());
         if event.state == ButtonState::Pressed
             && let Some(action) = params.bindings.action_for(binding_key_code, modifiers)
-            && !(is_scroll_action(action) && vt::alternate_screen(&params.runtime.term))
+            && !(is_scroll_action(action) && params.runtime.screen().alternate_screen())
         {
             if event.repeat
                 && !matches!(
@@ -482,12 +476,12 @@ pub fn handle_keyboard_input(
                         _ => unreachable!(),
                     };
 
-                    let mouse_mode = vt::mouse_protocol_mode(&params.runtime.term);
+                    let mouse_mode = params.runtime.screen().mouse_protocol_mode();
                     if params.camera_slots.active().mode == TerminalPresentationMode::Flat2d
                         && mouse_mode != MouseProtocolMode::None
                     {
-                        let encoding = vt::mouse_protocol_encoding(&params.runtime.term);
-                        let (row, col) = vt::cursor_position(&params.runtime.term);
+                        let encoding = params.runtime.screen().mouse_protocol_encoding();
+                        let (row, col) = params.runtime.screen().display_cursor_position();
                         let cell = UVec2::new(col as u32, row as u32);
                         for _ in 0..amount {
                             params.runtime.write_input(&encode_mouse_wheel(
@@ -497,13 +491,13 @@ pub fn handle_keyboard_input(
                             ));
                         }
                     } else {
-                        let current = vt::scrollback(&params.runtime.term);
+                        let current = params.runtime.screen().scrollback();
                         let next = if direction.is_positive() {
                             current.saturating_add(amount)
                         } else {
                             current.saturating_sub(amount)
                         };
-                        vt::set_scrollback(&mut params.runtime.term, next);
+                        params.runtime.screen_mut().set_scrollback(next);
                         params.selection.clear();
                         params.redraw.request();
                     }
@@ -520,7 +514,7 @@ pub fn handle_keyboard_input(
                     continue;
                 }
                 BindingAction::Copy => {
-                    if let Some(text) = params.selection.selected_text(&params.runtime.term)
+                    if let Some(text) = params.selection.selected_text(params.runtime.screen())
                         && !text.is_empty()
                     {
                         params.clipboard.copy(&text);
@@ -532,7 +526,7 @@ pub fn handle_keyboard_input(
                 }
                 BindingAction::Paste => {
                     if let Some(text) = params.clipboard.paste() {
-                        let bracketed = vt::bracketed_paste(&params.runtime.term);
+                        let bracketed = params.runtime.screen().bracketed_paste();
                         params.runtime.write_input(&encode_paste(&text, bracketed));
                     } else {
                         warn!("failed to read clipboard contents for paste");
@@ -556,26 +550,10 @@ pub fn handle_keyboard_input(
                         _ => false,
                     };
                     if resized {
-                        let Ok(window) = params.primary_window.single() else {
-                            continue;
-                        };
-                        let layout = params.terminal.resize_to_fit(
-                            window.resolution.size().max(Vec2::ONE),
-                            render_scale_for_window(window),
-                        );
-                        let pty_pixels = layout.pty_pixels();
-                        params.runtime.resize(
-                            layout.cols,
-                            layout.rows,
-                            pty_pixels.x as u16,
-                            pty_pixels.y as u16,
-                        );
-                        sync_terminal_layout(
-                            layout,
-                            &mut params.viewport,
-                            &mut params.plane_query,
-                            &mut params.plane_back_query,
-                        );
+                        // The renderer remeasures the cell from the new font
+                        // size and reports it through `TerminalRemeasured`;
+                        // that sync owns the PTY reflow, so zoom never
+                        // resizes from an estimate first.
                         params.redraw.request();
                     }
                     continue;
@@ -602,12 +580,12 @@ pub fn handle_keyboard_input(
 
         if let Some(input) = keyboard.handle_event_with_modes(
             event,
-            vt::application_cursor(&params.runtime.term),
+            params.runtime.screen().application_cursor(),
             params.runtime.kitty_keyboard_flags(),
             params.runtime.modify_other_keys(),
         ) {
-            if vt::scrollback(&params.runtime.term) != 0 {
-                vt::set_scrollback(&mut params.runtime.term, 0);
+            if params.runtime.screen().scrollback() != 0 {
+                params.runtime.screen_mut().set_scrollback(0);
                 params.redraw.request();
             }
             params.runtime.write_input(&input);

@@ -24,7 +24,6 @@ use crate::scene::{
     TerminalSurfaceKind, TerminalSurfaceShape, TerminalViewport, sync_terminal_layout,
 };
 use crate::terminal::{TerminalRedrawState, TerminalSurface};
-use crate::vt;
 
 const MAX_REQUEST_BYTES: u64 = 128 * 1024;
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -506,7 +505,7 @@ fn apply_command(
             }))
         }
         ControlCommand::ReadScreen { last_lines } => {
-            let mut rows = vt::visible_row_texts(&runtime.term);
+            let mut rows = runtime.visible_row_texts();
             if let Some(count) = last_lines {
                 let keep_from = rows
                     .len()
@@ -706,7 +705,9 @@ fn apply_command(
             terminal.resize(columns, rows);
             let layout = terminal.layout();
             let pixels = layout.pty_pixels();
-            runtime.resize(columns, rows, pixels.x as u16, pixels.y as u16);
+            if let Err(error) = runtime.resize(columns, rows, pixels.x as u16, pixels.y as u16) {
+                warn!("terminal resize remains pending: {error:#}");
+            }
             sync_terminal_layout(layout, viewport, plane_query, plane_back_query);
             redraw.request();
             ControlResponse::data(

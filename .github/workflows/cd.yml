@@ -4,6 +4,15 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      package:
+        description: Crate to publish
+        type: choice
+        required: true
+        default: ratty
+        options:
+          - ratty
+          - ratty-vt
 
 env:
   CARGO_TERM_COLOR: always
@@ -14,25 +23,17 @@ concurrency:
 
 jobs:
   publish-crates-io:
-    name: Publish root crate
+    name: Publish crate
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout the repository
         uses: actions/checkout@v4
       - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            pkg-config \
-            libasound2-dev \
-            libfontconfig1-dev \
-            libudev-dev \
-            libwayland-dev \
-            libxkbcommon-dev \
-            libxkbcommon-x11-dev \
-            libxcb-shape0-dev \
-            libxcb-xfixes0-dev
+        uses: ./.github/actions/install-linux-deps
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Publish
-        run: cargo publish --locked --token ${{ secrets.CARGO_TOKEN }}
+        env:
+          PACKAGE: ${{ inputs.package || 'ratty' }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_TOKEN }}
+        run: cargo publish --locked --package "$PACKAGE"

@@ -217,8 +217,8 @@ Other useful cursor fields are:
 
 | Key                                                            | Action               |
 | -------------------------------------------------------------- | -------------------- |
-| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>C</kbd>                    | Copy selection       |
-| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>V</kbd>                    | Paste clipboard      |
+| <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd>                  | Copy selection       |
+| <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>V</kbd>                  | Paste clipboard      |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Enter</kbd>                | Toggle 2D / ortho 3D |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>P</kbd>                    | Toggle perspective   |
 | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>M</kbd>                    | Toggle Mobius mode   |
@@ -333,23 +333,36 @@ A blazingly fast serial monitor with plotter TUI and 3D telemetry
 ### Rendering pipeline
 
 The terminal surface currently uses [`ratatui`](https://github.com/ratatui/ratatui) for the UI buffer,
-[`parley_ratatui`](https://github.com/gold-silver-copper/parley_ratatui) for text shaping/rendering
+[`bevy_terminal_ratatui`](https://github.com/gold-silver-copper/bevy_terminal) for text shaping/rendering
 and [Bevy](https://bevyengine.org/) for scene presentation.
 
 Current workflow:
 
-1. PTY output is parsed by [`rio-vt`](https://crates.io/crates/rio-vt) and drawn into a Ratatui buffer on CPU
-2. `parley_ratatui` shapes the buffer with Parley and records it as a Vello scene
-3. The scene is handed to Bevy's render world through a double-buffered
-   exchange (scenes are recycled between frames, never cloned or re-recorded)
-4. Vello renders the scene on Bevy's render-world device into a plain
-   `Rgba8Unorm` storage texture, with no CPU readback in between
-5. That storage texture is copied into an `Rgba8UnormSrgb` present texture
-   (sampled through an sRGB view, so Vello's sRGB-encoded output is decoded on
-   sample instead of re-encoded), which Bevy presents in the 2D and 3D scenes
+1. PTY output is parsed by the [`ratty-vt` workspace crate](crates/ratty-vt/README.md) (Ratty's fork of [`vt100`](https://github.com/doy/vt100-rust)) and drawn into a Ratatui buffer on CPU
+2. `bevy_terminal_ratatui` translates Ratatui's changed cells into a retained terminal surface
+3. `bevy_terminal` shapes text with Bevy's font system and incrementally builds compact background,
+   decoration, cursor, and glyph quads
+4. Bevy's render world draws those quads into a renderer-owned `Rgba8UnormSrgb` texture
+5. Ratty presents that stable texture handle in its flat, plane, perspective, and Mobius scenes
 
 The terminal image is fully GPU-resident: the only data crossing from the main
-world to the render world each frame is the recorded scene, not pixels.
+world to the render world each frame is compact scene data, not pixels.
+
+### Workspace development
+
+The Cargo workspace contains the Ratty application and the independent
+[`ratty-vt`](crates/ratty-vt/README.md) terminal engine. The widget remains a
+separate package under `widget/` with its own lockfile.
+
+```sh
+cargo test -p ratty-vt --locked      # Engine tests without building Bevy
+cargo test --workspace --locked     # Application, engine, and doctests
+cargo package --workspace --locked  # Verify both packages together
+```
+
+Ratty uses a local path dependency during development and a versioned
+`ratty-vt` dependency when published. See the engine's
+[publishing instructions](crates/ratty-vt/README.md#publishing) for release order.
 
 ## Touchscreen
 

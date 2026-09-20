@@ -68,18 +68,7 @@ jobs:
         uses: actions/checkout@v4
       - name: Install system dependencies
         if: startsWith(matrix.os, 'ubuntu-')
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            pkg-config \
-            libasound2-dev \
-            libfontconfig1-dev \
-            libudev-dev \
-            libwayland-dev \
-            libxkbcommon-dev \
-            libxkbcommon-x11-dev \
-            libxcb-shape0-dev \
-            libxcb-xfixes0-dev
+        uses: ./.github/actions/install-linux-deps
       - name: Install Rust stable with target
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -87,33 +76,87 @@ jobs:
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
       - name: Run cargo check
-        run: cargo check --manifest-path ${{ matrix.manifest }} --target ${{ matrix.target }}
+        run: cargo check --workspace --locked --manifest-path ${{ matrix.manifest }} --target ${{ matrix.target }}
 
   test:
-    name: Test library
+    name: Test workspace
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            pkg-config \
-            libasound2-dev \
-            libfontconfig1-dev \
-            libudev-dev \
-            libwayland-dev \
-            libxkbcommon-dev \
-            libxkbcommon-x11-dev \
-            libxcb-shape0-dev \
-            libxcb-xfixes0-dev
+        uses: ./.github/actions/install-linux-deps
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
-      - name: Run library tests
-        run: cargo test --lib --locked
+      - name: Run workspace tests and doctests
+        run: cargo test --workspace --locked
+
+  package:
+    name: Package workspace crates
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install system dependencies
+        uses: ./.github/actions/install-linux-deps
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+      - name: Verify package
+        run: cargo package --workspace --locked
+
+  gpu-smoke:
+    name: Headless renderer smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+      # Share dependency artifacts between Ratty and the widget examples.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      WGPU_BACKEND: vulkan
+      WGPU_FORCE_FALLBACK_ADAPTER: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install system dependencies
+        uses: ./.github/actions/install-linux-deps
+      - name: Install software Vulkan and test fonts
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            libvulkan1 mesa-vulkan-drivers vulkan-tools fonts-dejavu-core
+          drivers=(/usr/share/vulkan/icd.d/lvp_icd*.json)
+          test -f "${drivers[0]}"
+          printf 'VK_DRIVER_FILES=%s\n' "${drivers[0]}" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/xdg-runtime"
+          chmod 700 "$RUNNER_TEMP/xdg-runtime"
+          printf 'XDG_RUNTIME_DIR=%s\n' "$RUNNER_TEMP/xdg-runtime" >> "$GITHUB_ENV"
+      - name: Verify software Vulkan availability
+        run: vulkaninfo --summary
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+      - name: Build capture and widget examples
+        run: |
+          cargo build --locked --example headless_snapshot
+          cargo build --manifest-path widget/Cargo.toml --locked --example document --example render_test
+      - name: Capture and validate renderer smoke cases
+        timeout-minutes: 15
+        run: python3 .github/scripts/headless-smoke.py --output "$RUNNER_TEMP/headless-smoke"
+      - name: Upload captures and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: headless-renderer-smoke
+          path: ${{ runner.temp }}/headless-smoke
+          retention-days: 7
 
   clippy:
     name: Clippy (${{ matrix.manifest }})
@@ -128,18 +171,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            pkg-config \
-            libasound2-dev \
-            libfontconfig1-dev \
-            libudev-dev \
-            libwayland-dev \
-            libxkbcommon-dev \
-            libxkbcommon-x11-dev \
-            libxcb-shape0-dev \
-            libxcb-xfixes0-dev
+        uses: ./.github/actions/install-linux-deps
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -147,4 +179,4 @@ jobs:
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
       - name: Run clippy
-        run: cargo clippy --all-targets --manifest-path ${{ matrix.manifest }} -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked --manifest-path ${{ matrix.manifest }} -- -D warnings

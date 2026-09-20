@@ -17,7 +17,7 @@ use ratty::control::TerminalControl;
 use ratty::paths::runtime_asset_root;
 use ratty::plugin::TerminalPlugin;
 use ratty::runtime::{RuntimeOptions, TerminalRuntime};
-use ratty::terminal::TerminalSurface;
+use ratty::terminal::{TerminalSurface, load_configured_font_faces};
 
 // Matches the default icon id used by `winresource::WindowsResource::set_icon`.
 #[cfg(target_os = "windows")]
@@ -106,10 +106,12 @@ fn main() -> anyhow::Result<()> {
                 file_path: asset_root.to_string_lossy().into_owned(),
                 ..default()
             }),
-    )
-    .add_systems(Update, apply_window_icon)
-    .add_plugins(TerminalPlugin)
-    .run();
+    );
+    let font_faces = load_configured_font_faces(&mut app, &app_config.font)?;
+    app.insert_resource(font_faces)
+        .add_systems(Update, apply_window_icon)
+        .add_plugins(TerminalPlugin)
+        .run();
 
     Ok(())
 }
@@ -118,12 +120,12 @@ fn main() -> anyhow::Result<()> {
 fn apply_window_icon(
     mut window_created_events: MessageReader<WindowCreated>,
     app_icon: NonSend<AppWindowIcon>,
-    mut primary_windows: Query<&mut Window, With<PrimaryWindow>>,
+    primary_windows: Query<(), With<PrimaryWindow>>,
 ) {
     for event in window_created_events.read() {
-        let Ok(mut primary_window) = primary_windows.get_mut(event.window) else {
+        if !primary_windows.contains(event.window) {
             continue;
-        };
+        }
 
         WINIT_WINDOWS.with(|winit_windows| {
             let winit_windows = winit_windows.borrow();
@@ -137,11 +139,8 @@ fn apply_window_icon(
                 #[cfg(target_os = "windows")]
                 window.set_taskbar_icon(Some(icon.clone()));
             }
-
-            if !primary_window.visible {
-                window.set_visible(true);
-                primary_window.visible = true;
-            }
+            // The window stays hidden until `sync_terminal_render_output`
+            // has a measured, correctly sized terminal texture to show.
         });
     }
 }

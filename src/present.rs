@@ -5,7 +5,7 @@
 //! mapping happens to be exactly 1:1), this presents it with a fullscreen quad
 //! whose fragment shader fetches each texel by physical pixel coordinate
 //! (`textureLoad`). That is an identity sample — crisp at every font size and
-//! DPI — modeled on linebender/bevy_vello's render-target present.
+//! DPI.
 //!
 //! The 3D plane path is unchanged; it still samples the texture as a material on
 //! transformable geometry, where sampling is unavoidable.
@@ -29,7 +29,7 @@ const TERMINAL_PRESENT_SHADER: Handle<Shader> =
 /// Sampled via `textureLoad` in the shader, so no sampler binding is needed.
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
 pub struct TerminalPresentMaterial {
-    /// The terminal present texture (an `Rgba8Unorm` texture with an sRGB view).
+    /// The renderer-owned terminal texture (an `Rgba8UnormSrgb` image).
     #[texture(0)]
     pub texture: Handle<Image>,
 }

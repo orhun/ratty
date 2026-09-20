@@ -15,7 +15,7 @@ use crate::rgp::{
     consume_sequence as consume_rgp_sequence, support_reply,
 };
 use crate::runtime::TerminalRuntime;
-use crate::vt::{self, VtTerminal};
+use ratty_vt::Screen;
 
 const APC_START: &[u8] = b"\x1b_";
 const ST: &[u8] = b"\x1b\\";
@@ -124,7 +124,7 @@ impl TerminalInlineObjects {
             let sequence = self.pending_bytes[start..end].to_vec();
             let (handled, reply) = self.handle_apc_sequence(
                 &sequence,
-                vt::cursor_position(&runtime.term),
+                runtime.screen().cursor_position(),
                 camera_updates,
             );
             if let Some(reply) = reply {
@@ -188,8 +188,8 @@ impl TerminalInlineObjects {
     }
 
     /// Refreshes placeholder-derived Kitty anchors.
-    pub fn refresh_placeholder_anchors(&mut self, term: &VtTerminal) {
-        if refresh_kitty_placeholder_anchors(&self.objects, &mut self.anchors, term) {
+    pub fn refresh_placeholder_anchors(&mut self, screen: &Screen) {
+        if refresh_kitty_placeholder_anchors(&self.objects, &mut self.anchors, screen) {
             self.dirty = true;
         }
     }
