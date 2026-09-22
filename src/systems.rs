@@ -234,6 +234,7 @@ pub fn drain_pty_output(
                     inline_objects.apply_scroll(scrolled);
                 }
                 inline_objects.refresh_placeholder_anchors(runtime.screen());
+                runtime.record_output_batch();
             }
             Err(TryRecvError::Empty) => break,
             Err(TryRecvError::Disconnected) => {

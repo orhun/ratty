@@ -136,7 +136,8 @@ codex mcp add ratty -- /absolute/path/to/ratty/target/release/ratty-mcp
 The MCP tools can:
 
 - inspect all live window, grid, camera, warp, and rat-cursor state
-- read the visible terminal screen and type or submit exact PTY input
+- observe Unicode-safe positioned terminal runs, styles, wrapping, cursor, and input modes
+- write exact UTF-8 text, use bracketed paste, or press structured terminal keys
 - resize the native window or exact PTY row/column grid and change font size
 - move the window, rename it, and change its background colour
 - switch among flat, orthographic, perspective, and Möbius modes
@@ -159,14 +160,16 @@ three times faster with a height of 0.7 cells.
 Fold the terminal into a deep asymmetric saddle using a 4x4 custom control-point lattice,
 then choose a camera angle where I can still read it.
 
-Read the terminal, type `cargo check`, press Enter, then read the visible result.
+Observe the terminal, type `cargo check`, press Enter, then observe the visible result.
 ```
 
 Every configuration argument is optional, so an agent can change one property without resetting
-the others. `terminal_state` returns the current values; `read_terminal` reads the visible grid;
-`send_input` types into the PTY; and `set_view`, `set_cursor`, `set_window`, and `set_terminal`
-apply partial updates. Camera slots `0` through `9` are persistent for the lifetime of the window,
-which lets an agent build multiple views and switch between them instantly.
+the others. `terminal_state` returns runtime state and activity counters; `observe` returns the
+visible grid as positioned terminal-cell runs without reparsing Unicode; `type_text` writes exact
+UTF-8 without appending Enter; and `press` uses the same mode-aware key encoder as local input.
+`set_view`, `set_cursor`, `set_window`, and `set_terminal` apply partial presentation updates.
+Camera slots `0` through `9` are persistent for the lifetime of the window, which lets an agent
+build multiple views and switch between them instantly.
 
 `set_shape` changes the terminal's actual vertex surface. `kind = "custom"` accepts a row-major
 lattice of 2×2 through 8×8 XYZ control points. X and Y are normalized terminal coordinates

@@ -70,7 +70,9 @@ impl Plugin for TerminalPlugin {
             .add_systems(Update, pump_pty_output)
             .add_systems(
                 Update,
-                pump_control_commands.run_if(resource_exists::<crate::control::TerminalControl>),
+                pump_control_commands
+                    .after(pump_pty_output)
+                    .run_if(resource_exists::<crate::control::TerminalControl>),
             )
             .configure_sets(
                 Update,

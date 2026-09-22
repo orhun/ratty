@@ -1,9 +1,11 @@
 //! MCP stdio facade for a live Ratty terminal.
 
 use ratty::control::{
-    ControlClient, ControlCommand, ControlSurfaceKind, ControlViewMode, CursorUpdate, ShapeUpdate,
-    TerminalUpdate, ViewUpdate, WindowUpdate,
+    ControlClient, ControlCommand, ControlSurfaceKind, ControlViewMode, CursorUpdate,
+    PressKeysRequest, ScreenSnapshot, ShapeUpdate, SnapshotRect, SnapshotRequest, TerminalUpdate,
+    ViewUpdate, WindowUpdate, WriteTextRequest,
 };
+use ratty::keyboard::NormalizedKey;
 use rmcp::{
     ServerHandler, ServiceExt,
     handler::server::wrapper::Parameters,
@@ -11,31 +13,84 @@ use rmcp::{
     schemars, tool, tool_handler, tool_router,
 };
 use serde::Deserialize;
+use std::sync::{Arc, Mutex};
 
-#[derive(Clone, Debug)]
-struct RattyMcp;
+#[derive(Debug, Default)]
+struct ObservationCache {
+    revision: u64,
+    snapshot: Option<ScreenSnapshot>,
+}
+
+impl ObservationCache {
+    fn assign_revision(&mut self, snapshot: &mut ScreenSnapshot) {
+        snapshot.screen_revision = 0;
+        if self.snapshot.as_ref() != Some(snapshot) {
+            self.revision = self.revision.saturating_add(1);
+            self.snapshot = Some(snapshot.clone());
+        }
+        snapshot.screen_revision = self.revision;
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct RattyMcp {
+    observations: Arc<Mutex<ObservationCache>>,
+}
+
+fn call_value(command: ControlCommand) -> Result<serde_json::Value, String> {
+    let response = ControlClient::request(command).map_err(|error| error.to_string())?;
+    Ok(response.result.unwrap_or(serde_json::Value::Null))
+}
 
 fn call(command: ControlCommand) -> Result<String, String> {
-    let response = ControlClient::request(command).map_err(|error| error.to_string())?;
-    serde_json::to_string_pretty(&response.data.unwrap_or(serde_json::Value::Null))
-        .map_err(|error| error.to_string())
+    serde_json::to_string_pretty(&call_value(command)?).map_err(|error| error.to_string())
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct ReadTerminalParams {
-    /// Return only this many rows from the bottom of the visible screen.
+struct ObserveRect {
+    /// First absolute terminal row.
+    row: u16,
+    /// First absolute terminal column.
+    column: u16,
+    /// Number of terminal rows.
     #[schemars(range(min = 1, max = 1000))]
-    last_lines: Option<u16>,
+    rows: u16,
+    /// Number of terminal columns.
+    #[schemars(range(min = 1, max = 1000))]
+    columns: u16,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct SendInputParams {
-    /// Exact UTF-8 text to type into the active terminal application.
+struct ObserveParams {
+    /// Restrict returned content while preserving absolute cell coordinates.
+    rect: Option<ObserveRect>,
+    /// Include the deduplicated style table. Run style indices are always present.
+    #[serde(default)]
+    include_styles: bool,
+    /// Include a convenience plain-text value derived from positioned runs.
+    #[serde(default = "default_true")]
+    include_plain: bool,
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct TypeTextParams {
+    /// Exact UTF-8 text to write. Enter is never appended.
     #[schemars(length(max = 65536))]
     text: String,
-    /// Press Enter after typing the text.
-    #[serde(default)]
-    submit: bool,
+    /// Add bracketed-paste delimiters when the application enabled that mode.
+    #[serde(default = "default_true")]
+    paste: bool,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct PressParams {
+    /// Ordered normalized key presses.
+    #[schemars(length(max = 256))]
+    keys: Vec<NormalizedKey>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, schemars::JsonSchema)]
@@ -186,32 +241,64 @@ impl RattyMcp {
         description = "Inspect the live Ratty terminal's dimensions, PTY status, and camera/warp state"
     )]
     fn terminal_state(&self) -> Result<String, String> {
-        call(ControlCommand::GetState)
+        call(ControlCommand::GetState {})
     }
 
-    /// Read text currently visible in the terminal window (not full scrollback).
-    #[tool(description = "Read the text currently visible in the live Ratty terminal window")]
-    fn read_terminal(
-        &self,
-        Parameters(params): Parameters<ReadTerminalParams>,
-    ) -> Result<String, String> {
-        call(ControlCommand::ReadScreen {
-            last_lines: params.last_lines,
-        })
-    }
-
-    /// Type into the active terminal application, optionally followed by Enter.
+    /// Observe the exact positioned runs currently visible in Ratty.
     #[tool(
-        description = "Type exact text into the active Ratty PTY; submit=true also presses Enter and may execute it"
+        description = "Observe Ratty's visible terminal grid as Unicode-safe positioned runs with cursor and input modes"
     )]
-    fn send_input(
-        &self,
-        Parameters(params): Parameters<SendInputParams>,
-    ) -> Result<String, String> {
-        call(ControlCommand::SendInput {
+    fn observe(&self, Parameters(params): Parameters<ObserveParams>) -> Result<String, String> {
+        if params
+            .rect
+            .as_ref()
+            .is_some_and(|rect| rect.rows == 0 || rect.columns == 0)
+        {
+            return Err("observation rectangle dimensions must be non-zero".into());
+        }
+        let value = call_value(ControlCommand::Snapshot(SnapshotRequest {
+            rect: None,
+            include_styles: true,
+            include_plain: false,
+        }))?;
+        let mut snapshot: ScreenSnapshot =
+            serde_json::from_value(value).map_err(|error| error.to_string())?;
+        {
+            let mut cache = self
+                .observations
+                .lock()
+                .map_err(|_| "observation cache lock is poisoned".to_owned())?;
+            cache.assign_revision(&mut snapshot);
+        }
+        let rect = params.rect.map(|rect| SnapshotRect {
+            row: rect.row,
+            column: rect.column,
+            rows: rect.rows,
+            columns: rect.columns,
+        });
+        let snapshot = snapshot.into_view(rect, params.include_styles, params.include_plain);
+        serde_json::to_string_pretty(&snapshot).map_err(|error| error.to_string())
+    }
+
+    /// Write exact UTF-8 text without appending Enter.
+    #[tool(
+        description = "Write exact UTF-8 text into Ratty; optionally use bracketed paste when the application enabled it; never appends Enter"
+    )]
+    fn type_text(&self, Parameters(params): Parameters<TypeTextParams>) -> Result<String, String> {
+        call(ControlCommand::WriteText(WriteTextRequest {
             text: params.text,
-            submit: params.submit,
-        })
+            paste: params.paste,
+        }))
+    }
+
+    /// Send normalized special or printable keys through Ratty's keyboard encoder.
+    #[tool(
+        description = "Press normalized terminal keys using Ratty's active application-cursor, Kitty keyboard, and modifyOtherKeys modes"
+    )]
+    fn press(&self, Parameters(params): Parameters<PressParams>) -> Result<String, String> {
+        call(ControlCommand::PressKeys(PressKeysRequest {
+            keys: params.keys,
+        }))
     }
 
     /// Change any subset of the camera and surface warp parameters in real time.
@@ -219,22 +306,20 @@ impl RattyMcp {
         description = "Warp Ratty or change its flat, orthographic, perspective, or Mobius camera in real time"
     )]
     fn set_view(&self, Parameters(params): Parameters<SetViewParams>) -> Result<String, String> {
-        call(ControlCommand::SetView {
-            update: ViewUpdate {
-                slot: params.slot,
-                activate: params.activate,
-                mode: params.mode.map(Into::into),
-                warp: params.warp,
-                yaw_degrees: params.yaw_degrees,
-                pitch_degrees: params.pitch_degrees,
-                roll_degrees: params.roll_degrees,
-                zoom: params.zoom,
-                fov_degrees: params.fov_degrees,
-                x: params.x,
-                y: params.y,
-                z: params.z,
-            },
-        })
+        call(ControlCommand::SetView(ViewUpdate {
+            slot: params.slot,
+            activate: params.activate,
+            mode: params.mode.map(Into::into),
+            warp: params.warp,
+            yaw_degrees: params.yaw_degrees,
+            pitch_degrees: params.pitch_degrees,
+            roll_degrees: params.roll_degrees,
+            zoom: params.zoom,
+            fov_degrees: params.fov_degrees,
+            x: params.x,
+            y: params.y,
+            z: params.z,
+        }))
     }
 
     /// Reconfigure the rat cursor model and its motion live.
@@ -245,18 +330,16 @@ impl RattyMcp {
         &self,
         Parameters(params): Parameters<SetCursorParams>,
     ) -> Result<String, String> {
-        call(ControlCommand::SetCursor {
-            update: CursorUpdate {
-                visible: params.visible,
-                scale: params.scale,
-                x_offset: params.x_offset,
-                depth: params.depth,
-                brightness: params.brightness,
-                spin_speed: params.spin_speed,
-                jump_speed: params.jump_speed,
-                jump_height: params.jump_height,
-            },
-        })
+        call(ControlCommand::SetCursor(CursorUpdate {
+            visible: params.visible,
+            scale: params.scale,
+            x_offset: params.x_offset,
+            depth: params.depth,
+            brightness: params.brightness,
+            spin_speed: params.spin_speed,
+            jump_speed: params.jump_speed,
+            jump_height: params.jump_height,
+        }))
     }
 
     /// Reconfigure the native window live.
@@ -267,16 +350,14 @@ impl RattyMcp {
         &self,
         Parameters(params): Parameters<SetWindowParams>,
     ) -> Result<String, String> {
-        call(ControlCommand::SetWindow {
-            update: WindowUpdate {
-                width: params.width,
-                height: params.height,
-                x: params.x,
-                y: params.y,
-                title: params.title,
-                background_rgb: params.background_rgb,
-            },
-        })
+        call(ControlCommand::SetWindow(WindowUpdate {
+            width: params.width,
+            height: params.height,
+            x: params.x,
+            y: params.y,
+            title: params.title,
+            background_rgb: params.background_rgb,
+        }))
     }
 
     /// Reconfigure the terminal grid and typography live.
@@ -287,13 +368,11 @@ impl RattyMcp {
         &self,
         Parameters(params): Parameters<SetTerminalParams>,
     ) -> Result<String, String> {
-        call(ControlCommand::SetTerminal {
-            update: TerminalUpdate {
-                columns: params.columns,
-                rows: params.rows,
-                font_size: params.font_size,
-            },
-        })
+        call(ControlCommand::SetTerminal(TerminalUpdate {
+            columns: params.columns,
+            rows: params.rows,
+            font_size: params.font_size,
+        }))
     }
 
     /// Define an agent-controlled terminal surface or restore the normal view surface.
@@ -301,15 +380,13 @@ impl RattyMcp {
         description = "Define the terminal's 3D surface with a custom control-point lattice, or restore the normal plane/Mobius view surface"
     )]
     fn set_shape(&self, Parameters(params): Parameters<SetShapeParams>) -> Result<String, String> {
-        call(ControlCommand::SetShape {
-            update: ShapeUpdate {
-                kind: params.kind.into(),
-                amplitude: params.amplitude,
-                control_columns: params.control_columns,
-                control_rows: params.control_rows,
-                control_points: params.control_points,
-            },
-        })
+        call(ControlCommand::SetShape(ShapeUpdate {
+            kind: params.kind.into(),
+            amplitude: params.amplitude,
+            control_columns: params.control_columns,
+            control_rows: params.control_rows,
+            control_points: params.control_points,
+        }))
     }
 }
 
@@ -319,9 +396,10 @@ impl ServerHandler for RattyMcp {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("ratty", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "Control the live Ratty terminal. Inspect state before making visual changes. \
-                 send_input types into the active PTY and can execute commands when submit=true, \
-                 so use it only when the user intends terminal interaction. Visual changes are \
+                "Observe and control the live Ratty terminal. Use observe for exact positioned \
+                 terminal content, type_text for UTF-8 text without an implicit Enter, and press \
+                 for structured keys. Input reaches the active PTY and may execute commands, so \
+                 send it only when the user intends terminal interaction. Visual changes are \
                  applied on Ratty's next frame.",
             )
     }
@@ -329,7 +407,55 @@ impl ServerHandler for RattyMcp {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let server = RattyMcp.serve(rmcp::transport::stdio()).await?;
+    let server = RattyMcp::default().serve(rmcp::transport::stdio()).await?;
     server.waiting().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_snapshot() -> ScreenSnapshot {
+        serde_json::from_value(serde_json::json!({
+            "screen_revision": 0,
+            "columns": 80,
+            "rows": 24,
+            "content": [],
+            "cursor": { "row": 0, "column": 0, "visible": true },
+            "modes": {
+                "alternate_screen": false,
+                "application_cursor": false,
+                "application_keypad": false,
+                "bracketed_paste": false,
+                "mouse_protocol": "none",
+                "mouse_encoding": "default",
+                "kitty_keyboard_flags": 0,
+                "modify_other_keys": null
+            }
+        }))
+        .expect("test snapshot must deserialize")
+    }
+
+    #[test]
+    fn observation_revisions_change_only_with_observable_state() {
+        let mut cache = ObservationCache::default();
+        let mut first = empty_snapshot();
+        cache.assign_revision(&mut first);
+        assert_eq!(first.screen_revision, 1);
+
+        let mut same = empty_snapshot();
+        cache.assign_revision(&mut same);
+        assert_eq!(same.screen_revision, 1);
+
+        let mut moved_cursor = empty_snapshot();
+        moved_cursor.cursor.column = 1;
+        cache.assign_revision(&mut moved_cursor);
+        assert_eq!(moved_cursor.screen_revision, 2);
+
+        let mut changed_mode = moved_cursor.clone();
+        changed_mode.modes.bracketed_paste = true;
+        cache.assign_revision(&mut changed_mode);
+        assert_eq!(changed_mode.screen_revision, 3);
+    }
 }
