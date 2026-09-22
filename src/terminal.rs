@@ -276,6 +276,28 @@ impl TerminalSurface {
         self.font_size
     }
 
+    /// Sets the font size, updating the renderer configuration when it changes.
+    pub fn set_font_size(&mut self, size: i32) -> bool {
+        let size = size.max(1);
+        if size == self.font_size {
+            return false;
+        }
+        self.render_config.font_size = FontSizing::Px(points_to_logical_pixels(size));
+        self.font_size = size;
+        true
+    }
+
+    /// Updates the renderer's default background colour.
+    pub fn set_background(&mut self, rgb: [u8; 3]) {
+        let alpha = self.render_config.theme.background.to_srgba().alpha;
+        self.render_config.theme.background = Color::srgba_u8(
+            rgb[0],
+            rgb[1],
+            rgb[2],
+            (alpha.clamp(0.0, 1.0) * 255.0).round() as u8,
+        );
+    }
+
     /// Updates the physical render scale; returns whether it changed.
     pub(crate) fn set_render_scale(&mut self, render_scale: f32) -> bool {
         let render_scale = render_scale.max(1.0);

@@ -13,6 +13,7 @@ use winit::window::Icon;
 
 use ratty::cli::Cli;
 use ratty::config::{AppConfig, UpdateModeConfig};
+use ratty::control::TerminalControl;
 use ratty::paths::runtime_asset_root;
 use ratty::plugin::TerminalPlugin;
 use ratty::runtime::{RuntimeOptions, TerminalRuntime};
@@ -54,7 +55,12 @@ fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(&asset_root)?;
     let window_icon = load_window_icon()?;
 
+    let control = cli.mcp.then(TerminalControl::spawn).transpose()?;
+
     let mut app = App::new();
+    if let Some(control) = control {
+        app.insert_resource(control);
+    }
     app.insert_resource(ClearColor(Color::srgba_u8(
         app_config.theme.background[0],
         app_config.theme.background[1],

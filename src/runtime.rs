@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use bevy::platform::cell::SyncCell;
@@ -191,6 +192,11 @@ pub struct TerminalRuntime {
     pub parser: Parser<TerminalParserCallbacks>,
     /// Indicates PTY shutdown.
     pub pty_disconnected: bool,
+    output_sequence: u64,
+    human_input_sequence: u64,
+    agent_input_sequence: u64,
+    last_output_at: Option<Instant>,
+    child_exit_code: Option<u32>,
     shutdown_started: bool,
     /// Last dimensions successfully applied to the PTY.
     last_pty_size: PtyDimensions,
@@ -370,6 +376,11 @@ impl TerminalRuntime {
             reader_thread: Some(reader_thread),
             parser,
             pty_disconnected: false,
+            output_sequence: 0,
+            human_input_sequence: 0,
+            agent_input_sequence: 0,
+            last_output_at: None,
+            child_exit_code: None,
             shutdown_started: false,
             last_pty_size: (cols, rows, 0, 0),
             last_parser_size: (cols, rows),
@@ -380,6 +391,13 @@ impl TerminalRuntime {
     /// Feeds bytes from the PTY into the VT state machine.
     pub fn process(&mut self, bytes: &[u8]) {
         self.parser.process(bytes);
+    }
+
+    /// Records one PTY output batch, including batches containing only
+    /// graphics or control protocol data that do not change visible cells.
+    pub fn record_output_batch(&mut self) {
+        self.output_sequence = self.output_sequence.saturating_add(1);
+        self.last_output_at = Some(Instant::now());
     }
 
     /// Returns the terminal screen.
@@ -414,6 +432,26 @@ impl TerminalRuntime {
 
     /// Writes input bytes to the PTY.
     pub fn write_input(&self, bytes: &[u8]) {
+        self.write_input_bytes(bytes);
+    }
+
+    /// Writes input accepted from Ratty's local keyboard or mouse.
+    pub fn write_human_input(&mut self, bytes: &[u8]) {
+        if !bytes.is_empty() {
+            self.human_input_sequence = self.human_input_sequence.saturating_add(1);
+        }
+        self.write_input_bytes(bytes);
+    }
+
+    /// Writes input accepted from the authenticated control endpoint.
+    pub fn write_agent_input(&mut self, bytes: &[u8]) {
+        if !bytes.is_empty() {
+            self.agent_input_sequence = self.agent_input_sequence.saturating_add(1);
+        }
+        self.write_input_bytes(bytes);
+    }
+
+    fn write_input_bytes(&self, bytes: &[u8]) {
         if bytes.is_empty() {
             return;
         }
@@ -424,6 +462,37 @@ impl TerminalRuntime {
             let _ = writer.write_all(bytes);
             let _ = writer.flush();
         }
+    }
+
+    /// Returns the number of PTY output batches processed by Ratty.
+    pub const fn output_sequence(&self) -> u64 {
+        self.output_sequence
+    }
+
+    /// Returns the number of accepted local keyboard or mouse inputs.
+    pub const fn human_input_sequence(&self) -> u64 {
+        self.human_input_sequence
+    }
+
+    /// Returns the number of accepted authenticated remote inputs.
+    pub const fn agent_input_sequence(&self) -> u64 {
+        self.agent_input_sequence
+    }
+
+    /// Returns the elapsed time since Ratty processed PTY output.
+    pub fn elapsed_since_output(&self) -> Option<Duration> {
+        self.last_output_at.map(|instant| instant.elapsed())
+    }
+
+    /// Polls and returns the child process exit code when available.
+    pub fn child_exit_code(&mut self) -> Option<u32> {
+        if self.child_exit_code.is_none()
+            && let Some(child) = self.child.as_mut()
+            && let Ok(Some(status)) = child.try_wait()
+        {
+            self.child_exit_code = Some(status.exit_code());
+        }
+        self.child_exit_code
     }
 
     /// Resizes the PTY and parser screen.
@@ -694,6 +763,11 @@ mod resize_tests {
             reader_thread: None,
             parser: Parser::new_with_callbacks(24, 80, 100, TerminalParserCallbacks::default()),
             pty_disconnected: false,
+            output_sequence: 0,
+            human_input_sequence: 0,
+            agent_input_sequence: 0,
+            last_output_at: None,
+            child_exit_code: None,
             shutdown_started: false,
             last_pty_size: (80, 24, 0, 0),
             last_parser_size: (80, 24),
@@ -749,5 +823,25 @@ mod resize_tests {
         assert_eq!(attempts.load(Ordering::SeqCst), 3);
         assert_eq!(runtime.last_pty_size, (100, 30, 900, 600));
         assert_eq!(runtime.last_parser_size, (100, 30));
+    }
+
+    #[test]
+    fn activity_sequences_count_output_and_input_sources_independently() {
+        let attempts = Arc::new(AtomicUsize::new(1));
+        let applied_size = Arc::new(Mutex::new(None));
+        let mut runtime = test_runtime(Box::new(FailOnceMaster {
+            attempts,
+            applied_size,
+        }));
+        assert!(runtime.elapsed_since_output().is_none());
+        runtime.record_output_batch();
+        runtime.record_output_batch();
+        runtime.write_human_input(b"a");
+        runtime.write_human_input(b"");
+        runtime.write_agent_input("界".as_bytes());
+        assert_eq!(runtime.output_sequence(), 2);
+        assert!(runtime.elapsed_since_output().is_some());
+        assert_eq!(runtime.human_input_sequence(), 1);
+        assert_eq!(runtime.agent_input_sequence(), 1);
     }
 }

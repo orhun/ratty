@@ -9,6 +9,7 @@
 pub mod camera;
 pub mod cli;
 pub mod config;
+pub mod control;
 pub mod inline;
 pub mod keyboard;
 pub mod kitty;

@@ -16,6 +16,10 @@ pub const DEFAULT_WINDOW_TITLE: &str = "Ratty";
     trailing_var_arg = true
 )]
 pub struct Cli {
+    /// Enable the authenticated local control socket used by `ratty-mcp`.
+    #[arg(long)]
+    pub mcp: bool,
+
     /// Specify an alternative configuration file.
     #[arg(short = 'c', long = "config-file", value_name = "CONFIG_FILE")]
     pub config_file: Option<PathBuf>,
