@@ -13,11 +13,41 @@ use rmcp::{
     schemars, tool, tool_handler, tool_router,
 };
 use serde::Deserialize;
+use std::time::Instant;
+
 #[derive(Clone, Debug, Default)]
 struct RattyMcp;
 
 fn call_value(command: ControlCommand) -> Result<serde_json::Value, String> {
-    let response = ControlClient::request(command).map_err(|error| error.to_string())?;
+    let command_name = match &command {
+        ControlCommand::GetState {} => "terminal_state",
+        ControlCommand::Snapshot(_) => "observe",
+        ControlCommand::WriteText(_) => "type_text",
+        ControlCommand::PressKeys(_) => "press",
+        ControlCommand::Resize(_) => "resize",
+        ControlCommand::Close {} => "close",
+        ControlCommand::SetView(_) => "set_view",
+        ControlCommand::SetCursor(_) => "set_cursor",
+        ControlCommand::SetWindow(_) => "set_window",
+        ControlCommand::SetTerminal(_) => "set_terminal",
+        ControlCommand::SetShape(_) => "set_shape",
+    };
+    let started = Instant::now();
+    eprintln!("ratty-mcp: {command_name} request started");
+    let response = match ControlClient::request(command) {
+        Ok(response) => response,
+        Err(error) => {
+            eprintln!(
+                "ratty-mcp: {command_name} request failed after {} ms: {error:#}",
+                started.elapsed().as_millis()
+            );
+            return Err(error.to_string());
+        }
+    };
+    eprintln!(
+        "ratty-mcp: {command_name} request completed in {} ms",
+        started.elapsed().as_millis()
+    );
     Ok(response.result.unwrap_or(serde_json::Value::Null))
 }
 
@@ -379,7 +409,13 @@ impl ServerHandler for RattyMcp {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    eprintln!(
+        "ratty-mcp {} starting (MCP over stdin/stdout)",
+        env!("CARGO_PKG_VERSION")
+    );
     let server = RattyMcp::default().serve(rmcp::transport::stdio()).await?;
+    eprintln!("ratty-mcp: MCP client initialized; waiting for tool requests");
     server.waiting().await?;
+    eprintln!("ratty-mcp stopped");
     Ok(())
 }
