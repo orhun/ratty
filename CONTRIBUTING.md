@@ -32,6 +32,13 @@ For larger changes or breaking behavior, open an issue first.
 cargo build
 ```
 
+For an optimized build that still rebuilds quickly after edits, use the
+`release-fast` profile (the binary lands in `target/release-fast/`):
+
+```bash
+cargo run --profile release-fast
+```
+
 3. Run checks before opening a PR:
 
 ```bash

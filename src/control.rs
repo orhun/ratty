@@ -15,6 +15,7 @@ use anyhow::{Context, bail};
 use bevy::platform::cell::SyncCell;
 use bevy::prelude::*;
 use etcetera::{BaseStrategy, choose_base_strategy};
+use fux_vt::{Blink, Color as VtColor, MouseProtocolEncoding, MouseProtocolMode};
 use serde::{Deserialize, Serialize};
 
 use crate::camera::{OptionalVec3, TerminalCameraSlots, TerminalCameraUpdate};
@@ -25,6 +26,7 @@ use crate::scene::{
     TerminalPlane, TerminalPlaneBack, TerminalPlaneWarp, TerminalPresentationMode, TerminalSprite,
     TerminalSurfaceKind, TerminalSurfaceShape, TerminalViewport, sync_terminal_layout,
 };
+use crate::screen::ScreenView;
 use crate::terminal::{TerminalRedrawState, TerminalSurface};
 
 const MAX_REQUEST_BYTES: u64 = 128 * 1024;
@@ -424,7 +426,7 @@ impl ControlResponse {
 }
 
 impl ScreenSnapshot {
-    fn from_screen(screen: &ratty_vt::Screen, request: &SnapshotRequest) -> Self {
+    fn from_screen(screen: ScreenView<'_>, request: &SnapshotRequest) -> Self {
         let (rows, columns) = screen.size();
         let (row_start, row_end, column_start, column_end) =
             request.rect.map_or((0, rows, 0, columns), |rect| {
@@ -447,7 +449,7 @@ impl ScreenSnapshot {
             let mut runs: Vec<SnapshotRun> = Vec::new();
             let mut graphics_placeholder = false;
             for column in 0..columns {
-                let Some(cell) = row.get(column) else {
+                let Some(cell) = row.cell(usize::from(column)) else {
                     break;
                 };
                 if cell.is_wide_continuation() {
@@ -458,7 +460,9 @@ impl ScreenSnapshot {
                     continue;
                 }
 
-                let placeholder = cell.contents().starts_with(ratty_vt::KITTY_PLACEHOLDER);
+                let placeholder = cell
+                    .contents()
+                    .starts_with(crate::screen::KITTY_PLACEHOLDER);
                 graphics_placeholder |= placeholder;
                 let style = snapshot_style(cell);
                 let meaningful_style = style != default_style;
@@ -506,13 +510,13 @@ impl ScreenSnapshot {
                 });
             }
 
-            if runs.is_empty() && !row.wrapped() && !graphics_placeholder {
+            if runs.is_empty() && !row.wrapped && !graphics_placeholder {
                 continue;
             }
             let plain = request.include_plain.then(|| plain_from_runs(&runs));
             content.push(SnapshotRow {
                 row: row_index,
-                wrapped: row.wrapped(),
+                wrapped: row.wrapped,
                 graphics_placeholder,
                 runs,
                 plain,
@@ -611,7 +615,7 @@ fn clip_run_to_columns(
     Some(run)
 }
 
-fn snapshot_style(cell: &ratty_vt::Cell) -> SnapshotStyle {
+fn snapshot_style(cell: fux_vt::CellRef<'_>) -> SnapshotStyle {
     SnapshotStyle {
         foreground: snapshot_color(cell.fgcolor()),
         background: snapshot_color(cell.bgcolor()),
@@ -622,9 +626,9 @@ fn snapshot_style(cell: &ratty_vt::Cell) -> SnapshotStyle {
         underline_color: snapshot_color(cell.underline_color()),
         inverse: cell.inverse(),
         blink: match cell.blink() {
-            ratty_vt::Blink::None => "none",
-            ratty_vt::Blink::Slow => "slow",
-            ratty_vt::Blink::Rapid => "rapid",
+            Blink::None => "none",
+            Blink::Slow => "slow",
+            Blink::Rapid => "rapid",
         }
         .into(),
         hidden: cell.hidden(),
@@ -632,29 +636,29 @@ fn snapshot_style(cell: &ratty_vt::Cell) -> SnapshotStyle {
     }
 }
 
-fn snapshot_color(color: ratty_vt::Color) -> String {
+fn snapshot_color(color: VtColor) -> String {
     match color {
-        ratty_vt::Color::Default => "default".into(),
-        ratty_vt::Color::Idx(index) => format!("indexed:{index}"),
-        ratty_vt::Color::Rgb(red, green, blue) => format!("rgb:{red},{green},{blue}"),
+        VtColor::Default => "default".into(),
+        VtColor::Idx(index) => format!("indexed:{index}"),
+        VtColor::Rgb(red, green, blue) => format!("rgb:{red},{green},{blue}"),
     }
 }
 
-const fn mouse_protocol_name(mode: ratty_vt::MouseProtocolMode) -> &'static str {
+const fn mouse_protocol_name(mode: MouseProtocolMode) -> &'static str {
     match mode {
-        ratty_vt::MouseProtocolMode::None => "none",
-        ratty_vt::MouseProtocolMode::Press => "press",
-        ratty_vt::MouseProtocolMode::PressRelease => "press_release",
-        ratty_vt::MouseProtocolMode::ButtonMotion => "button_motion",
-        ratty_vt::MouseProtocolMode::AnyMotion => "any_motion",
+        MouseProtocolMode::None => "none",
+        MouseProtocolMode::Press => "press",
+        MouseProtocolMode::PressRelease => "press_release",
+        MouseProtocolMode::ButtonMotion => "button_motion",
+        MouseProtocolMode::AnyMotion => "any_motion",
     }
 }
 
-const fn mouse_encoding_name(encoding: ratty_vt::MouseProtocolEncoding) -> &'static str {
+const fn mouse_encoding_name(encoding: MouseProtocolEncoding) -> &'static str {
     match encoding {
-        ratty_vt::MouseProtocolEncoding::Default => "default",
-        ratty_vt::MouseProtocolEncoding::Utf8 => "utf8",
-        ratty_vt::MouseProtocolEncoding::Sgr => "sgr",
+        MouseProtocolEncoding::Default => "default",
+        MouseProtocolEncoding::Utf8 => "utf8",
+        MouseProtocolEncoding::Sgr => "sgr",
     }
 }
 
@@ -1091,7 +1095,7 @@ fn apply_command(
                 return ControlResponse::coded_error("input_too_large", "input exceeds 64 KiB");
             }
             let bracketed = request.paste && runtime.screen().bracketed_paste();
-            let bytes = encode_agent_text(&request.text, request.paste, runtime.screen());
+            let bytes = encode_agent_text(&request.text, request.paste, &runtime.screen());
             let bytes_written = bytes.len();
             runtime.write_agent_input(&bytes);
             ControlResponse::data(serde_json::json!({
@@ -1117,7 +1121,7 @@ fn apply_command(
             let key_count = request.keys.len();
             let mut encoded = Vec::new();
             for key in &request.keys {
-                let bytes = match encode_normalized_key(key, runtime.screen()) {
+                let bytes = match encode_normalized_key(key, &runtime.screen()) {
                     Ok(bytes) => bytes,
                     Err(error) => return ControlResponse::error(error),
                 };
@@ -1500,14 +1504,15 @@ impl ControlClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fux_vt::Parser;
 
     fn snapshot(input: &str, rows: u16, columns: u16) -> ScreenSnapshot {
-        let mut parser = ratty_vt::Parser::new(rows, columns, 0);
+        let mut parser = Parser::new(rows, columns, 0).expect("parser");
         for chunk in input.as_bytes().chunks(1) {
-            parser.process(chunk);
+            parser.process(chunk).expect("process");
         }
         ScreenSnapshot::from_screen(
-            parser.screen(),
+            ScreenView::new(parser.screen(), 0),
             &SnapshotRequest {
                 rect: None,
                 include_styles: true,
@@ -1708,11 +1713,11 @@ mod tests {
 
     #[test]
     fn snapshot_never_starts_a_run_on_a_continuation_cell() {
-        let mut parser = ratty_vt::Parser::new(2, 5, 0);
-        parser.process("abc界界".as_bytes());
+        let mut parser = Parser::new(2, 5, 0).expect("parser");
+        parser.process("abc界界".as_bytes()).expect("process");
         let screen = parser.screen();
         let snapshot = ScreenSnapshot::from_screen(
-            screen,
+            ScreenView::new(screen, 0),
             &SnapshotRequest {
                 rect: None,
                 include_styles: true,
@@ -1751,7 +1756,7 @@ mod tests {
 
     #[test]
     fn snapshot_keeps_styled_blanks_wrapping_and_graphics_metadata() {
-        let placeholder = ratty_vt::KITTY_PLACEHOLDER;
+        let placeholder = crate::screen::KITTY_PLACEHOLDER;
         let snapshot = snapshot(&format!("\x1b[44m \x1b[mab{placeholder}c"), 3, 3);
         assert!(snapshot.content.iter().any(|row| row.wrapped));
         assert!(snapshot.content.iter().any(|row| row.graphics_placeholder));

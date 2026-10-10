@@ -133,6 +133,7 @@ craneLib.buildPackage (
       # Step 2: wrapProgram for env var management
       wrapProgram $out/bin/ratty \
         --set-default SHELL '${bash}/bin/bash' \
+        --set-default WGPU_SETTINGS_PRIO 'webgpu' \
         --prefix LD_LIBRARY_PATH : '${runtimeLibraryPath}' \
         ${lib.optionalString stdenv.isDarwin ''
           --prefix DYLD_LIBRARY_PATH : '${runtimeLibraryPath}' \

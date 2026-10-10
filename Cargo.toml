@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/ratty-vt"]
+members = ["."]
 exclude = ["widget"]
 resolver = "3"
 
@@ -10,7 +10,6 @@ description = "A GPU-rendered terminal emulator that supports inline 3D graphics
 authors = ["Orhun Parmaksız <orhunparmaksiz@gmail.com>"]
 license = "MIT"
 readme = "README.md"
-homepage = "https://github.com/orhun/ratty"
 repository = "https://github.com/orhun/ratty"
 keywords = ["terminal", "emulator", "3d", "graphics"]
 categories = ["command-line-utilities", "graphics"]
@@ -49,11 +48,11 @@ bevy = { version = "0.19.0", default-features = false, features = [
 ] }
 clap = { version = "4.5", features = ["derive"] }
 etcetera = "0.11"
+fux-vt = "0.2.0"
 image = { version = "0.25", default-features = false, features = ["png", "ico"] }
-bevy_terminal_ratatui = { version = "0.7.3", default-features = false, features = ["system_fonts"] }
+bevy_terminal_ratatui = { version = "0.8.1", default-features = false, features = ["system_fonts"] }
 portable-pty = "0.8"
 ratatui = "0.30"
-ratty-vt = { version = "0.1.0", path = "crates/ratty-vt" }
 rust-embed = "8.5"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -93,3 +92,11 @@ opt-level = 3
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+# Optimized builds for day-to-day development: skips LTO and splits codegen
+# so rebuilds after an edit take seconds instead of minutes.
+[profile.release-fast]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true

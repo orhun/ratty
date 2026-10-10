@@ -15,7 +15,7 @@ use crate::rgp::{
     consume_sequence as consume_rgp_sequence, support_reply,
 };
 use crate::runtime::TerminalRuntime;
-use ratty_vt::Screen;
+use crate::screen::ScreenView;
 
 const APC_START: &[u8] = b"\x1b_";
 const ST: &[u8] = b"\x1b\\";
@@ -188,7 +188,7 @@ impl TerminalInlineObjects {
     }
 
     /// Refreshes placeholder-derived Kitty anchors.
-    pub fn refresh_placeholder_anchors(&mut self, screen: &Screen) {
+    pub fn refresh_placeholder_anchors(&mut self, screen: ScreenView<'_>) {
         if refresh_kitty_placeholder_anchors(&self.objects, &mut self.anchors, screen) {
             self.dirty = true;
         }

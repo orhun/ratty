@@ -15,7 +15,9 @@ use bevy::prelude::Resource;
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 use crate::config::AppConfig;
-use ratty_vt::{Callbacks, Parser, Screen};
+use fux_vt::{Identity, Options, Parser, Sink, Unhandled};
+
+use crate::screen::ScreenView;
 
 /// Command-line runtime overrides.
 #[derive(Debug, Clone, Default)]
@@ -26,116 +28,60 @@ pub struct RuntimeOptions {
     pub working_dir: Option<PathBuf>,
 }
 
-/// DA1 capabilities ratty advertises: VT220 class (`62`) with ANSI colour
-/// (`22`). Nothing else listed by xterm (sixel, ReGIS, OSC 52 clipboard, ...)
-/// is implemented, and advertising it would make applications emit payloads
-/// that go nowhere.
-const PRIMARY_DEVICE_ATTRIBUTES: &[u8] = b"\x1b[?62;22c";
+/// Who ratty says it is. With an identity, fux-vt answers primary device
+/// attributes as VT220 class (`62`) with ANSI colour (`22`) and nothing else
+/// listed by xterm (sixel, ReGIS, OSC 52 clipboard, ...), which ratty does
+/// not implement and applications would otherwise send payloads for; it
+/// answers secondary device attributes and XTVERSION with ratty's version,
+/// and reports a cursor waiting to wrap at the last column, as xterm does.
+const IDENTITY: Identity = Identity {
+    name: "ratty",
+    version: env!("CARGO_PKG_VERSION"),
+};
 
-/// Callback state for the sequences the engine leaves to its embedder.
-///
-/// The engine models the screen; everything that identifies or answers for
-/// the *terminal* lives here, so the replies describe ratty by construction:
-/// device attributes, status and cursor reports, the terminal version, and the
-/// kitty keyboard flag query. Unhandled sequences are logged once each.
+/// What ratty asks of the engine beyond a bare VT100: the kitty keyboard
+/// protocol and modifyOtherKeys (ratty encodes keys by them, see
+/// `keyboard.rs`, and answers the flag query), reflow on resize, and ratty's
+/// identity in device replies.
+pub const PARSER_OPTIONS: Options = Options {
+    events: false,
+    extended_replies: false,
+    kitty_keyboard: true,
+    reflow: true,
+    identity: Some(IDENTITY),
+};
+
+/// Receives what the engine leaves to its host: replies to queries, queued
+/// for write-back to the PTY, and sequences the engine does not implement,
+/// logged once each.
 #[derive(Default)]
-pub struct TerminalParserCallbacks {
-    seen_csi: HashSet<String>,
-    seen_escape: HashSet<String>,
+pub struct TerminalParserSink {
+    seen: HashSet<String>,
     pending_replies: Vec<Vec<u8>>,
 }
 
-impl TerminalParserCallbacks {
-    /// Drains any terminal replies queued by parser callbacks.
+impl TerminalParserSink {
+    /// Drains any terminal replies the parser queued.
     pub fn take_replies(&mut self) -> Vec<Vec<u8>> {
         std::mem::take(&mut self.pending_replies)
     }
 }
 
-/// Encodes ratty's version the way the DA2 firmware field expects: each
-/// semver component weighted by a power of 100, pre-release suffix dropped.
-fn encoded_version() -> usize {
-    let version = env!("CARGO_PKG_VERSION");
-    let version = version
-        .rsplit_once('-')
-        .map_or(version, |(release, _prerelease)| release);
+impl Sink for TerminalParserSink {
+    fn reply(&mut self, bytes: &[u8]) {
+        self.pending_replies.push(bytes.to_vec());
+    }
 
-    version
-        .split('.')
-        .rev()
-        .enumerate()
-        .map(|(index, component)| {
-            let scale = u32::try_from(index)
-                .ok()
-                .and_then(|index| 100_usize.checked_pow(index))
-                .unwrap_or(0);
-            scale.saturating_mul(component.parse::<usize>().unwrap_or(0))
-        })
-        .sum()
-}
-
-impl Callbacks for TerminalParserCallbacks {
-    fn unhandled_csi(
-        &mut self,
-        screen: &mut Screen,
-        i1: Option<u8>,
-        i2: Option<u8>,
-        params: &[&[u16]],
-        c: char,
-    ) {
-        let first = params.first().and_then(|param| param.first()).copied();
-        let single = params.len() <= 1 && params.first().is_none_or(|param| param.len() <= 1);
-
-        match (i1, i2, c) {
-            // CSI 0 c = primary device attributes request.
-            (None, None, 'c') if single && first.unwrap_or(0) == 0 => {
-                self.pending_replies
-                    .push(PRIMARY_DEVICE_ATTRIBUTES.to_vec());
-            }
-            // CSI > 0 c = secondary device attributes: terminal type, firmware
-            // version, ROM cartridge. Type 0 is "VT100" in xterm's table; the
-            // firmware field carries ratty's version.
-            (Some(b'>'), None, 'c') if single && first.unwrap_or(0) == 0 => {
-                self.pending_replies
-                    .push(format!("\x1b[>0;{};1c", encoded_version()).into_bytes());
-            }
-            // CSI 5 n = device status report request.
-            (None, None, 'n') if single && first == Some(5) => {
-                self.pending_replies.push(b"\x1b[0n".to_vec());
-            }
-            // CSI 6 n = cursor position report request. Reported at the cell
-            // the cursor is drawn in, so a cursor past the last column after
-            // a full row reports that column rather than one beyond it.
-            (None, None, 'n') if single && first == Some(6) => {
-                let (row, col) = screen.display_cursor_position();
-                self.pending_replies
-                    .push(format!("\x1b[{};{}R", row + 1, col + 1).into_bytes());
-            }
-            // CSI > 0 q = XTVERSION: the terminal name and version.
-            (Some(b'>'), None, 'q') if single && first.unwrap_or(0) == 0 => {
-                self.pending_replies
-                    .push(format!("\x1bP>|ratty {}\x1b\\", env!("CARGO_PKG_VERSION")).into_bytes());
-            }
-            // CSI ? u = kitty keyboard protocol flag query. The engine tracks
-            // the flag stack; ratty answers so applications can detect whether
-            // enhanced key reporting is enabled.
-            (Some(b'?'), None, 'u') if single && first.unwrap_or(0) == 0 => {
-                self.pending_replies
-                    .push(format!("\x1b[?{}u", screen.kitty_keyboard_flags()).into_bytes());
-            }
-            // CSI ? 7 h / CSI ? 7 l toggle line wrapping. Ratty does not model
-            // the mode yet, but treating it as known avoids noisy warnings
-            // for shells and TUIs that flip it frequently.
-            (Some(b'?'), None, 'h' | 'l') if single && first == Some(7) => {}
-            _ => {
+    fn unhandled(&mut self, sequence: Unhandled<'_>) {
+        let (kind, sequence) = match sequence {
+            Unhandled::Csi {
+                params,
+                intermediates,
+                action,
+            } => {
                 let mut sequence = String::from("\u{1b}[");
-                if let Some(i1) = i1 {
-                    sequence.push(i1 as char);
-                }
-                if let Some(i2) = i2 {
-                    sequence.push(i2 as char);
-                }
-                for (idx, param) in params.iter().enumerate() {
+                sequence.extend(intermediates.iter().map(|&byte| char::from(byte)));
+                for (idx, param) in params.groups().enumerate() {
                     if idx > 0 {
                         sequence.push(';');
                     }
@@ -146,29 +92,45 @@ impl Callbacks for TerminalParserCallbacks {
                         sequence.push_str(&value.to_string());
                     }
                 }
-                sequence.push(c);
-
-                if self.seen_csi.insert(sequence.clone()) {
-                    bevy::log::warn!("unhandled terminal CSI sequence: {sequence}");
-                }
+                sequence.push(char::from(action));
+                ("CSI", sequence)
             }
+            Unhandled::Escape {
+                intermediates,
+                action,
+            } => {
+                let mut sequence = String::from("\u{1b}");
+                sequence.extend(intermediates.iter().map(|&byte| char::from(byte)));
+                sequence.push(char::from(action));
+                ("escape", sequence)
+            }
+            _ => return,
+        };
+        if self.seen.insert(sequence.clone()) {
+            bevy::log::warn!("unhandled terminal {kind} sequence: {sequence}");
         }
     }
+}
 
-    fn unhandled_escape(&mut self, _: &mut Screen, i1: Option<u8>, i2: Option<u8>, b: u8) {
-        let mut sequence = String::from("\u{1b}");
-        if let Some(i1) = i1 {
-            sequence.push(i1 as char);
-        }
-        if let Some(i2) = i2 {
-            sequence.push(i2 as char);
-        }
-        sequence.push(b as char);
-
-        if self.seen_escape.insert(sequence.clone()) {
-            bevy::log::warn!("unhandled terminal escape sequence: {sequence}");
-        }
-    }
+/// Runs `change` on the parser, keeping a view scrolled back into history on
+/// the row at its top: rows scrolled into history or re-wrapped by a reflow
+/// would otherwise slide under it. A row that leaves history altogether
+/// leaves the offset as it was, clamped to the history left.
+fn keep_scrollback_anchored(
+    parser: &mut Parser,
+    scrollback: &mut usize,
+    change: impl FnOnce(&mut Parser),
+) {
+    let anchor = (*scrollback > 0)
+        .then(|| ScreenView::new(parser.screen(), *scrollback).visible_row(0))
+        .flatten()
+        .map(|row| row.id);
+    change(parser);
+    let screen = parser.screen();
+    *scrollback = anchor
+        .and_then(|id| screen.offset_for_row(id))
+        .unwrap_or(*scrollback)
+        .min(screen.history_len());
 }
 
 /// Running PTY and parser state.
@@ -189,7 +151,11 @@ pub struct TerminalRuntime {
     /// PTY reader thread.
     reader_thread: Option<JoinHandle<()>>,
     /// Terminal parser: the VT state machine plus the screen it drives.
-    pub parser: Parser<TerminalParserCallbacks>,
+    pub parser: Parser,
+    /// Replies and unhandled sequences the parser hands back.
+    sink: TerminalParserSink,
+    /// How many rows the view is scrolled back into history.
+    scrollback: usize,
     /// Indicates PTY shutdown.
     pub pty_disconnected: bool,
     output_sequence: u64,
@@ -361,12 +327,13 @@ impl TerminalRuntime {
             }
         });
 
-        let parser = Parser::new_with_callbacks(
+        let parser = Parser::with_options(
             rows.max(1),
             cols.max(1),
             config.terminal.scrollback,
-            TerminalParserCallbacks::default(),
-        );
+            PARSER_OPTIONS,
+        )
+        .context("failed to create the terminal screen")?;
 
         Ok(Self {
             rx: SyncCell::new(rx),
@@ -375,6 +342,8 @@ impl TerminalRuntime {
             child: Some(child),
             reader_thread: Some(reader_thread),
             parser,
+            sink: TerminalParserSink::default(),
+            scrollback: 0,
             pty_disconnected: false,
             output_sequence: 0,
             human_input_sequence: 0,
@@ -389,8 +358,21 @@ impl TerminalRuntime {
     }
 
     /// Feeds bytes from the PTY into the VT state machine.
+    ///
+    /// While the view is scrolled back it stays on the rows it shows as new
+    /// output scrolls more rows into history.
     pub fn process(&mut self, bytes: &[u8]) {
-        self.parser.process(bytes);
+        let Self {
+            parser,
+            sink,
+            scrollback,
+            ..
+        } = self;
+        keep_scrollback_anchored(parser, scrollback, |parser| {
+            if let Err(err) = parser.process_with(bytes, sink) {
+                bevy::log::warn!("terminal output dropped: {err}");
+            }
+        });
     }
 
     /// Records one PTY output batch, including batches containing only
@@ -401,13 +383,21 @@ impl TerminalRuntime {
     }
 
     /// Returns the terminal screen.
-    pub fn screen(&self) -> &Screen {
-        self.parser.screen()
+    /// Returns the terminal screen as the user sees it, scrolled back by
+    /// [`scrollback`](Self::scrollback) rows.
+    pub fn screen(&self) -> ScreenView<'_> {
+        ScreenView::new(self.parser.screen(), self.scrollback)
     }
 
-    /// Returns the terminal screen for mutation (scrollback, resize).
-    pub fn screen_mut(&mut self) -> &mut Screen {
-        self.parser.screen_mut()
+    /// Returns how many rows the view is scrolled back into history.
+    pub fn scrollback(&self) -> usize {
+        self.screen().scrollback()
+    }
+
+    /// Scrolls the view `rows` back into history, clamped to what it holds;
+    /// `0` shows the live screen.
+    pub fn set_scrollback(&mut self, rows: usize) {
+        self.scrollback = rows.min(self.parser.screen().history_len());
     }
 
     /// Returns each visible row as a string with trailing blanks trimmed.
@@ -415,14 +405,12 @@ impl TerminalRuntime {
     /// Allocates, so it is only worth calling when something actually diffs
     /// rows; today that is inline-object scroll tracking.
     pub fn visible_row_texts(&self) -> Vec<String> {
-        let (_, cols) = self.screen().size();
-        self.screen().rows(0, cols).collect()
+        self.screen().row_texts()
     }
 
-    /// Drains the replies the parser callbacks have queued for write-back to
-    /// the PTY.
+    /// Drains the replies the parser has queued for write-back to the PTY.
     pub fn take_replies(&mut self) -> Vec<Vec<u8>> {
-        self.parser.callbacks_mut().take_replies()
+        self.sink.take_replies()
     }
 
     /// Receives pending PTY output without blocking.
@@ -536,8 +524,16 @@ impl TerminalRuntime {
         if self.last_parser_size != parser_size {
             // The engine reflows content and resets the scrolling region
             // itself, so the grid resize is the whole operation: no snapshot
-            // and replay.
-            self.parser.screen_mut().set_size_reflow(rows, cols);
+            // and replay. A failed resize (the size past the engine's
+            // allocation limit) leaves the old grid intact.
+            let Self {
+                parser, scrollback, ..
+            } = self;
+            keep_scrollback_anchored(parser, scrollback, |parser| {
+                if let Err(err) = parser.resize(rows, cols) {
+                    bevy::log::warn!("terminal resize to {cols}x{rows} failed: {err}");
+                }
+            });
             self.last_parser_size = parser_size;
         }
 
@@ -608,14 +604,17 @@ impl Drop for TerminalRuntime {
 mod tests {
     use super::*;
 
-    fn parser(rows: u16, cols: u16) -> Parser<TerminalParserCallbacks> {
-        Parser::new_with_callbacks(rows, cols, 100, TerminalParserCallbacks::default())
+    fn parser(rows: u16, cols: u16) -> (Parser, TerminalParserSink) {
+        let parser = Parser::with_options(rows, cols, 100, PARSER_OPTIONS).expect("parser");
+        (parser, TerminalParserSink::default())
     }
 
-    fn replies(parser: &mut Parser<TerminalParserCallbacks>) -> Vec<String> {
-        parser
-            .callbacks_mut()
-            .take_replies()
+    fn process(parser: &mut Parser, sink: &mut TerminalParserSink, input: &[u8]) {
+        parser.process_with(input, sink).expect("process");
+    }
+
+    fn replies(sink: &mut TerminalParserSink) -> Vec<String> {
+        sink.take_replies()
             .into_iter()
             .map(|reply| String::from_utf8(reply).expect("utf-8 reply"))
             .collect()
@@ -623,23 +622,23 @@ mod tests {
 
     #[test]
     fn replies_are_queued_for_write_back() {
-        let mut parser = parser(5, 20);
-        parser.process(b"\x1b[0c");
-        parser.process(b"\x1b[5n");
-        parser.process(b"\x1b[3;7H\x1b[6n");
+        let (mut parser, mut sink) = parser(5, 20);
+        process(&mut parser, &mut sink, b"\x1b[0c");
+        process(&mut parser, &mut sink, b"\x1b[5n");
+        process(&mut parser, &mut sink, b"\x1b[3;7H\x1b[6n");
 
-        let got = replies(&mut parser);
+        let got = replies(&mut sink);
         assert_eq!(got, vec!["\x1b[?62;22c", "\x1b[0n", "\x1b[3;7R"]);
-        assert!(replies(&mut parser).is_empty(), "replies must drain");
+        assert!(replies(&mut sink).is_empty(), "replies must drain");
     }
 
     /// DA1 must not advertise sixel (`4`) or OSC 52 (`52`), or applications
     /// feature-detect support that does not exist.
     #[test]
     fn primary_device_attributes_advertise_only_what_ratty_implements() {
-        let mut parser = parser(5, 20);
-        parser.process(b"\x1b[c");
-        let reply = replies(&mut parser).remove(0);
+        let (mut parser, mut sink) = parser(5, 20);
+        process(&mut parser, &mut sink, b"\x1b[c");
+        let reply = replies(&mut sink).remove(0);
         let params: Vec<&str> = reply
             .strip_prefix("\x1b[?")
             .and_then(|rest| rest.strip_suffix('c'))
@@ -654,52 +653,101 @@ mod tests {
 
     #[test]
     fn secondary_device_attributes_and_xtversion_report_ratty() {
-        let mut parser = parser(5, 20);
-        parser.process(b"\x1b[>0c\x1b[>0q\x1b[>q");
-        let got = replies(&mut parser);
-        assert_eq!(got[0], format!("\x1b[>0;{};1c", encoded_version()));
+        let (mut parser, mut sink) = parser(5, 20);
+        process(&mut parser, &mut sink, b"\x1b[>0c\x1b[>0q\x1b[>q");
+        let got = replies(&mut sink);
+        // patch + minor*100 + major*10000
+        let version = env!("CARGO_PKG_VERSION")
+            .split('.')
+            .take(3)
+            .fold(0, |sum, part| sum * 100 + part.parse::<u32>().unwrap_or(0));
+        assert_eq!(got[0], format!("\x1b[>1;{version};0c"));
         assert_eq!(
             got[1],
             format!("\x1bP>|ratty {}\x1b\\", env!("CARGO_PKG_VERSION"))
         );
         assert_eq!(got[2], got[1], "a missing parameter defaults to 0");
-        assert!(!got[1].to_lowercase().contains("rio"));
-    }
-
-    #[test]
-    fn encoded_version_matches_the_da2_weighting() {
-        // patch + minor*100 + major*10000
-        let expected = env!("CARGO_PKG_VERSION")
-            .split('.')
-            .rev()
-            .enumerate()
-            .map(|(index, part)| 100_usize.pow(index as u32) * part.parse::<usize>().unwrap_or(0))
-            .sum::<usize>();
-        assert_eq!(encoded_version(), expected);
     }
 
     #[test]
     fn cursor_position_report_uses_the_drawn_cell() {
-        let mut parser = parser(2, 4);
-        parser.process(b"abcd\x1b[6n");
-        assert_eq!(replies(&mut parser), vec!["\x1b[1;4R"]);
+        let (mut parser, mut sink) = parser(2, 4);
+        process(&mut parser, &mut sink, b"abcd\x1b[6n");
+        assert_eq!(replies(&mut sink), vec!["\x1b[1;4R"]);
     }
 
     #[test]
     fn kitty_keyboard_query_reports_the_active_flags() {
-        let mut parser = parser(5, 20);
-        parser.process(b"\x1b[?u\x1b[>5u\x1b[?u\x1b[<u\x1b[?u");
-        assert_eq!(
-            replies(&mut parser),
-            vec!["\x1b[?0u", "\x1b[?5u", "\x1b[?0u"]
+        let (mut parser, mut sink) = parser(5, 20);
+        process(
+            &mut parser,
+            &mut sink,
+            b"\x1b[?u\x1b[>5u\x1b[?u\x1b[<u\x1b[?u",
         );
+        assert_eq!(replies(&mut sink), vec!["\x1b[?0u", "\x1b[?5u", "\x1b[?0u"]);
     }
 
     #[test]
     fn known_but_unmodelled_sequences_do_not_reply() {
-        let mut parser = parser(5, 20);
-        parser.process(b"\x1b[?7h\x1b[?7l\x1b[>1;2m");
-        assert!(replies(&mut parser).is_empty());
+        let (mut parser, mut sink) = parser(5, 20);
+        process(
+            &mut parser,
+            &mut sink,
+            b"\x1b[?7h\x1b[?7l\x1b[>1;2m\x1b[3J\x1b(B",
+        );
+        assert!(replies(&mut sink).is_empty());
+        // Unhandled sequences are logged once each.
+        assert!(sink.seen.contains("\u{1b}[>1;2m"));
+        assert!(sink.seen.contains("\u{1b}[3J"));
+        assert!(sink.seen.contains("\u{1b}(B"));
+        assert_eq!(sink.seen.len(), 3);
+    }
+
+    fn scrolled(rows: u16, cols: u16, lines: usize, back: usize) -> (Parser, usize) {
+        let (mut parser, mut sink) = parser(rows, cols);
+        for line in 0..lines {
+            process(&mut parser, &mut sink, format!("row{line}\r\n").as_bytes());
+        }
+        (parser, back)
+    }
+
+    #[test]
+    fn a_scrolled_back_view_stays_on_its_rows_as_output_arrives() {
+        let (mut parser, mut scrollback) = scrolled(3, 10, 12, 2);
+        let mut sink = TerminalParserSink::default();
+        let before = ScreenView::new(parser.screen(), scrollback).row_texts();
+        keep_scrollback_anchored(&mut parser, &mut scrollback, |parser| {
+            parser
+                .process_with(b"more\r\nand more\r\n", &mut sink)
+                .expect("process");
+        });
+        assert_eq!(scrollback, 4);
+        assert_eq!(
+            ScreenView::new(parser.screen(), scrollback).row_texts(),
+            before
+        );
+
+        // At the live screen the view follows the output.
+        let mut live = 0;
+        keep_scrollback_anchored(&mut parser, &mut live, |parser| {
+            parser
+                .process_with(b"last\r\n", &mut sink)
+                .expect("process");
+        });
+        assert_eq!(live, 0);
+    }
+
+    #[test]
+    fn a_scrolled_back_view_stays_on_its_rows_through_a_reflow() {
+        let (mut parser, mut scrollback) = scrolled(3, 10, 12, 4);
+        let top = ScreenView::new(parser.screen(), scrollback).row_texts()[0].clone();
+        keep_scrollback_anchored(&mut parser, &mut scrollback, |parser| {
+            parser.resize(5, 4).expect("resize");
+        });
+        assert_eq!(
+            ScreenView::new(parser.screen(), scrollback).row_texts()[0],
+            top
+        );
     }
 }
 
@@ -761,7 +809,9 @@ mod resize_tests {
             master: SyncCell::new(Some(master)),
             child: None,
             reader_thread: None,
-            parser: Parser::new_with_callbacks(24, 80, 100, TerminalParserCallbacks::default()),
+            parser: Parser::with_options(24, 80, 100, PARSER_OPTIONS).expect("parser"),
+            sink: TerminalParserSink::default(),
+            scrollback: 0,
             pty_disconnected: false,
             output_sequence: 0,
             human_input_sequence: 0,

@@ -5,7 +5,9 @@ use std::collections::HashMap;
 use base64::Engine as _;
 
 use crate::inline::{InlineAnchor, InlineObject, InlineStyle, KittyInlineObject, RasterObject};
-use ratty_vt::{Color, KITTY_PLACEHOLDER, Screen};
+use fux_vt::Color;
+
+use crate::screen::{KITTY_PLACEHOLDER, ScreenView};
 
 /// Kitty graphics APC prefix.
 pub const KITTY_APC_START: &[u8] = b"\x1b_G";
@@ -278,7 +280,7 @@ impl KittyTransfer {
 pub fn refresh_kitty_placeholder_anchors(
     objects: &HashMap<u32, InlineObject>,
     anchors: &mut HashMap<u32, InlineAnchor>,
-    screen: &Screen,
+    screen: ScreenView<'_>,
 ) -> bool {
     let placeholder_ids = objects
         .iter()
@@ -301,13 +303,8 @@ pub fn refresh_kitty_placeholder_anchors(
         let Some(grid_row) = screen.visible_row(row) else {
             continue;
         };
-        // The engine flags rows holding a U+10EEEE placeholder, so rows
-        // without one skip the per-cell scan entirely.
-        if !grid_row.has_kitty_placeholder() {
-            continue;
-        }
         for col in 0..cols {
-            let Some(cell) = grid_row.get(col) else {
+            let Some(cell) = grid_row.cell(usize::from(col)) else {
                 break;
             };
             // Placeholders may carry combining diacritics that encode the

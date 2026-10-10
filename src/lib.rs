@@ -3,6 +3,7 @@
 //! This crate provides the terminal runtime, scene integration, protocol handling and widget
 //! plumbing for Ratty.
 
+#![recursion_limit = "256"]
 #![warn(missing_docs)]
 #![warn(clippy::unwrap_used)]
 
@@ -22,5 +23,6 @@ pub mod rendering;
 pub mod rgp;
 pub mod runtime;
 pub mod scene;
+pub mod screen;
 pub mod systems;
 pub mod terminal;

@@ -12,7 +12,6 @@ on:
         default: ratty
         options:
           - ratty
-          - ratty-vt
 
 env:
   CARGO_TERM_COLOR: always

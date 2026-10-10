@@ -17,7 +17,9 @@ use crate::keyboard::enter_mobius_presentation;
 use crate::runtime::TerminalRuntime;
 use crate::scene::{MobiusTransition, TerminalPresentationMode, TerminalViewport};
 use crate::terminal::TerminalSurface;
-use ratty_vt::{MouseProtocolEncoding, MouseProtocolMode, Screen};
+use fux_vt::{MouseProtocolEncoding, MouseProtocolMode};
+
+use crate::screen::ScreenView;
 
 /// Distance in pixels the pointer must move with a pending selection to start dragging.
 const SELECTION_DRAG_THRESHOLD: f32 = 4.0;
@@ -331,7 +333,7 @@ impl TerminalSelection {
     /// Kept hand-rolled rather than using the engine's `contents_between`:
     /// ratty's selection is a plain rectangular row/column range driven by the
     /// 3D viewport, and it must keep interior blank cells as spaces.
-    pub fn selected_text(&self, screen: &Screen) -> Option<String> {
+    pub fn selected_text(&self, screen: ScreenView<'_>) -> Option<String> {
         let bounds = self.normalized_bounds()?;
 
         let (_, cols) = screen.size();
@@ -352,7 +354,7 @@ impl TerminalSelection {
 
             if let Some(grid_row) = screen.visible_row(row) {
                 for col in row_start..=row_end {
-                    let Some(cell) = grid_row.get(col) else {
+                    let Some(cell) = grid_row.cell(usize::from(col)) else {
                         break;
                     };
                     // The second half of a wide glyph is padding, not an
@@ -716,9 +718,9 @@ pub(crate) fn handle_mouse_input(
             };
 
             if amount != 0 {
-                let current = runtime.screen().scrollback() as isize;
+                let current = runtime.scrollback() as isize;
                 let next = (current + amount).max(0) as usize;
-                runtime.screen_mut().set_scrollback(next);
+                runtime.set_scrollback(next);
                 selection.clear();
                 redraw.request();
             }
@@ -1019,12 +1021,16 @@ mod wheel_zoom_tests {
 mod tests {
     use super::*;
 
-    use ratty_vt::Parser;
+    use fux_vt::Parser;
 
     fn terminal(rows: u16, cols: u16, input: &str) -> Parser {
-        let mut parser = Parser::new(rows, cols, 1000);
-        parser.process(input.as_bytes());
+        let mut parser = Parser::new(rows, cols, 1000).expect("parser");
+        parser.process(input.as_bytes()).expect("process");
         parser
+    }
+
+    fn view(parser: &Parser) -> ScreenView<'_> {
+        ScreenView::new(parser.screen(), 0)
     }
 
     fn select(start: (u32, u32), end: (u32, u32)) -> TerminalSelection {
@@ -1039,7 +1045,7 @@ mod tests {
         let term = terminal(3, 20, "hello world");
         let selection = select((0, 0), (10, 0));
         assert_eq!(
-            selection.selected_text(term.screen()).as_deref(),
+            selection.selected_text(view(&term)).as_deref(),
             Some("hello world")
         );
     }
@@ -1049,7 +1055,7 @@ mod tests {
         let term = terminal(3, 20, "first\r\nsecond");
         let selection = select((0, 0), (5, 1));
         assert_eq!(
-            selection.selected_text(term.screen()).as_deref(),
+            selection.selected_text(view(&term)).as_deref(),
             Some("first\nsecond")
         );
     }
@@ -1059,7 +1065,7 @@ mod tests {
         let term = terminal(3, 20, "你好e\u{0301}z");
         let selection = select((0, 0), (5, 0));
         assert_eq!(
-            selection.selected_text(term.screen()).as_deref(),
+            selection.selected_text(view(&term)).as_deref(),
             Some("你好e\u{0301}z")
         );
     }
@@ -1068,7 +1074,7 @@ mod tests {
     fn selection_without_a_drag_is_empty() {
         let term = terminal(3, 20, "hello");
         assert_eq!(
-            TerminalSelection::default().selected_text(term.screen()),
+            TerminalSelection::default().selected_text(view(&term)),
             None
         );
     }

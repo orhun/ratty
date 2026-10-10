@@ -1,6 +1,6 @@
 //! Interactive visual coverage for terminal glyphs, colors, and text styles.
 //!
-//! Run this example inside Ratty to inspect the complete PTY -> ratty-vt ->
+//! Run this example inside Ratty to inspect the complete PTY -> fux-vt ->
 //! Ratatui -> renderer path:
 //!
 //! ```text

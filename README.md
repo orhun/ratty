@@ -341,7 +341,7 @@ and [Bevy](https://bevyengine.org/) for scene presentation.
 
 Current workflow:
 
-1. PTY output is parsed by the [`ratty-vt` workspace crate](crates/ratty-vt/README.md) (Ratty's fork of [`vt100`](https://github.com/doy/vt100-rust)) and drawn into a Ratatui buffer on CPU
+1. PTY output is parsed by [`fux-vt`](https://github.com/gold-silver-copper/fux/tree/main/fux-vt), a bounded terminal engine shared with the [fux](https://github.com/gold-silver-copper/fux) multiplexer, and drawn into a Ratatui buffer on CPU
 2. `bevy_terminal_ratatui` translates Ratatui's changed cells into a retained terminal surface
 3. `bevy_terminal` shapes text with Bevy's font system and incrementally builds compact background,
    decoration, cursor, and glyph quads
@@ -353,19 +353,12 @@ world to the render world each frame is compact scene data, not pixels.
 
 ### Workspace development
 
-The Cargo workspace contains the Ratty application and the independent
-[`ratty-vt`](crates/ratty-vt/README.md) terminal engine. The widget remains a
+The Cargo workspace contains the Ratty application. The widget remains a
 separate package under `widget/` with its own lockfile.
 
 ```sh
-cargo test -p ratty-vt --locked      # Engine tests without building Bevy
-cargo test --workspace --locked     # Application, engine, and doctests
-cargo package --workspace --locked  # Verify both packages together
+cargo test --workspace --locked     # Application tests and doctests
 ```
-
-Ratty uses a local path dependency during development and a versioned
-`ratty-vt` dependency when published. See the engine's
-[publishing instructions](crates/ratty-vt/README.md#publishing) for release order.
 
 ## Touchscreen
 

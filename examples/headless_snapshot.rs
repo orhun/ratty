@@ -1,6 +1,6 @@
 //! Renders a PTY session with no window and writes the result to a PNG.
 //!
-//! Two modes exercise the PTY -> ratty-vt -> Ratatui -> `bevy_terminal` path
+//! Two modes exercise the PTY -> fux-vt -> Ratatui -> `bevy_terminal` path
 //! on the GPU without opening a window, for visual checks in headless
 //! environments:
 //!
@@ -43,8 +43,7 @@ use bevy::window::{PrimaryWindow, WindowResolution};
 use bevy::winit::WinitPlugin;
 use bevy_terminal_ratatui::TerminalRenderer;
 use bevy_terminal_ratatui::prelude::{
-    TerminalPlugin, TerminalReady, TerminalRemeasured, TerminalRenderConfig, TerminalStats,
-    TerminalSystems, TerminalTexture,
+    TerminalPlugin, TerminalRenderConfig, TerminalStats, TerminalSystems, TerminalTexture,
 };
 use clap::Parser;
 
@@ -166,7 +165,7 @@ fn capture_due(time: &Time<Real>, options: &Options, gate: &CaptureGate) -> bool
 /// cell whose visible symbol differs.
 fn report_stale_cells(terminal: &TerminalSurface, runtime: &TerminalRuntime) {
     let screen = runtime.screen();
-    let snapshot = terminal.tui.snapshot();
+    let snapshot = terminal.tui.surface().snapshot();
     let (rows, cols) = screen.size();
     let mut stale = 0;
     for row in 0..rows {
@@ -213,7 +212,7 @@ fn report_foreground_runs(runtime: &TerminalRuntime) {
     let screen = runtime.screen();
     let (rows, cols) = screen.size();
     for row in 0..rows {
-        let mut runs: Vec<(u16, ratty_vt::Color, String)> = Vec::new();
+        let mut runs: Vec<(u16, fux_vt::Color, String)> = Vec::new();
         for col in 0..cols {
             let Some(cell) = screen.cell(row, col) else {
                 continue;
@@ -416,8 +415,7 @@ fn main() -> anyhow::Result<()> {
                     render_config.clone(),
                 ));
             })
-            .add_observer(on_ready)
-            .add_observer(on_remeasured)
+            .add_systems(Update, adopt_texture.after(TerminalSystems::Sync))
             .add_systems(
                 Update,
                 (sync_texture_font_config, pump_and_draw)
@@ -453,40 +451,20 @@ fn retarget_cameras(
     commands.insert_resource(SceneTarget(handle, size));
 }
 
-fn on_ready(
-    ready: On<TerminalReady>,
-    textures: Query<&TerminalTexture>,
-    mut terminal: ResMut<TerminalSurface>,
-    mut runtime: ResMut<TerminalRuntime>,
-    mut gate: ResMut<CaptureGate>,
-) {
-    let Ok(texture) = textures.get(ready.entity) else {
-        return;
-    };
-    adopt_texture(texture, &mut terminal, &mut runtime, &mut gate);
-}
-
-fn on_remeasured(
-    remeasured: On<TerminalRemeasured>,
-    textures: Query<&TerminalTexture>,
-    mut terminal: ResMut<TerminalSurface>,
-    mut runtime: ResMut<TerminalRuntime>,
-    mut gate: ResMut<CaptureGate>,
-) {
-    let Ok(texture) = textures.get(remeasured.entity) else {
-        return;
-    };
-    adopt_texture(texture, &mut terminal, &mut runtime, &mut gate);
-}
-
 /// Keep the configured grid while adopting the renderer's measured pixels,
 /// including later font registrations that change those measurements.
 fn adopt_texture(
-    texture: &TerminalTexture,
-    terminal: &mut TerminalSurface,
-    runtime: &mut TerminalRuntime,
-    gate: &mut CaptureGate,
+    textures: Query<&TerminalTexture, (With<Target>, Changed<TerminalTexture>)>,
+    mut terminal: ResMut<TerminalSurface>,
+    mut runtime: ResMut<TerminalRuntime>,
+    mut gate: ResMut<CaptureGate>,
 ) {
+    let Ok(texture) = textures.single() else {
+        return;
+    };
+    let Some(geometry) = texture.measured() else {
+        return;
+    };
     gate.idle_frames = 0;
     terminal.update_render_output(texture);
     let logical =
@@ -498,7 +476,10 @@ fn adopt_texture(
     }
     info!(
         "terminal ready: {}x{} cells, texture {:?}, cell {:?}",
-        layout.cols, layout.rows, texture.size, texture.cell_size
+        layout.cols,
+        layout.rows,
+        geometry.size(),
+        geometry.cell_size()
     );
 }
 
@@ -561,11 +542,14 @@ fn request_texture_capture(params: CaptureParams, textures: Query<&TerminalTextu
     let Ok(texture) = textures.single() else {
         return;
     };
+    let Some(geometry) = texture.measured() else {
+        return;
+    };
     state.requested = true;
     if options.diagnose {
         diagnose(&terminal, &runtime);
     }
-    schedule_readback(commands, texture.image.clone(), texture.size);
+    schedule_readback(commands, texture.image.clone(), geometry.size());
 }
 
 #[derive(SystemParam)]
@@ -728,8 +712,9 @@ mod tests {
         assert!(
             world
                 .get::<TerminalTexture>(entity)
+                .and_then(TerminalTexture::measured)
                 .expect("measured texture")
-                .cell_size
+                .cell_size()
                 .cmpgt(Vec2::ONE)
                 .all()
         );

@@ -1439,20 +1439,21 @@ dependencies = [
 
 [[package]]
 name = "bevy_terminal"
-version = "0.7.3"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "452db150b569c986619f0974d2311d8ab11667f171a8c8db29b4f61a103f1370"
+checksum = "359a8a2ba0dfa5cf4b2386bf611ae27ca7aee22f6545229fc918823b505f7cab"
 dependencies = [
  "bevy",
+ "bitflags 2.13.0",
+ "bytemuck",
  "skrifa",
- "smol_str",
 ]
 
 [[package]]
 name = "bevy_terminal_ratatui"
-version = "0.7.3"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed8ec4408ff2a61597875d54aa5ba56d726861d901ffd2f878d4ad694dd8e971"
+checksum = "0cae777e51005cc019bc9fe56b83dc81fb2a1e6c28788360c1ec2c3e725b712b"
 dependencies = [
  "bevy",
  "bevy_terminal",
@@ -1806,9 +1807,9 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
 name = "cfg_aliases"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
+checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 
 [[package]]
 name = "chrono"
@@ -2422,26 +2423,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "env_filter"
-version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "900d271a03799a1ee8d1ca9b19893b48ca674a9284fefcfb85f05e74ed314217"
-dependencies = [
- "log",
- "regex",
-]
-
-[[package]]
-name = "env_logger"
-version = "0.11.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de671bd27a75a797dc9ae289ba1e77276e75e2026408aab65185384e2d5cd3f6"
-dependencies = [
- "env_filter",
- "log",
-]
-
-[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2788,6 +2769,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fux-vt"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46185da6c6277296b483ff289eae5f556df935a162adc8a89296f4160fa2c476"
+dependencies = [
+ "unicode-width",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2839,7 +2829,6 @@ dependencies = [
  "cfg-if",
  "libc",
  "r-efi 6.0.0",
- "rand_core 0.10.1",
  "wasip2",
  "wasip3",
 ]
@@ -3824,12 +3813,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "numtoa"
-version = "0.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6aa2c4e539b869820a2b82e1aef6ff40aa85e65decdd5185e83fb4b1249cd00f"
-
-[[package]]
 name = "objc-sys"
 version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4612,17 +4595,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "quickcheck"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "95c589f335db0f6aaa168a7cd27b1fc6920f5e1470c804f814d9cd6e62a0f70b"
-dependencies = [
- "env_logger",
- "log",
- "rand 0.10.1",
-]
-
-[[package]]
 name = "quote"
 version = "1.0.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4707,7 +4679,6 @@ dependencies = [
  "ratatui-crossterm",
  "ratatui-macros",
  "ratatui-termina",
- "ratatui-termion",
  "ratatui-termwiz",
  "ratatui-widgets",
  "serde",
@@ -4769,17 +4740,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ratatui-termion"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "87c732202fa5a71a9da0991013f0853e53f87048f45198e3a1ca3ee722accc2f"
-dependencies = [
- "instability",
- "ratatui-core",
- "termion",
-]
-
-[[package]]
 name = "ratatui-termwiz"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4820,11 +4780,11 @@ dependencies = [
  "bevy_terminal_ratatui",
  "clap",
  "etcetera",
+ "fux-vt",
  "getrandom 0.3.4",
  "image",
  "portable-pty",
  "ratatui",
- "ratty-vt",
  "rmcp",
  "rust-embed",
  "schemars",
@@ -4837,20 +4797,6 @@ dependencies = [
  "toml 0.8.23",
  "winit",
  "winresource",
-]
-
-[[package]]
-name = "ratty-vt"
-version = "0.1.0"
-dependencies = [
- "compact_str",
- "itoa",
- "quickcheck",
- "serde",
- "serde_json",
- "unicode-segmentation",
- "unicode-width",
- "vte",
 ]
 
 [[package]]
@@ -5679,16 +5625,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "termion"
-version = "4.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f44138a9ae08f0f502f24104d82517ef4da7330c35acd638f1f29d3cd5475ecb"
-dependencies = [
- "libc",
- "numtoa",
-]
-
-[[package]]
 name = "termios"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6233,16 +6169,6 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
-
-[[package]]
-name = "vte"
-version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5924018406ce0063cd67f8e008104968b74b563ee1b85dde3ed1f7cb87d3dbd"
-dependencies = [
- "arrayvec",
- "memchr",
-]
 
 [[package]]
 name = "vtparse"

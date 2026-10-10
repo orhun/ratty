@@ -3,8 +3,9 @@
 use bevy::prelude::*;
 use bevy::render::render_resource::Extent3d;
 
+use crate::screen::ScreenView;
 use crate::terminal::TerminalSurface;
-use ratty_vt::{Cell, Color, Screen};
+use fux_vt::{CellRef, Color};
 
 type Rgba = [u8; 4];
 const DEBUG_BG: Rgba = [18, 20, 28, 255];
@@ -18,7 +19,7 @@ const DEBUG_BG_FALLBACK: Rgba = [31, 31, 40, 255];
 pub fn sync_terminal_debug_image(
     terminal: &TerminalSurface,
     images: &mut Assets<Image>,
-    screen: &Screen,
+    screen: ScreenView<'_>,
 ) {
     let Some(handle) = terminal.back_image_handle.as_ref() else {
         return;
@@ -100,7 +101,7 @@ impl<'a> CellDebugImageRenderer<'a> {
         }
     }
 
-    fn render(&mut self, screen: &Screen) {
+    fn render(&mut self, screen: ScreenView<'_>) {
         self.fill(DEBUG_BG);
 
         for row in 0..self.rows {
@@ -113,9 +114,9 @@ impl<'a> CellDebugImageRenderer<'a> {
                 self.draw_rect(rect, DEBUG_GRID);
                 self.draw_rect_outline(rect, DEBUG_GRID_OUTLINE);
 
-                let Some(cell) = grid_row
-                    .and_then(|grid_row| u16::try_from(col).ok().and_then(|col| grid_row.get(col)))
-                else {
+                let Some(cell) = grid_row.as_ref().and_then(|grid_row| {
+                    usize::try_from(col).ok().and_then(|col| grid_row.cell(col))
+                }) else {
                     continue;
                 };
 
@@ -244,7 +245,7 @@ impl<'a> CellDebugImageRenderer<'a> {
     }
 }
 
-fn cell_is_active(cell: &Cell) -> bool {
+fn cell_is_active(cell: CellRef<'_>) -> bool {
     cell.has_contents() && !cell.is_wide_continuation()
 }
 
@@ -341,22 +342,25 @@ fn ansi_index_to_rgba(index: u8) -> Rgba {
 mod tests {
     use super::*;
 
-    use ratty_vt::Parser;
+    use fux_vt::Parser;
 
     /// A wide glyph that does not fit at the end of a row wraps and leaves
     /// the skipped cell blank; the debug image must not paint it as content.
     #[test]
     fn wrapped_wide_character_padding_is_not_active_content() {
-        let mut parser = Parser::new(2, 14, 1000);
-        parser.process("abcdefghijklm\u{4f60}".as_bytes());
+        let mut parser = Parser::new(2, 14, 1000).expect("parser");
+        parser
+            .process("abcdefghijklm\u{4f60}".as_bytes())
+            .expect("process");
+        let screen = ScreenView::new(parser.screen(), 0);
 
-        let row = parser.screen().visible_row(0).expect("row 0");
-        let pad = row.get(13).expect("column 13");
+        let row = screen.visible_row(0).expect("row 0");
+        let pad = row.cell(13).expect("column 13");
         assert!(!pad.has_contents());
         assert!(!cell_is_active(pad));
 
-        let next = parser.screen().visible_row(1).expect("row 1");
-        assert!(cell_is_active(next.get(0).expect("column 0")));
-        assert!(!cell_is_active(next.get(1).expect("column 1")));
+        let next = screen.visible_row(1).expect("row 1");
+        assert!(cell_is_active(next.cell(0).expect("column 0")));
+        assert!(!cell_is_active(next.cell(1).expect("column 1")));
     }
 }

@@ -5,6 +5,7 @@ use bevy::ecs::world::FromWorld;
 use bevy::input::ButtonState;
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
+use fux_vt::Screen;
 
 use arboard::Clipboard;
 use schemars::JsonSchema;
@@ -21,7 +22,7 @@ use crate::scene::{
     MobiusEnterZoomFloor, MobiusTransition, TerminalPlaneWarp, TerminalPresentationMode,
 };
 use crate::terminal::{TerminalRedrawState, TerminalSurface};
-use ratty_vt::MouseProtocolMode;
+use fux_vt::MouseProtocolMode;
 
 /// Modifiers attached to a normalized terminal key press.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -555,13 +556,13 @@ pub fn handle_keyboard_input(
                             ));
                         }
                     } else {
-                        let current = params.runtime.screen().scrollback();
+                        let current = params.runtime.scrollback();
                         let next = if direction.is_positive() {
                             current.saturating_add(amount)
                         } else {
                             current.saturating_sub(amount)
                         };
-                        params.runtime.screen_mut().set_scrollback(next);
+                        params.runtime.set_scrollback(next);
                         params.selection.clear();
                         params.redraw.request();
                     }
@@ -617,7 +618,7 @@ pub fn handle_keyboard_input(
                     };
                     if resized {
                         // The renderer remeasures the cell from the new font
-                        // size and reports it through `TerminalRemeasured`;
+                        // size and reports it through `TerminalTexture`;
                         // that sync owns the PTY reflow, so zoom never
                         // resizes from an estimate first.
                         params.redraw.request();
@@ -650,8 +651,8 @@ pub fn handle_keyboard_input(
             params.runtime.kitty_keyboard_flags(),
             params.runtime.modify_other_keys(),
         ) {
-            if params.runtime.screen().scrollback() != 0 {
-                params.runtime.screen_mut().set_scrollback(0);
+            if params.runtime.scrollback() != 0 {
+                params.runtime.set_scrollback(0);
                 params.redraw.request();
             }
             params.runtime.write_human_input(&input);
@@ -867,10 +868,7 @@ fn translate_key(key_code: KeyCode, ctx: KeyTranslationContext<'_>) -> Vec<u8> {
 
 /// Encodes a normalized key using the active modes from Ratty's authoritative
 /// terminal screen.
-pub fn encode_normalized_key(
-    key: &NormalizedKey,
-    screen: &ratty_vt::Screen,
-) -> Result<Vec<u8>, String> {
+pub fn encode_normalized_key(key: &NormalizedKey, screen: &Screen) -> Result<Vec<u8>, String> {
     encode_normalized_key_with_modes(
         key,
         screen.application_cursor(),
@@ -1151,7 +1149,7 @@ pub(crate) fn encode_paste(text: &str, bracketed: bool) -> Vec<u8> {
 
 /// Encodes authenticated agent text without changing its UTF-8 payload.
 /// Bracketed-paste markers are added only when both requested and active.
-pub fn encode_agent_text(text: &str, paste: bool, screen: &ratty_vt::Screen) -> Vec<u8> {
+pub fn encode_agent_text(text: &str, paste: bool, screen: &Screen) -> Vec<u8> {
     if paste && screen.bracketed_paste() {
         let mut bytes = Vec::with_capacity(text.len() + PASTE_START.len() + PASTE_END.len());
         bytes.extend_from_slice(PASTE_START);
@@ -1808,12 +1806,12 @@ mod tests {
     #[test]
     fn agent_text_preserves_utf8_exactly_and_brackets_only_when_active() {
         let text = "e\u{301} 👩🏽‍💻\r\n";
-        let mut parser = ratty_vt::Parser::new(2, 20, 0);
+        let mut parser = fux_vt::Parser::new(2, 20, 0).expect("parser");
         assert_eq!(
             encode_agent_text(text, true, parser.screen()),
             text.as_bytes()
         );
-        parser.process(b"\x1b[?2004h");
+        parser.process(b"\x1b[?2004h").expect("process");
         let mut expected = b"\x1b[200~".to_vec();
         expected.extend_from_slice(text.as_bytes());
         expected.extend_from_slice(b"\x1b[201~");
