@@ -449,7 +449,12 @@ pub(crate) fn handle_mouse_input(
                     (forwarded_mouse.right_pressed, 2),
                 ] {
                     if pressed {
-                        runtime.write_input(&encode_mouse_event(cell, code, true, mouse_encoding));
+                        runtime.write_human_input(&encode_mouse_event(
+                            cell,
+                            code,
+                            true,
+                            mouse_encoding,
+                        ));
                     }
                 }
             }
@@ -510,7 +515,7 @@ pub(crate) fn handle_mouse_input(
                 } else {
                     35
                 };
-                runtime.write_input(&encode_mouse_event(
+                runtime.write_human_input(&encode_mouse_event(
                     cell,
                     button_code,
                     false,
@@ -571,7 +576,12 @@ pub(crate) fn handle_mouse_input(
                             position_to_cell(position, window_size, viewport, terminal)
                         })
                     {
-                        runtime.write_input(&encode_mouse_event(cell, 0, false, mouse_encoding));
+                        runtime.write_human_input(&encode_mouse_event(
+                            cell,
+                            0,
+                            false,
+                            mouse_encoding,
+                        ));
                         forwarded_mouse.last_cell = Some(cell);
                     }
                 } else if mode.is_3d() {
@@ -594,7 +604,12 @@ pub(crate) fn handle_mouse_input(
                             position_to_cell(position, window_size, viewport, terminal)
                         })
                     {
-                        runtime.write_input(&encode_mouse_event(cell, 0, true, mouse_encoding));
+                        runtime.write_human_input(&encode_mouse_event(
+                            cell,
+                            0,
+                            true,
+                            mouse_encoding,
+                        ));
                         forwarded_mouse.last_cell = Some(cell);
                     }
                 } else if mode.is_3d() {
@@ -613,7 +628,7 @@ pub(crate) fn handle_mouse_input(
                         position_to_cell(position, window_size, viewport, terminal)
                     })
                 {
-                    runtime.write_input(&encode_mouse_event(cell, 1, false, mouse_encoding));
+                    runtime.write_human_input(&encode_mouse_event(cell, 1, false, mouse_encoding));
                     forwarded_mouse.last_cell = Some(cell);
                 }
             }
@@ -626,7 +641,7 @@ pub(crate) fn handle_mouse_input(
                         position_to_cell(position, window_size, viewport, terminal)
                     })
                 {
-                    runtime.write_input(&encode_mouse_event(cell, 1, true, mouse_encoding));
+                    runtime.write_human_input(&encode_mouse_event(cell, 1, true, mouse_encoding));
                     forwarded_mouse.last_cell = Some(cell);
                 }
             }
@@ -639,7 +654,7 @@ pub(crate) fn handle_mouse_input(
                         position_to_cell(position, window_size, viewport, terminal)
                     })
                 {
-                    runtime.write_input(&encode_mouse_event(cell, 2, false, mouse_encoding));
+                    runtime.write_human_input(&encode_mouse_event(cell, 2, false, mouse_encoding));
                     forwarded_mouse.last_cell = Some(cell);
                 }
             }
@@ -652,7 +667,7 @@ pub(crate) fn handle_mouse_input(
                         position_to_cell(position, window_size, viewport, terminal)
                     })
                 {
-                    runtime.write_input(&encode_mouse_event(cell, 2, true, mouse_encoding));
+                    runtime.write_human_input(&encode_mouse_event(cell, 2, true, mouse_encoding));
                     forwarded_mouse.last_cell = Some(cell);
                 }
             }
@@ -680,7 +695,7 @@ pub(crate) fn handle_mouse_input(
                 .or(selection.cursor_position())
                 .and_then(|position| position_to_cell(position, window_size, viewport, terminal))
             {
-                runtime.write_input(&encode_mouse_event(
+                runtime.write_human_input(&encode_mouse_event(
                     cell,
                     if delta > 0.0 { 64 } else { 65 },
                     false,

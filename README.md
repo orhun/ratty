@@ -233,6 +233,33 @@ A blazingly fast serial monitor with plotter TUI and 3D telemetry
   <video width="80%" src="https://github.com/user-attachments/assets/29ba6751-65d7-4103-86b3-705ef47dbbfd"/>
 </div>
 
+## Agent Control
+
+Ratty includes an optional MCP server for controlling a running terminal from a compatible MCP
+client.
+
+e.g. for Codex, register it with the following commands:
+
+```bash
+codex mcp add ratty -- /usr/bin/ratty-mcp
+```
+
+And then you need to start Ratty with MCP enabled:
+
+```bash
+ratty --mcp
+```
+
+Here are the available capabilities:
+
+- `terminal_state`: inspect connection, grid, activity, camera and warp state
+- `observe`: read visible terminal content, styles, cursor and input modes
+- `type_text` / `press`: send text and mode-aware key presses
+- `set_terminal` / `set_window`: change grid, font, window size, position, title and background
+- `set_view` — change camera mode, pose and warp
+- `set_cursor`: configure the rat cursor's visibility and motion
+- `set_shape`: define a custom 3D terminal surface or restore its default shape
+
 ## Architecture
 
 ### Rendering pipeline
@@ -252,15 +279,6 @@ Current workflow:
 
 The terminal image is fully GPU-resident: the only data crossing from the main
 world to the render world each frame is compact scene data, not pixels.
-
-### Workspace development
-
-The Cargo workspace contains the Ratty application. The widget remains a
-separate package under `widget/` with its own lockfile.
-
-```sh
-cargo test --workspace --locked     # Application tests and doctests
-```
 
 ## Touchscreen
 
