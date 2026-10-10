@@ -62,8 +62,7 @@ tobj = "4.0"
 toml = "0.8"
 winit = { version = "0.30", default-features = false }
 
-# MCP control-plane binary. The GUI-side bridge itself remains synchronous so
-# it never adds an async runtime to Bevy's render process.
+# MCP control-plane binary.
 getrandom = "0.3"
 rmcp = { version = "3.2", features = ["transport-io"] }
 schemars = "1.0"

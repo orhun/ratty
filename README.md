@@ -280,15 +280,6 @@ Current workflow:
 The terminal image is fully GPU-resident: the only data crossing from the main
 world to the render world each frame is compact scene data, not pixels.
 
-### Workspace development
-
-The Cargo workspace contains the Ratty application. The widget remains a
-separate package under `widget/` with its own lockfile.
-
-```sh
-cargo test --workspace --locked     # Application tests and doctests
-```
-
 ## Touchscreen
 
 In 3D mode, drag with one finger to rotate the terminal. Move two fingers together to pan, and
