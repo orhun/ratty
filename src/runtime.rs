@@ -161,6 +161,7 @@ pub struct TerminalRuntime {
     output_sequence: u64,
     human_input_sequence: u64,
     agent_input_sequence: u64,
+    screen_revision: u64,
     last_output_at: Option<Instant>,
     child_exit_code: Option<u32>,
     shutdown_started: bool,
@@ -348,6 +349,7 @@ impl TerminalRuntime {
             output_sequence: 0,
             human_input_sequence: 0,
             agent_input_sequence: 0,
+            screen_revision: 0,
             last_output_at: None,
             child_exit_code: None,
             shutdown_started: false,
@@ -373,6 +375,9 @@ impl TerminalRuntime {
                 bevy::log::warn!("terminal output dropped: {err}");
             }
         });
+        if !bytes.is_empty() {
+            self.screen_revision = self.screen_revision.saturating_add(1);
+        }
     }
 
     /// Records one PTY output batch, including batches containing only
@@ -382,7 +387,6 @@ impl TerminalRuntime {
         self.last_output_at = Some(Instant::now());
     }
 
-    /// Returns the terminal screen.
     /// Returns the terminal screen as the user sees it, scrolled back by
     /// [`scrollback`](Self::scrollback) rows.
     pub fn screen(&self) -> ScreenView<'_> {
@@ -397,7 +401,11 @@ impl TerminalRuntime {
     /// Scrolls the view `rows` back into history, clamped to what it holds;
     /// `0` shows the live screen.
     pub fn set_scrollback(&mut self, rows: usize) {
-        self.scrollback = rows.min(self.parser.screen().history_len());
+        let rows = rows.min(self.parser.screen().history_len());
+        if self.scrollback != rows {
+            self.scrollback = rows;
+            self.screen_revision = self.screen_revision.saturating_add(1);
+        }
     }
 
     /// Returns each visible row as a string with trailing blanks trimmed.
@@ -455,6 +463,11 @@ impl TerminalRuntime {
     /// Returns the number of PTY output batches processed by Ratty.
     pub const fn output_sequence(&self) -> u64 {
         self.output_sequence
+    }
+
+    /// Returns the revision of the screen visible to observers.
+    pub const fn screen_revision(&self) -> u64 {
+        self.screen_revision
     }
 
     /// Returns the number of accepted local keyboard or mouse inputs.
@@ -535,6 +548,7 @@ impl TerminalRuntime {
                 }
             });
             self.last_parser_size = parser_size;
+            self.screen_revision = self.screen_revision.saturating_add(1);
         }
 
         if self.last_pty_size != pty_size {
@@ -816,6 +830,7 @@ mod resize_tests {
             output_sequence: 0,
             human_input_sequence: 0,
             agent_input_sequence: 0,
+            screen_revision: 0,
             last_output_at: None,
             child_exit_code: None,
             shutdown_started: false,

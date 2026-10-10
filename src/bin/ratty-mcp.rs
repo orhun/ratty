@@ -13,29 +13,8 @@ use rmcp::{
     schemars, tool, tool_handler, tool_router,
 };
 use serde::Deserialize;
-use std::sync::{Arc, Mutex};
-
-#[derive(Debug, Default)]
-struct ObservationCache {
-    revision: u64,
-    snapshot: Option<ScreenSnapshot>,
-}
-
-impl ObservationCache {
-    fn assign_revision(&mut self, snapshot: &mut ScreenSnapshot) {
-        snapshot.screen_revision = 0;
-        if self.snapshot.as_ref() != Some(snapshot) {
-            self.revision = self.revision.saturating_add(1);
-            self.snapshot = Some(snapshot.clone());
-        }
-        snapshot.screen_revision = self.revision;
-    }
-}
-
 #[derive(Clone, Debug, Default)]
-struct RattyMcp {
-    observations: Arc<Mutex<ObservationCache>>,
-}
+struct RattyMcp;
 
 fn call_value(command: ControlCommand) -> Result<serde_json::Value, String> {
     let response = ControlClient::request(command).map_err(|error| error.to_string())?;
@@ -256,27 +235,20 @@ impl RattyMcp {
         {
             return Err("observation rectangle dimensions must be non-zero".into());
         }
-        let value = call_value(ControlCommand::Snapshot(SnapshotRequest {
-            rect: None,
-            include_styles: true,
-            include_plain: false,
-        }))?;
-        let mut snapshot: ScreenSnapshot =
-            serde_json::from_value(value).map_err(|error| error.to_string())?;
-        {
-            let mut cache = self
-                .observations
-                .lock()
-                .map_err(|_| "observation cache lock is poisoned".to_owned())?;
-            cache.assign_revision(&mut snapshot);
-        }
         let rect = params.rect.map(|rect| SnapshotRect {
             row: rect.row,
             column: rect.column,
             rows: rect.rows,
             columns: rect.columns,
         });
-        let snapshot = snapshot.into_view(rect, params.include_styles, params.include_plain);
+        let value = call_value(ControlCommand::Snapshot(SnapshotRequest {
+            rect,
+            include_styles: true,
+            include_plain: false,
+        }))?;
+        let snapshot: ScreenSnapshot =
+            serde_json::from_value(value).map_err(|error| error.to_string())?;
+        let snapshot = snapshot.into_view(None, params.include_styles, params.include_plain);
         serde_json::to_string_pretty(&snapshot).map_err(|error| error.to_string())
     }
 
@@ -410,52 +382,4 @@ async fn main() -> anyhow::Result<()> {
     let server = RattyMcp::default().serve(rmcp::transport::stdio()).await?;
     server.waiting().await?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn empty_snapshot() -> ScreenSnapshot {
-        serde_json::from_value(serde_json::json!({
-            "screen_revision": 0,
-            "columns": 80,
-            "rows": 24,
-            "content": [],
-            "cursor": { "row": 0, "column": 0, "visible": true },
-            "modes": {
-                "alternate_screen": false,
-                "application_cursor": false,
-                "application_keypad": false,
-                "bracketed_paste": false,
-                "mouse_protocol": "none",
-                "mouse_encoding": "default",
-                "kitty_keyboard_flags": 0,
-                "modify_other_keys": null
-            }
-        }))
-        .expect("test snapshot must deserialize")
-    }
-
-    #[test]
-    fn observation_revisions_change_only_with_observable_state() {
-        let mut cache = ObservationCache::default();
-        let mut first = empty_snapshot();
-        cache.assign_revision(&mut first);
-        assert_eq!(first.screen_revision, 1);
-
-        let mut same = empty_snapshot();
-        cache.assign_revision(&mut same);
-        assert_eq!(same.screen_revision, 1);
-
-        let mut moved_cursor = empty_snapshot();
-        moved_cursor.cursor.column = 1;
-        cache.assign_revision(&mut moved_cursor);
-        assert_eq!(moved_cursor.screen_revision, 2);
-
-        let mut changed_mode = moved_cursor.clone();
-        changed_mode.modes.bracketed_paste = true;
-        cache.assign_revision(&mut changed_mode);
-        assert_eq!(changed_mode.screen_revision, 3);
-    }
 }
