@@ -1193,9 +1193,14 @@ pub(crate) fn animate_inline_kitty_planes(
     let mode = camera_slots.active().mode;
     let mode_changed = previous_mode.as_ref() != Some(&mode);
     *previous_mode = Some(mode);
+    let animation_warp = if surface_shape_animates(&warp.shape) {
+        warp.amount.max(f32::EPSILON)
+    } else {
+        warp.amount
+    };
     if !should_animate_inline_kitty_planes(
         mode,
-        warp.amount,
+        animation_warp,
         warp.is_changed(),
         mode_changed,
         mobius_transition.active,
@@ -1769,7 +1774,11 @@ pub fn animate_terminal_plane_warp(
 
     let needs_update = should_animate_terminal_plane_warp(
         mode,
-        warp.amount,
+        if surface_shape_animates(&warp.shape) {
+            warp.amount.max(f32::EPSILON)
+        } else {
+            warp.amount
+        },
         camera_slots.is_changed() || warp.is_changed(),
         mobius_transition.active,
         mobius_transition.is_changed(),
@@ -2104,14 +2113,120 @@ fn terminal_surface_point(
             depth_offset,
             mobius_progress,
         ),
-        TerminalSurfaceKind::Custom => custom_surface_point(shape, local_x, local_y, depth_offset),
+        TerminalSurfaceKind::Plane => plane_surface_point(
+            TerminalPresentationMode::Plane3d,
+            local_x,
+            local_y,
+            warp.amount * shape.amplitude,
+            elapsed_secs,
+            depth_offset,
+            0.0,
+        ),
+        TerminalSurfaceKind::Mobius => mobius_surface_point(
+            local_x,
+            local_y,
+            warp.amount * shape.amplitude,
+            elapsed_secs,
+            depth_offset,
+        ),
+        TerminalSurfaceKind::PaperPlane => {
+            paper_plane_surface_point(shape, local_x, local_y, depth_offset)
+        }
+        TerminalSurfaceKind::Gomboc => {
+            let longitude = local_x * std::f32::consts::TAU;
+            let latitude = local_y * std::f32::consts::PI;
+            let asymmetry = 1.0 + 0.22 * latitude.sin() - 0.12 * (2.0 * latitude).sin();
+            let radial = latitude.cos() * asymmetry * shape.amplitude.max(0.01);
+            Vec3::new(
+                longitude.sin() * radial * 0.48,
+                latitude.sin() * 0.52 * shape.amplitude,
+                depth_offset + longitude.cos() * radial * 320.0,
+            )
+        }
+        TerminalSurfaceKind::Cylinder => {
+            let angle = local_x * std::f32::consts::PI * shape.twist;
+            let radius = 0.5 / shape.twist.abs().max(0.05);
+            Vec3::new(
+                angle.sin() * radius,
+                local_y,
+                depth_offset + (1.0 - angle.cos()) * 320.0 * shape.amplitude,
+            )
+        }
+        TerminalSurfaceKind::Sphere => {
+            let longitude = local_x * std::f32::consts::TAU * shape.twist;
+            let latitude = local_y * std::f32::consts::PI;
+            let radial = latitude.cos() * 0.5 * shape.amplitude;
+            Vec3::new(
+                longitude.sin() * radial,
+                latitude.sin() * 0.5 * shape.amplitude,
+                depth_offset + longitude.cos() * radial * 320.0,
+            )
+        }
+        TerminalSurfaceKind::Wave => {
+            wave_surface_point(shape, local_x, local_y, elapsed_secs, depth_offset)
+        }
+        TerminalSurfaceKind::Custom => {
+            custom_surface_point(shape, local_x, local_y, elapsed_secs, depth_offset)
+        }
     }
+}
+
+fn surface_shape_animates(shape: &TerminalSurfaceShape) -> bool {
+    shape.twist != 0.0
+        && match shape.kind {
+            TerminalSurfaceKind::Wave => true,
+            TerminalSurfaceKind::Custom => shape.amplitude > 0.0,
+            _ => false,
+        }
+}
+
+fn paper_plane_surface_point(
+    shape: &TerminalSurfaceShape,
+    local_x: f32,
+    local_y: f32,
+    depth_offset: f32,
+) -> Vec3 {
+    // Keep the silhouette and folds piecewise linear so the surface reads as
+    // folded paper rather than a rounded, fabric-like wave.
+    let along = (0.5 - local_y).clamp(0.0, 1.0);
+    // A paper plane tapers to its nose and stays broad at the trailing edge.
+    let span = along;
+    let across = local_x.abs() * 2.0;
+    let fold_height = if across < 0.12 {
+        28.0 - (across / 0.12) * 23.0
+    } else if across < 0.2 {
+        5.0 - ((across - 0.12) / 0.08) * 16.0
+    } else if across < 0.55 {
+        -11.0 + ((across - 0.2) / 0.35) * 15.0
+    } else {
+        4.0 + ((across - 0.55) / 0.45) * 4.0
+    };
+    let depth = fold_height * shape.amplitude * shape.twist.abs().clamp(0.05, 2.0);
+
+    Vec3::new(local_x * span, local_y, depth_offset + depth)
+}
+
+fn wave_surface_point(
+    shape: &TerminalSurfaceShape,
+    local_x: f32,
+    local_y: f32,
+    elapsed_secs: f32,
+    depth_offset: f32,
+) -> Vec3 {
+    let phase =
+        (local_x + 0.5) * std::f32::consts::TAU * shape.frequency + elapsed_secs * shape.twist;
+    let depth = phase.sin()
+        * (local_y * std::f32::consts::PI * shape.frequency).cos()
+        * 120.0
+        * shape.amplitude;
+    Vec3::new(local_x, local_y, depth + depth_offset)
 }
 
 fn custom_surface_point(
     shape: &TerminalSurfaceShape,
     local_x: f32,
     local_y: f32,
+    elapsed_secs: f32,
     depth_offset: f32,
 ) -> Vec3 {
     let columns = usize::from(shape.control_columns);
@@ -2131,6 +2246,17 @@ fn custom_surface_point(
         .lerp(shape.control_points[y1 * columns + x1], gx - x0 as f32);
     let mut point = top.lerp(bottom, gy - y0 as f32);
     point.z = point.z * shape.amplitude + depth_offset;
+    if shape.twist != 0.0 {
+        let (min_z, max_z) = shape.control_points.iter().fold(
+            (f32::INFINITY, f32::NEG_INFINITY),
+            |(min_z, max_z), control| (min_z.min(control.z), max_z.max(control.z)),
+        );
+        let ripple_depth = (max_z - min_z) * shape.amplitude * 0.12;
+        let phase =
+            (local_x + 0.5) * std::f32::consts::TAU * shape.frequency + elapsed_secs * shape.twist;
+        point.z +=
+            phase.sin() * (local_y * std::f32::consts::PI * shape.frequency).cos() * ripple_depth;
+    }
     point
 }
 
@@ -2161,6 +2287,49 @@ fn mobius_surface_point(
 mod tests {
     use super::*;
     use crate::scene::MobiusEnterZoomFloor;
+
+    #[test]
+    fn custom_surface_ripples_with_twist_and_can_be_stopped() {
+        let mut shape = TerminalSurfaceShape {
+            kind: TerminalSurfaceKind::Custom,
+            control_columns: 2,
+            control_rows: 2,
+            control_points: vec![
+                Vec3::new(-0.5, 0.5, 350.0),
+                Vec3::new(0.5, 0.5, -350.0),
+                Vec3::new(-0.5, -0.5, -350.0),
+                Vec3::new(0.5, -0.5, 350.0),
+            ],
+            ..default()
+        };
+        let first = custom_surface_point(&shape, 0.1, 0.1, 0.0, 0.0);
+        let moving = custom_surface_point(&shape, 0.1, 0.1, 1.0, 0.0);
+        assert!((first.z - moving.z).abs() > 1.0);
+        assert!(surface_shape_animates(&shape));
+
+        shape.twist = 0.0;
+        let stopped = custom_surface_point(&shape, 0.1, 0.1, 1.0, 0.0);
+        assert!((first.z - stopped.z).abs() > 1.0);
+        assert!(!surface_shape_animates(&shape));
+    }
+
+    #[test]
+    fn paper_plane_keeps_broad_wings_and_forms_a_nose_and_tail() {
+        let shape = TerminalSurfaceShape {
+            kind: TerminalSurfaceKind::PaperPlane,
+            ..default()
+        };
+        let nose = paper_plane_surface_point(&shape, 0.5, 0.5, 0.0);
+        let wing = paper_plane_surface_point(&shape, 0.5, -0.08, 0.0);
+        let tail = paper_plane_surface_point(&shape, 0.5, -0.5, 0.0);
+        let spine = paper_plane_surface_point(&shape, 0.0, -0.08, 0.0);
+        let crease = paper_plane_surface_point(&shape, 0.1, -0.08, 0.0);
+        assert!(nose.x.abs() < 0.01);
+        assert_eq!(nose.y, 0.5);
+        assert!(tail.x.abs() > wing.x.abs());
+        assert!(spine.z - crease.z > 12.0);
+        assert!(wing.z - crease.z > 4.0);
+    }
 
     #[derive(Resource, Default)]
     struct CameraChangedProbe(bool);

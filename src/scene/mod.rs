@@ -64,6 +64,20 @@ pub enum TerminalSurfaceKind {
     /// Follow the active presentation mode (plane or Möbius).
     #[default]
     ModeDefault,
+    /// Flat terminal plane.
+    Plane,
+    /// Möbius strip surface.
+    Mobius,
+    /// Folded paper-plane surface.
+    PaperPlane,
+    /// Asymmetric Gömböc surface.
+    Gomboc,
+    /// Cylindrical surface.
+    Cylinder,
+    /// Spherical surface.
+    Sphere,
+    /// Animated wave surface.
+    Wave,
     /// A surface sampled from an agent-provided control-point lattice.
     Custom,
 }
@@ -75,6 +89,10 @@ pub struct TerminalSurfaceShape {
     pub kind: TerminalSurfaceKind,
     /// Overall deformation multiplier.
     pub amplitude: f32,
+    /// Spatial frequency for animated wave and custom surfaces.
+    pub frequency: f32,
+    /// Animation speed for wave and custom surfaces; zero makes them static.
+    pub twist: f32,
     /// Number of columns in `control_points` for a custom surface.
     pub control_columns: u8,
     /// Number of rows in `control_points` for a custom surface.
@@ -88,6 +106,8 @@ impl Default for TerminalSurfaceShape {
         Self {
             kind: TerminalSurfaceKind::ModeDefault,
             amplitude: 1.0,
+            frequency: 2.0,
+            twist: 1.0,
             control_columns: 0,
             control_rows: 0,
             control_points: Vec::new(),
@@ -161,6 +181,8 @@ type PlaneBackVisibilityQuery<'w, 's> =
     Query<'w, 's, &'static mut Visibility, With<TerminalPlaneBack>>;
 type PlaneMaterialQuery<'w, 's> =
     Query<'w, 's, &'static MeshMaterial3d<StandardMaterial>, With<TerminalPlane>>;
+type PlaneBackMaterialQuery<'w, 's> =
+    Query<'w, 's, &'static MeshMaterial3d<StandardMaterial>, With<TerminalPlaneBack>>;
 type PlaneTransformQuery<'w, 's> = Query<'w, 's, &'static mut Transform, With<TerminalPlane>>;
 type PlaneBackTransformQuery<'w, 's> =
     Query<'w, 's, &'static mut Transform, With<TerminalPlaneBack>>;
@@ -231,6 +253,7 @@ pub(crate) struct PresentationParams<'w, 's> {
         ),
     >,
     plane_materials: PlaneMaterialQuery<'w, 's>,
+    plane_back_materials: PlaneBackMaterialQuery<'w, 's>,
     materials: ResMut<'w, Assets<StandardMaterial>>,
     plane_transforms:
         ParamSet<'w, 's, (PlaneTransformQuery<'w, 's>, PlaneBackTransformQuery<'w, 's>)>,
@@ -355,8 +378,10 @@ pub(crate) fn setup_scene(mut params: SetupSceneParams) {
         NoFrustumCulling,
     ));
 
-    let front_mesh = meshes.add(terminal_plane_mesh(32, 20));
-    let back_mesh = meshes.add(terminal_plane_mesh(32, 20));
+    // The surface can carry high-frequency waves and local control-lattice
+    // folds. A coarse grid aliases those shapes into nearly flat triangles.
+    let front_mesh = meshes.add(terminal_plane_mesh(128, 80));
+    let back_mesh = meshes.add(terminal_plane_mesh(128, 80));
     commands.insert_resource(TerminalPlaneMeshes {
         front: front_mesh.clone(),
         back: back_mesh.clone(),
@@ -557,11 +582,15 @@ fn camera_orbit_rotation(yaw: f32, pitch: f32, roll: f32) -> Quat {
 pub(crate) fn apply_terminal_presentation(
     camera_slots: Res<TerminalCameraSlots>,
     mobius_transition: Res<MobiusTransition>,
+    warp: Res<TerminalPlaneWarp>,
     mut last_active_preset: Local<Option<(usize, TerminalCameraPreset)>>,
     mut params: PresentationParams,
 ) {
     let current = (camera_slots.active_slot(), *camera_slots.active());
-    if last_active_preset.as_ref() == Some(&current) && !mobius_transition.is_changed() {
+    if last_active_preset.as_ref() == Some(&current)
+        && !mobius_transition.is_changed()
+        && !warp.is_changed()
+    {
         return;
     }
     *last_active_preset = Some(current);
@@ -569,6 +598,7 @@ pub(crate) fn apply_terminal_presentation(
     let PresentationParams {
         visibility_queries,
         plane_materials,
+        plane_back_materials,
         materials,
         plane_transforms,
         camera_2d,
@@ -638,13 +668,32 @@ pub(crate) fn apply_terminal_presentation(
     }
 
     if let Ok(front_material) = plane_materials.single() {
-        let cull_mode = if is_mobius { None } else { Some(Face::Back) };
+        // Custom surfaces can fold past 90 degrees, reversing triangle winding. Keep both sides
+        // visible so those folds do not disappear when viewed from the camera.
+        let cull_mode = if is_mobius || warp.shape.kind == TerminalSurfaceKind::Custom {
+            None
+        } else {
+            Some(Face::Back)
+        };
         // `get_mut` marks the material modified and re-prepares it on the
         // GPU; only take it when the cull mode actually changes.
         let needs_update = materials
             .get(&front_material.0)
             .is_some_and(|material| material.cull_mode != cull_mode);
         if needs_update && let Some(mut material) = materials.get_mut(&front_material.0) {
+            material.cull_mode = cull_mode;
+        }
+    }
+    if let Ok(back_material) = plane_back_materials.single() {
+        let cull_mode = if is_mobius || warp.shape.kind == TerminalSurfaceKind::Custom {
+            None
+        } else {
+            Some(Face::Back)
+        };
+        let needs_update = materials
+            .get(&back_material.0)
+            .is_some_and(|material| material.cull_mode != cull_mode);
+        if needs_update && let Some(mut material) = materials.get_mut(&back_material.0) {
             material.cull_mode = cull_mode;
         }
     }

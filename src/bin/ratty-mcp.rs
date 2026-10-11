@@ -213,6 +213,13 @@ struct SetTerminalParams {
 #[serde(rename_all = "snake_case")]
 enum SurfaceKind {
     Automatic,
+    Plane,
+    Mobius,
+    PaperPlane,
+    Gomboc,
+    Cylinder,
+    Sphere,
+    Wave,
     Custom,
 }
 
@@ -220,6 +227,13 @@ impl From<SurfaceKind> for ControlSurfaceKind {
     fn from(value: SurfaceKind) -> Self {
         match value {
             SurfaceKind::Automatic => Self::Automatic,
+            SurfaceKind::Plane => Self::Plane,
+            SurfaceKind::Mobius => Self::Mobius,
+            SurfaceKind::PaperPlane => Self::PaperPlane,
+            SurfaceKind::Gomboc => Self::Gomboc,
+            SurfaceKind::Cylinder => Self::Cylinder,
+            SurfaceKind::Sphere => Self::Sphere,
+            SurfaceKind::Wave => Self::Wave,
             SurfaceKind::Custom => Self::Custom,
         }
     }
@@ -227,11 +241,17 @@ impl From<SurfaceKind> for ControlSurfaceKind {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct SetShapeParams {
-    /// Use custom for a control lattice or automatic to restore the normal view surface.
+    /// Surface family: automatic, plane, mobius, paper_plane, gomboc, cylinder, sphere, wave, or custom.
     kind: SurfaceKind,
-    /// Depth multiplier for custom control points, from 0 to 10.
+    /// Wave amplitude or custom control-point depth multiplier, from 0 to 10.
     #[schemars(range(min = 0.0, max = 10.0))]
     amplitude: Option<f32>,
+    /// Spatial repetition count for animated wave or custom surfaces, from 0.01 to 32.
+    #[schemars(range(min = 0.01, max = 32.0))]
+    frequency: Option<f32>,
+    /// Animation speed for wave or custom surfaces; custom surfaces are static by default and zero disables motion, from -16 to 16.
+    #[schemars(range(min = -16.0, max = 16.0))]
+    twist: Option<f32>,
     /// Custom lattice width, from 2 to 8.
     #[schemars(range(min = 2, max = 8))]
     control_columns: Option<u8>,
@@ -379,12 +399,14 @@ impl RattyMcp {
 
     /// Define an agent-controlled terminal surface or restore the normal view surface.
     #[tool(
-        description = "Define the terminal's 3D surface with a custom control-point lattice, or restore the normal plane/Mobius view surface"
+        description = "Select a built-in terminal surface, define a custom 3D control-point lattice, or restore the normal plane/Mobius surface"
     )]
     fn set_shape(&self, Parameters(params): Parameters<SetShapeParams>) -> Result<String, String> {
         call(ControlCommand::SetShape(ShapeUpdate {
             kind: params.kind.into(),
             amplitude: params.amplitude,
+            frequency: params.frequency,
+            twist: params.twist,
             control_columns: params.control_columns,
             control_rows: params.control_rows,
             control_points: params.control_points,

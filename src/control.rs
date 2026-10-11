@@ -136,6 +136,13 @@ pub struct TerminalUpdate {
 #[allow(missing_docs)]
 pub enum ControlSurfaceKind {
     Automatic,
+    Plane,
+    Mobius,
+    PaperPlane,
+    Gomboc,
+    Cylinder,
+    Sphere,
+    Wave,
     Custom,
 }
 
@@ -143,6 +150,13 @@ impl From<TerminalSurfaceKind> for ControlSurfaceKind {
     fn from(value: TerminalSurfaceKind) -> Self {
         match value {
             TerminalSurfaceKind::ModeDefault => Self::Automatic,
+            TerminalSurfaceKind::Plane => Self::Plane,
+            TerminalSurfaceKind::Mobius => Self::Mobius,
+            TerminalSurfaceKind::PaperPlane => Self::PaperPlane,
+            TerminalSurfaceKind::Gomboc => Self::Gomboc,
+            TerminalSurfaceKind::Cylinder => Self::Cylinder,
+            TerminalSurfaceKind::Sphere => Self::Sphere,
+            TerminalSurfaceKind::Wave => Self::Wave,
             TerminalSurfaceKind::Custom => Self::Custom,
         }
     }
@@ -154,6 +168,8 @@ impl From<TerminalSurfaceKind> for ControlSurfaceKind {
 pub struct ShapeUpdate {
     pub kind: ControlSurfaceKind,
     pub amplitude: Option<f32>,
+    pub frequency: Option<f32>,
+    pub twist: Option<f32>,
     pub control_columns: Option<u8>,
     pub control_rows: Option<u8>,
     pub control_points: Option<Vec<[f32; 3]>>,
@@ -720,6 +736,8 @@ fn apply_command(command: ControlCommand, params: &mut ControlApplyParams) -> Co
                 "surface": {
                     "kind": ControlSurfaceKind::from(warp.shape.kind),
                     "amplitude": warp.shape.amplitude,
+                    "frequency": warp.shape.frequency,
+                    "twist": warp.shape.twist,
                     "control_columns": warp.shape.control_columns,
                     "control_rows": warp.shape.control_rows,
                     "control_points": warp.shape.control_points.iter().map(|point| point.to_array()).collect::<Vec<_>>(),
@@ -1025,10 +1043,33 @@ fn apply_command(command: ControlCommand, params: &mut ControlApplyParams) -> Co
                     "shape amplitude must be finite and between 0 and 10",
                 );
             }
+            let frequency = update.frequency.unwrap_or(2.0);
+            if !frequency.is_finite() || !(0.01..=32.0).contains(&frequency) {
+                return ControlResponse::error(
+                    "shape frequency must be finite and between 0.01 and 32",
+                );
+            }
             let kind = match update.kind {
                 ControlSurfaceKind::Automatic => TerminalSurfaceKind::ModeDefault,
+                ControlSurfaceKind::Plane => TerminalSurfaceKind::Plane,
+                ControlSurfaceKind::Mobius => TerminalSurfaceKind::Mobius,
+                ControlSurfaceKind::PaperPlane => TerminalSurfaceKind::PaperPlane,
+                ControlSurfaceKind::Gomboc => TerminalSurfaceKind::Gomboc,
+                ControlSurfaceKind::Cylinder => TerminalSurfaceKind::Cylinder,
+                ControlSurfaceKind::Sphere => TerminalSurfaceKind::Sphere,
+                ControlSurfaceKind::Wave => TerminalSurfaceKind::Wave,
                 ControlSurfaceKind::Custom => TerminalSurfaceKind::Custom,
             };
+            let twist = update
+                .twist
+                .unwrap_or(if kind == TerminalSurfaceKind::Custom {
+                    0.0
+                } else {
+                    1.0
+                });
+            if !twist.is_finite() || !(-16.0..=16.0).contains(&twist) {
+                return ControlResponse::error("shape twist must be finite and between -16 and 16");
+            }
             let (control_columns, control_rows, control_points) = if kind
                 == TerminalSurfaceKind::Custom
             {
@@ -1065,27 +1106,40 @@ fn apply_command(command: ControlCommand, params: &mut ControlApplyParams) -> Co
             warp.shape = TerminalSurfaceShape {
                 kind,
                 amplitude,
+                frequency,
+                twist,
                 control_columns,
                 control_rows,
                 control_points,
             };
-            if kind == TerminalSurfaceKind::Custom
-                && (!slots.active().mode.is_3d()
-                    || slots.active().mode == TerminalPresentationMode::Mobius3d)
-            {
+            let active_mode = slots.active().mode;
+            let needs_camera_mode = match kind {
+                TerminalSurfaceKind::ModeDefault => false,
+                TerminalSurfaceKind::Mobius => active_mode != TerminalPresentationMode::Mobius3d,
+                _ => !active_mode.is_3d() || active_mode == TerminalPresentationMode::Mobius3d,
+            };
+            if needs_camera_mode {
                 camera_updates.write(TerminalCameraUpdate {
                     slot: slots.active_slot(),
                     activate: false,
-                    mode: Some(TerminalPresentationMode::Perspective3d),
+                    mode: Some(if kind == TerminalSurfaceKind::Mobius {
+                        TerminalPresentationMode::Mobius3d
+                    } else {
+                        TerminalPresentationMode::Perspective3d
+                    }),
                     scale: None,
                     fov: None,
                     translation: OptionalVec3::default(),
                     rotation_degrees: OptionalVec3::default(),
                 });
             }
-            ControlResponse::data(
-                serde_json::json!({ "accepted": true, "kind": format!("{kind:?}") }),
-            )
+            ControlResponse::data(serde_json::json!({
+                "accepted": true,
+                "kind": ControlSurfaceKind::from(kind),
+                "amplitude": warp.shape.amplitude,
+                "frequency": warp.shape.frequency,
+                    "twist": warp.shape.twist,
+            }))
         }
     }
 }
@@ -1160,6 +1214,8 @@ impl ControlClient {
 mod tests {
     use super::*;
     use fux_vt::Parser;
+
+    use crate::screen::ScreenView;
 
     fn snapshot(input: &str, rows: u16, columns: u16) -> ScreenSnapshot {
         let mut parser = Parser::new(rows, columns, 0).expect("parser");

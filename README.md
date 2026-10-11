@@ -250,6 +250,19 @@ And then you need to start Ratty with MCP enabled:
 ratty --mcp
 ```
 
+```text
+MCP client (e.g. Codex)
+        | starts ratty-mcp (MCP over stdin/stdout)
+        v
+   ratty-mcp
+        | authenticated local control socket
+        v
+ Ratty GUI (--mcp)
+        |
+        v
+  Running terminal
+```
+
 Here are the available capabilities:
 
 - `terminal_state`: inspect connection, grid, activity, camera and warp state
@@ -258,7 +271,13 @@ Here are the available capabilities:
 - `set_terminal` / `set_window`: change grid, font, window size, position, title and background
 - `set_view` — change camera mode, pose and warp
 - `set_cursor`: configure the rat cursor's visibility and motion
-- `set_shape`: define a custom 3D terminal surface or restore its default shape
+- `set_shape`: choose a built-in surface or define a custom 3D lattice; custom shapes are static by default, with an optional animated ripple
+
+Try this example prompt:
+
+```text
+Turn my Ratty terminal into a cyberpunk data storm: shape its actual surface with an asymmetric custom 4×4 XYZ lattice and alternating peaks and valleys from −350 to +350; use perspective mode with yaw 24°, pitch −16°, roll 7°, FOV 105°, and camera Z −180; resize the window to 1500×900 with a near-black RGB [5, 1, 18] background; keep the center text readable, distort the edges, and inspect the result to refine the camera.
+```
 
 ## Architecture
 
