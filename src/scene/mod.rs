@@ -882,6 +882,7 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<TerminalCameraSlots>()
             .init_resource::<MobiusTransition>()
+            .init_resource::<TerminalPlaneWarp>()
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<ChangedCameraCount>();
         let material = app

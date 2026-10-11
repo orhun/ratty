@@ -280,7 +280,7 @@ Use the Ratty terminal MCP to turn my terminal into a cyberpunk data storm. Use 
 ```
 
 ```text
-Use the Ratty terminal MCP and GNU `du`, `sort`, and `tail` to list the 10 largest files and directories under the current directory, staying on this filesystem and excluding `.git` and `target`. Run the command, wait for it to finish, and summarize the results.
+Use the Ratty terminal MCP to run a read-only project audit. Report the current Git branch and status; use GNU `find` and `wc` to count Rust source files, `grep` to find TODO/FIXME markers, and `du`, `sort`, and `head` to list the 10 largest paths, excluding `.git` and `target`. Then run `cargo fmt --check`, `cargo clippy --workspace`, and `cargo test --workspace` one at a time, waiting for each to finish. Summarize the results and relevant errors without changing files.
 ```
 
 ## Architecture

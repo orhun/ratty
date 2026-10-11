@@ -312,11 +312,12 @@ struct AcceptedConnections {
 
 impl AcceptedConnections {
     fn push(&self, stream: TcpStream) {
-        if let Ok(mut state) = self.queue.lock() {
-            if !state.1 && state.0.len() < CONNECTION_QUEUE {
-                state.0.push_back(stream);
-                self.ready.notify_one();
-            }
+        if let Ok(mut state) = self.queue.lock()
+            && !state.1
+            && state.0.len() < CONNECTION_QUEUE
+        {
+            state.0.push_back(stream);
+            self.ready.notify_one();
         }
     }
 
@@ -620,6 +621,17 @@ fn write_discovery(path: &Path, discovery: &Discovery) -> anyhow::Result<()> {
 }
 
 /// Applies queued MCP requests on Bevy's main world.
+type TerminalPlaneBackTransformQuery<'w, 's> = Query<
+    'w,
+    's,
+    &'static mut Transform,
+    (
+        With<TerminalPlaneBack>,
+        Without<TerminalPlane>,
+        Without<TerminalSprite>,
+    ),
+>;
+
 #[derive(SystemParam)]
 pub(crate) struct ControlApplyParams<'w, 's> {
     runtime: ResMut<'w, TerminalRuntime>,
@@ -633,16 +645,7 @@ pub(crate) struct ControlApplyParams<'w, 's> {
     viewport: ResMut<'w, TerminalViewport>,
     plane_query:
         Query<'w, 's, &'static mut Transform, (With<TerminalPlane>, Without<TerminalSprite>)>,
-    plane_back_query: Query<
-        'w,
-        's,
-        &'static mut Transform,
-        (
-            With<TerminalPlaneBack>,
-            Without<TerminalPlane>,
-            Without<TerminalSprite>,
-        ),
-    >,
+    plane_back_query: TerminalPlaneBackTransformQuery<'w, 's>,
     clear_color: ResMut<'w, ClearColor>,
 }
 

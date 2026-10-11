@@ -451,7 +451,7 @@ async fn main() -> anyhow::Result<()> {
         "ratty-mcp {} starting (MCP over stdin/stdout)",
         env!("CARGO_PKG_VERSION")
     );
-    let server = RattyMcp::default().serve(rmcp::transport::stdio()).await?;
+    let server = RattyMcp.serve(rmcp::transport::stdio()).await?;
     eprintln!("ratty-mcp: MCP client initialized; waiting for tool requests");
     server.waiting().await?;
     eprintln!("ratty-mcp stopped");
