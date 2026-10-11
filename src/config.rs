@@ -30,6 +30,8 @@ pub struct AppConfig {
     pub shell: ShellConfig,
     /// Extra environment variables.
     pub env: BTreeMap<String, String>,
+    /// MCP control server settings.
+    pub mcp: McpConfig,
     /// User-defined key bindings.
     pub bindings: BindingsConfig,
     /// Font settings.
@@ -38,6 +40,14 @@ pub struct AppConfig {
     pub theme: ThemeConfig,
     /// Cursor settings.
     pub cursor: CursorConfig,
+}
+
+/// Settings for the optional MCP control server.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct McpConfig {
+    /// Starts the authenticated local control socket when Ratty launches.
+    pub enabled: bool,
 }
 
 impl AppConfig {

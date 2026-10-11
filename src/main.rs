@@ -55,7 +55,9 @@ fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(&asset_root)?;
     let window_icon = load_window_icon()?;
 
-    let control = cli.mcp.then(TerminalControl::spawn).transpose()?;
+    let control = (cli.mcp || app_config.mcp.enabled)
+        .then(TerminalControl::spawn)
+        .transpose()?;
 
     let mut app = App::new();
     if let Some(control) = control {

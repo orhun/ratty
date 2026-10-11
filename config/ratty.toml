@@ -19,6 +19,9 @@ mouse_scroll_lines = 3
 [env]
 TERM = "xterm-256color"
 
+[mcp]
+enabled = false
+
 [font]
 family = "DejaVu Sans Mono"
 # Explicit font files override `family` (paths relative to this file).

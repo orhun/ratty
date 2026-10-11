@@ -244,11 +244,14 @@ e.g. for Codex, register it with the following commands:
 codex mcp add ratty -- /usr/bin/ratty-mcp
 ```
 
-And then you need to start Ratty with MCP enabled:
+Enable it in `ratty.toml` as follows (or launch `ratty-mcp`):
 
-```bash
-ratty --mcp
+```toml
+[mcp]
+enabled = true
 ```
+
+The diagram of the control flow is as follows:
 
 ```text
 MCP client (e.g. Codex)
@@ -257,7 +260,7 @@ MCP client (e.g. Codex)
    ratty-mcp
         | authenticated local control socket
         v
- Ratty GUI (--mcp)
+   Ratty GUI
         |
         v
   Running terminal
