@@ -1774,7 +1774,9 @@ pub fn animate_terminal_plane_warp(
 
     let needs_update = should_animate_terminal_plane_warp(
         mode,
-        if surface_shape_animates(&warp.shape) {
+        if !warp.shape.custom_vertices.is_empty() {
+            0.0
+        } else if surface_shape_animates(&warp.shape) {
             warp.amount.max(f32::EPSILON)
         } else {
             warp.amount
@@ -1796,9 +1798,8 @@ pub fn animate_terminal_plane_warp(
         1.0,
         mobius_progress,
     );
-    // The back sheet is hidden in Mobius mode; skipping it avoids uploading a
-    // mesh nothing renders.
-    if !mode.is_mobius() {
+    // The back sheet is hidden for Möbius and custom mesh surfaces, so skip its upload.
+    if !mode.is_mobius() && warp.shape.custom_vertices.is_empty() {
         apply_plane_warp(
             meshes.get_mut(&plane_meshes.back),
             mode,
@@ -1901,6 +1902,10 @@ fn apply_plane_warp(
     let Some(mut mesh) = mesh else {
         return;
     };
+    if !warp.shape.custom_vertices.is_empty() {
+        *mesh = custom_surface_mesh(&warp.shape);
+        return;
+    }
     let Some(VertexAttributeValues::Float32x2(uvs)) = mesh.attribute(Mesh::ATTRIBUTE_UV_0) else {
         return;
     };
@@ -1919,6 +1924,36 @@ fn apply_plane_warp(
         position[1] = point.y;
         position[2] = oriented_plane_depth(mode, point.z, direction);
     }
+}
+
+fn custom_surface_mesh(shape: &TerminalSurfaceShape) -> Mesh {
+    let positions = shape
+        .custom_vertices
+        .iter()
+        .map(|vertex| {
+            [
+                vertex.position.x,
+                vertex.position.y,
+                vertex.position.z * shape.amplitude,
+            ]
+        })
+        .collect::<Vec<_>>();
+    let uvs = shape
+        .custom_vertices
+        .iter()
+        .map(|vertex| vertex.uv.to_array())
+        .collect::<Vec<_>>();
+    let normals = vec![[0.0, 0.0, 1.0]; positions.len()];
+    let indices = shape
+        .custom_triangles
+        .iter()
+        .flat_map(|triangle| triangle.iter().copied())
+        .collect::<Vec<_>>();
+    Mesh::new(PrimitiveTopology::TriangleList, Default::default())
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
+        .with_inserted_indices(Indices::U32(indices))
 }
 
 fn oriented_plane_depth(mode: TerminalPresentationMode, depth: f32, direction: f32) -> f32 {
@@ -2165,6 +2200,9 @@ fn terminal_surface_point(
         TerminalSurfaceKind::Wave => {
             wave_surface_point(shape, local_x, local_y, elapsed_secs, depth_offset)
         }
+        TerminalSurfaceKind::Custom if !shape.custom_vertices.is_empty() => {
+            custom_mesh_surface_point(shape, local_x, local_y, depth_offset)
+        }
         TerminalSurfaceKind::Custom => {
             custom_surface_point(shape, local_x, local_y, elapsed_secs, depth_offset)
         }
@@ -2175,7 +2213,9 @@ fn surface_shape_animates(shape: &TerminalSurfaceShape) -> bool {
     shape.twist != 0.0
         && match shape.kind {
             TerminalSurfaceKind::Wave => true,
-            TerminalSurfaceKind::Custom => shape.amplitude > 0.0,
+            TerminalSurfaceKind::Custom => {
+                shape.custom_vertices.is_empty() && shape.amplitude > 0.0
+            }
             _ => false,
         }
 }
@@ -2258,6 +2298,42 @@ fn custom_surface_point(
             phase.sin() * (local_y * std::f32::consts::PI * shape.frequency).cos() * ripple_depth;
     }
     point
+}
+
+fn custom_mesh_surface_point(
+    shape: &TerminalSurfaceShape,
+    local_x: f32,
+    local_y: f32,
+    depth_offset: f32,
+) -> Vec3 {
+    let uv = Vec2::new(local_x + 0.5, 0.5 - local_y);
+    for &[a, b, c] in &shape.custom_triangles {
+        let a = shape.custom_vertices[a as usize];
+        let b = shape.custom_vertices[b as usize];
+        let c = shape.custom_vertices[c as usize];
+        let Some((wa, wb, wc)) = barycentric_weights(uv, a.uv, b.uv, c.uv) else {
+            continue;
+        };
+        if wa >= -1e-5 && wb >= -1e-5 && wc >= -1e-5 {
+            let mut point = a.position * wa + b.position * wb + c.position * wc;
+            point.z = point.z * shape.amplitude + depth_offset;
+            return point;
+        }
+    }
+    Vec3::new(local_x, local_y, depth_offset)
+}
+
+fn barycentric_weights(point: Vec2, a: Vec2, b: Vec2, c: Vec2) -> Option<(f32, f32, f32)> {
+    let ab = b - a;
+    let ac = c - a;
+    let ap = point - a;
+    let denominator = ab.perp_dot(ac);
+    if denominator.abs() < 1e-8 {
+        return None;
+    }
+    let wb = ap.perp_dot(ac) / denominator;
+    let wc = ab.perp_dot(ap) / denominator;
+    Some((1.0 - wb - wc, wb, wc))
 }
 
 fn mobius_surface_point(

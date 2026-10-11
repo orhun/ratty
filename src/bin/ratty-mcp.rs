@@ -243,7 +243,7 @@ impl From<SurfaceKind> for ControlSurfaceKind {
 struct SetShapeParams {
     /// Surface family: automatic, plane, mobius, paper_plane, gomboc, cylinder, sphere, wave, or custom.
     kind: SurfaceKind,
-    /// Wave amplitude or custom control-point depth multiplier, from 0 to 10.
+    /// Wave amplitude or custom surface depth multiplier, from 0 to 10.
     #[schemars(range(min = 0.0, max = 10.0))]
     amplitude: Option<f32>,
     /// Spatial repetition count for animated wave or custom surfaces, from 0.01 to 32.
@@ -252,15 +252,21 @@ struct SetShapeParams {
     /// Animation speed for wave or custom surfaces; custom surfaces are static by default and zero disables motion, from -16 to 16.
     #[schemars(range(min = -16.0, max = 16.0))]
     twist: Option<f32>,
-    /// Custom lattice width, from 2 to 8.
+    /// Custom lattice width, from 2 to 8. A lattice is one continuous rectangular sheet.
     #[schemars(range(min = 2, max = 8))]
     control_columns: Option<u8>,
     /// Custom lattice height, from 2 to 8.
     #[schemars(range(min = 2, max = 8))]
     control_rows: Option<u8>,
-    /// Row-major XYZ control points. X/Y use normalized sheet coordinates and Z is depth.
+    /// Row-major XYZ control points for one continuous sheet. X/Y are normalized to the terminal; Z is in terminal depth units (hundreds for a clearly visible fold).
     #[schemars(length(min = 4, max = 64))]
     control_points: Option<Vec<[f32; 3]>>,
+    /// Custom mesh vertices as [x, y, z, u, v]; X/Y are normalized to the terminal, Z is in terminal depth units (hundreds for a clearly visible fold), and UV values are 0..1. Use a mesh for separately angled faces or closed shapes. Duplicate vertices at texture seams.
+    #[schemars(length(min = 3, max = 256))]
+    custom_vertices: Option<Vec<[f32; 5]>>,
+    /// Triangle vertex indices into custom_vertices. Each entry is one face; use these with custom_vertices for folds, multiple faces, and closed shapes that a single lattice cannot represent.
+    #[schemars(length(min = 1, max = 512))]
+    custom_triangles: Option<Vec<[u32; 3]>>,
 }
 
 #[tool_router]
@@ -397,9 +403,9 @@ impl RattyMcp {
         }))
     }
 
-    /// Define an agent-controlled terminal surface or restore the normal view surface.
+    /// Define a custom terminal surface, or restore the normal view surface. A control lattice is one continuous rectangular sheet; use a triangle mesh for multiple angled faces or closed shapes. For kind=custom, provide complete geometry. X/Y are normalized and Z uses terminal depth units, so values like 0.5 are nearly flat; use a few hundred units for a visible fold. If mesh fields are missing from the available tool schema, the MCP server needs to be reloaded.
     #[tool(
-        description = "Select a built-in terminal surface, define a custom 3D control-point lattice, or restore the normal plane/Mobius surface"
+        description = "Define a custom terminal surface or restore the normal plane/Mobius surface. A control lattice makes one continuous rectangular sheet; use a UV-mapped triangle mesh for multiple angled faces or closed shapes. For kind=custom, pass all geometry in this call: control_columns, control_rows, and row-major control_points, or custom_vertices and custom_triangles. X/Y are normalized; Z uses terminal depth units, so values like 0.5 are nearly flat and a few hundred units make a visible fold. Mesh vertices use [x, y, z, u, v]; each triangle has three vertex indices. If mesh fields are absent from this tool schema, reload the MCP server."
     )]
     fn set_shape(&self, Parameters(params): Parameters<SetShapeParams>) -> Result<String, String> {
         call(ControlCommand::SetShape(ShapeUpdate {
@@ -410,6 +416,8 @@ impl RattyMcp {
             control_columns: params.control_columns,
             control_rows: params.control_rows,
             control_points: params.control_points,
+            custom_vertices: params.custom_vertices,
+            custom_triangles: params.custom_triangles,
         }))
     }
 }
@@ -424,7 +432,15 @@ impl ServerHandler for RattyMcp {
                  terminal content, type_text for UTF-8 text without an implicit Enter, and press \
                  for structured keys. Input reaches the active PTY and may execute commands, so \
                  send it only when the user intends terminal interaction. Visual changes are \
-                 applied on Ratty's next frame.",
+                 applied on Ratty's next frame. For custom shapes, a control lattice is one \
+                 continuous rectangular sheet; use custom_vertices/custom_triangles for multiple \
+                 angled faces or closed shapes. Send complete geometry with set_shape and keep \
+                 twist at zero for a static shape. Coordinates use normalized X/Y and terminal \
+                 depth units for Z; Z values below a few units are nearly flat, while a few \
+                 hundred units make a clearly visible fold. Do not claim a shape was applied unless \
+                 set_shape succeeds and its response reports the geometry type and counts. If mesh \
+                 fields are missing from the tool schema, the MCP server must be reloaded before \
+                 mesh geometry can be sent.",
             )
     }
 }

@@ -97,8 +97,21 @@ pub struct TerminalSurfaceShape {
     pub control_columns: u8,
     /// Number of rows in `control_points` for a custom surface.
     pub control_rows: u8,
-    /// Row-major XYZ lattice. X/Y are normalized sheet coordinates; Z is depth.
+    /// Row-major XYZ lattice. X/Y are normalized to the sheet; Z is unscaled terminal depth.
     pub control_points: Vec<Vec3>,
+    /// Optional custom mesh vertices with texture coordinates.
+    pub custom_vertices: Vec<CustomSurfaceVertex>,
+    /// Triangle indices into `custom_vertices`.
+    pub custom_triangles: Vec<[u32; 3]>,
+}
+
+/// A vertex in an agent-defined terminal surface mesh.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CustomSurfaceVertex {
+    /// Position in terminal-local coordinates: normalized X/Y and unscaled depth Z.
+    pub position: Vec3,
+    /// Terminal texture coordinates in the 0..1 range.
+    pub uv: Vec2,
 }
 
 impl Default for TerminalSurfaceShape {
@@ -111,6 +124,8 @@ impl Default for TerminalSurfaceShape {
             control_columns: 0,
             control_rows: 0,
             control_points: Vec::new(),
+            custom_vertices: Vec::new(),
+            custom_triangles: Vec::new(),
         }
     }
 }
@@ -657,7 +672,8 @@ pub(crate) fn apply_terminal_presentation(
     for mut visibility in &mut visibility_queries.p2() {
         // A Mobius strip is one continuous ribbon, so the separate back sheet model does not map
         // cleanly. Render the front material double-sided instead.
-        let target = if is_3d && !is_mobius {
+        let has_custom_mesh = !warp.shape.custom_vertices.is_empty();
+        let target = if is_3d && !is_mobius && !has_custom_mesh {
             Visibility::Visible
         } else {
             Visibility::Hidden
@@ -670,7 +686,10 @@ pub(crate) fn apply_terminal_presentation(
     if let Ok(front_material) = plane_materials.single() {
         // Custom surfaces can fold past 90 degrees, reversing triangle winding. Keep both sides
         // visible so those folds do not disappear when viewed from the camera.
-        let cull_mode = if is_mobius || warp.shape.kind == TerminalSurfaceKind::Custom {
+        let cull_mode = if is_mobius
+            || warp.shape.kind == TerminalSurfaceKind::Custom
+            || !warp.shape.custom_vertices.is_empty()
+        {
             None
         } else {
             Some(Face::Back)
@@ -685,7 +704,10 @@ pub(crate) fn apply_terminal_presentation(
         }
     }
     if let Ok(back_material) = plane_back_materials.single() {
-        let cull_mode = if is_mobius || warp.shape.kind == TerminalSurfaceKind::Custom {
+        let cull_mode = if is_mobius
+            || warp.shape.kind == TerminalSurfaceKind::Custom
+            || !warp.shape.custom_vertices.is_empty()
+        {
             None
         } else {
             Some(Face::Back)

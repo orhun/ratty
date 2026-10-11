@@ -173,6 +173,8 @@ pub struct ShapeUpdate {
     pub control_columns: Option<u8>,
     pub control_rows: Option<u8>,
     pub control_points: Option<Vec<[f32; 3]>>,
+    pub custom_vertices: Option<Vec<[f32; 5]>>,
+    pub custom_triangles: Option<Vec<[u32; 3]>>,
 }
 
 pub use snapshot::{
@@ -741,6 +743,8 @@ fn apply_command(command: ControlCommand, params: &mut ControlApplyParams) -> Co
                     "control_columns": warp.shape.control_columns,
                     "control_rows": warp.shape.control_rows,
                     "control_points": warp.shape.control_points.iter().map(|point| point.to_array()).collect::<Vec<_>>(),
+                    "custom_vertices": warp.shape.custom_vertices.iter().map(|vertex| [vertex.position.x, vertex.position.y, vertex.position.z, vertex.uv.x, vertex.uv.y]).collect::<Vec<_>>(),
+                    "custom_triangles": warp.shape.custom_triangles,
                 }
             }))
         }
@@ -1070,39 +1074,90 @@ fn apply_command(command: ControlCommand, params: &mut ControlApplyParams) -> Co
             if !twist.is_finite() || !(-16.0..=16.0).contains(&twist) {
                 return ControlResponse::error("shape twist must be finite and between -16 and 16");
             }
-            let (control_columns, control_rows, control_points) = if kind
-                == TerminalSurfaceKind::Custom
-            {
-                let columns = update.control_columns.unwrap_or(0);
-                let rows = update.control_rows.unwrap_or(0);
-                if !(2..=8).contains(&columns) || !(2..=8).contains(&rows) {
-                    return ControlResponse::error(
-                        "custom surfaces require 2..8 control columns and rows",
-                    );
-                }
-                let points = update.control_points.unwrap_or_default();
-                if points.len() != usize::from(columns) * usize::from(rows) {
-                    return ControlResponse::error(
-                        "custom control_points length must equal control_columns * control_rows",
-                    );
-                }
-                if points
-                    .iter()
-                    .flatten()
-                    .any(|value| !value.is_finite() || !(-10_000.0..=10_000.0).contains(value))
-                {
-                    return ControlResponse::error(
-                        "custom control-point coordinates must be finite and between -10000 and 10000",
-                    );
-                }
-                (
-                    columns,
-                    rows,
-                    points.into_iter().map(Vec3::from_array).collect(),
-                )
-            } else {
-                (0, 0, Vec::new())
-            };
+            let (control_columns, control_rows, control_points, custom_vertices, custom_triangles) =
+                if kind == TerminalSurfaceKind::Custom {
+                    let vertices = update.custom_vertices.unwrap_or_default();
+                    let triangles = update.custom_triangles.unwrap_or_default();
+                    if !vertices.is_empty() || !triangles.is_empty() {
+                        if update.control_columns.is_some()
+                            || update.control_rows.is_some()
+                            || update.control_points.is_some()
+                        {
+                            return ControlResponse::error(
+                                "custom mesh vertices/triangles cannot be combined with a control lattice",
+                            );
+                        }
+                        if !(3..=256).contains(&vertices.len())
+                            || !(1..=512).contains(&triangles.len())
+                        {
+                            return ControlResponse::error(
+                                "custom meshes require 3..256 vertices and 1..512 triangles",
+                            );
+                        }
+                        if vertices.iter().flatten().any(|value| !value.is_finite())
+                            || vertices.iter().any(|vertex| {
+                                vertex[..3]
+                                    .iter()
+                                    .any(|value| !(-10_000.0..=10_000.0).contains(value))
+                                    || vertex[3..].iter().any(|value| !(0.0..=1.0).contains(value))
+                            })
+                        {
+                            return ControlResponse::error(
+                                "custom mesh positions must be finite and between -10000 and 10000; UVs must be between 0 and 1",
+                            );
+                        }
+                        if triangles.iter().any(|triangle| {
+                            triangle
+                                .iter()
+                                .any(|index| *index as usize >= vertices.len())
+                                || triangle[0] == triangle[1]
+                                || triangle[1] == triangle[2]
+                                || triangle[2] == triangle[0]
+                        }) {
+                            return ControlResponse::error(
+                                "custom mesh triangles must reference three distinct valid vertex indices",
+                            );
+                        }
+                        let vertices = vertices
+                            .into_iter()
+                            .map(|[x, y, z, u, v]| crate::scene::CustomSurfaceVertex {
+                                position: Vec3::new(x, y, z),
+                                uv: Vec2::new(u, v),
+                            })
+                            .collect();
+                        (0, 0, Vec::new(), vertices, triangles)
+                    } else {
+                        let columns = update.control_columns.unwrap_or(0);
+                        let rows = update.control_rows.unwrap_or(0);
+                        if !(2..=8).contains(&columns) || !(2..=8).contains(&rows) {
+                            return ControlResponse::error(
+                                "no custom geometry reached Ratty: provide control_columns, control_rows, and control_points, or custom_vertices and custom_triangles. A lattice is one continuous sheet; reload ratty-mcp if its schema omits the mesh fields",
+                            );
+                        }
+                        let points = update.control_points.unwrap_or_default();
+                        if points.len() != usize::from(columns) * usize::from(rows) {
+                            return ControlResponse::error(
+                                "custom control_points length must equal control_columns * control_rows",
+                            );
+                        }
+                        if points.iter().flatten().any(|value| {
+                            !value.is_finite() || !(-10_000.0..=10_000.0).contains(value)
+                        }) {
+                            return ControlResponse::error(
+                                "custom control-point coordinates must be finite and between -10000 and 10000",
+                            );
+                        }
+                        (
+                            columns,
+                            rows,
+                            points.into_iter().map(Vec3::from_array).collect(),
+                            Vec::new(),
+                            Vec::new(),
+                        )
+                    }
+                } else {
+                    (0, 0, Vec::new(), Vec::new(), Vec::new())
+                };
             warp.shape = TerminalSurfaceShape {
                 kind,
                 amplitude,
@@ -1111,6 +1166,8 @@ fn apply_command(command: ControlCommand, params: &mut ControlApplyParams) -> Co
                 control_columns,
                 control_rows,
                 control_points,
+                custom_vertices,
+                custom_triangles,
             };
             let active_mode = slots.active().mode;
             let needs_camera_mode = match kind {
@@ -1138,7 +1195,19 @@ fn apply_command(command: ControlCommand, params: &mut ControlApplyParams) -> Co
                 "kind": ControlSurfaceKind::from(kind),
                 "amplitude": warp.shape.amplitude,
                 "frequency": warp.shape.frequency,
-                    "twist": warp.shape.twist,
+                "twist": warp.shape.twist,
+                "geometry": if !warp.shape.custom_vertices.is_empty() {
+                    "triangle_mesh"
+                } else if !warp.shape.control_points.is_empty() {
+                    "control_lattice"
+                } else {
+                    "built_in_surface"
+                },
+                "control_columns": warp.shape.control_columns,
+                "control_rows": warp.shape.control_rows,
+                "control_point_count": warp.shape.control_points.len(),
+                "vertex_count": warp.shape.custom_vertices.len(),
+                "triangle_count": warp.shape.custom_triangles.len(),
             }))
         }
     }

@@ -271,12 +271,16 @@ Here are the available capabilities:
 - `set_terminal` / `set_window`: change grid, font, window size, position, title and background
 - `set_view` — change camera mode, pose and warp
 - `set_cursor`: configure the rat cursor's visibility and motion
-- `set_shape`: choose a built-in surface or define a custom 3D lattice; custom shapes are static by default, with an optional animated ripple
+- `set_shape`: choose a built-in surface or define a custom lattice or mesh
 
-Try this example prompt:
+Try these example prompts:
 
 ```text
-Turn my Ratty terminal into a cyberpunk data storm: shape its actual surface with an asymmetric custom 4×4 XYZ lattice and alternating peaks and valleys from −350 to +350; use perspective mode with yaw 24°, pitch −16°, roll 7°, FOV 105°, and camera Z −180; resize the window to 1500×900 with a near-black RGB [5, 1, 18] background; keep the center text readable, distort the edges, and inspect the result to refine the camera.
+Use the Ratty terminal MCP to turn my terminal into a cyberpunk data storm. Use a static custom 4×4 lattice with alternating peaks and valleys, reaching about 350 units deep near the edges while keeping the center nearly flat. Set a near-black background, use perspective view, and adjust the camera until the center text remains readable while the edges look dramatically warped.
+```
+
+```text
+Use the Ratty terminal MCP and GNU `du`, `sort`, and `tail` to list the 10 largest files and directories under the current directory, staying on this filesystem and excluding `.git` and `target`. Run the command, wait for it to finish, and summarize the results.
 ```
 
 ## Architecture
