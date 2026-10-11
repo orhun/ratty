@@ -1075,7 +1075,7 @@ fn encode_function_key(number: u8, mut modifiers: TerminalKeyModifiers) -> Resul
     let modifier_code =
         1 + modifiers.shift as u8 + (modifiers.alt as u8 * 2) + (modifiers.control as u8 * 4);
     if number <= 4 {
-        let suffix = [b'P', b'Q', b'R', b'S'][usize::from(number - 1)] as char;
+        let suffix = (*b"PQRS")[usize::from(number - 1)] as char;
         return Ok(if modifier_code == 1 {
             format!("\x1bO{suffix}").into_bytes()
         } else {
