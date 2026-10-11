@@ -4661,6 +4661,7 @@ dependencies = [
  "ratatui",
  "rust-embed",
  "serde",
+ "serde_json",
  "shellexpand",
  "stl_io",
  "tobj",

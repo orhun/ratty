@@ -105,6 +105,10 @@ The required fields are:
 - `fmt`: payload format, `obj`, `glb`, or `stl` in v1
 - `path`: object path known to Ratty
 
+Path-based registration accepts embedded objects by name and files beneath an `assets`
+directory in the current working tree or Ratty's runtime asset directory. Parent-directory
+traversal is rejected. glTF files must embed their buffers and images.
+
 Optional registration fields:
 
 - `normalize`: OBJ normalization flag, defaults to `1`

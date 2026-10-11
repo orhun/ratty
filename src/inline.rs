@@ -8,7 +8,8 @@ use bevy::prelude::*;
 use crate::camera::{OptionalVec3, TerminalCameraUpdate};
 use crate::kitty::{KittyOperation, KittyParserState, refresh_kitty_placeholder_anchors};
 use crate::model::{
-    ObjectLoadOptions, load_object_source_from_bytes_with_options, load_object_source_with_options,
+    ObjectLoadOptions, load_object_source_from_bytes_with_options,
+    load_rgp_object_source_with_options,
 };
 use crate::rgp::{
     RgpOperation, RgpPlacementStyle, RgpPlacementUpdate, RgpRegisterSource,
@@ -327,7 +328,10 @@ impl TerminalInlineObjects {
                     match source {
                         RgpRegisterSource::Path { path } => {
                             self.pending_rgp_payloads.remove(&object_id);
-                            match load_object_source_with_options(Path::new(&path), load_options) {
+                            match load_rgp_object_source_with_options(
+                                Path::new(&path),
+                                load_options,
+                            ) {
                                 Ok((source, source_data)) => {
                                     info!("registered RGP object {} from {}", object_id, source);
                                     self.objects.insert(object_id, source_data.into());

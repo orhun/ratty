@@ -289,6 +289,142 @@ pub fn load_object_source_with_options(
     }
 }
 
+/// Loads an RGP path-based object from an asset directory or Ratty's runtime asset root.
+///
+/// Unlike user-configured cursor paths, paths received through terminal output are untrusted.
+/// They must not resolve outside an `assets` directory or Ratty's managed asset root.
+pub fn load_rgp_object_source_with_options(
+    path: &Path,
+    options: ObjectLoadOptions,
+) -> anyhow::Result<(String, ObjectSource)> {
+    let candidate = object_asset_path(path)?;
+    let extension = Path::new(&candidate)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+        .unwrap_or_default();
+
+    if let Some(file_name) = Path::new(&candidate)
+        .file_name()
+        .and_then(|name| name.to_str())
+        && let Some(file) = EmbeddedObjects::get(file_name)
+    {
+        return load_embedded_object(file_name, &extension, &file.data, &candidate, options);
+    }
+
+    let source_path = resolve_rgp_asset_path(path, &candidate)?;
+    match extension.as_str() {
+        "obj" => {
+            let bytes = std::fs::read(&source_path)
+                .with_context(|| format!("failed to read {}", source_path.display()))?;
+            load_obj_meshes_from_bytes(
+                &source_path.display().to_string(),
+                &bytes,
+                options.normalize,
+            )
+            .map(|meshes| (candidate, ObjectSource::Obj(meshes)))
+        }
+        "stl" => {
+            let bytes = std::fs::read(&source_path)
+                .with_context(|| format!("failed to read {}", source_path.display()))?;
+            load_stl_meshes_from_bytes(&bytes).map(|mesh| (candidate, ObjectSource::Stl(mesh)))
+        }
+        "glb" | "gltf" => {
+            let bytes = std::fs::read(&source_path)
+                .with_context(|| format!("failed to read {}", source_path.display()))?;
+            validate_gltf_embedded_resources(&extension, &bytes)?;
+            let stem = source_path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .filter(|stem| !stem.is_empty())
+                .unwrap_or("external");
+            let sanitized = stem
+                .chars()
+                .map(|c| match c {
+                    'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => c,
+                    _ => '_',
+                })
+                .collect::<String>();
+            let materialized = format!("objects/rgp/{sanitized}.{extension}");
+            let asset_path = ensure_scene_asset_path(&materialized, Some((stem, &bytes)))?;
+            Ok((candidate, ObjectSource::Gltf(asset_path)))
+        }
+        _ => bail!("unsupported object format for {}", path.display()),
+    }
+}
+
+fn load_embedded_object(
+    file_name: &str,
+    extension: &str,
+    bytes: &[u8],
+    candidate: &str,
+    options: ObjectLoadOptions,
+) -> anyhow::Result<(String, ObjectSource)> {
+    match extension {
+        "stl" => load_stl_meshes_from_bytes(bytes)
+            .map(|mesh| (format!("embedded:{file_name}"), ObjectSource::Stl(mesh))),
+        "obj" => load_obj_meshes_from_bytes(file_name, bytes, options.normalize)
+            .map(|meshes| (format!("embedded:{file_name}"), ObjectSource::Obj(meshes))),
+        "glb" | "gltf" => {
+            let asset_path = ensure_scene_asset_path(candidate, Some((file_name, bytes)))?;
+            Ok((
+                format!("embedded:{file_name}"),
+                ObjectSource::Gltf(asset_path),
+            ))
+        }
+        _ => bail!("unsupported object format for {candidate}"),
+    }
+}
+
+fn resolve_rgp_asset_path(path: &Path, candidate: &str) -> anyhow::Result<PathBuf> {
+    let components = path.components().collect::<Vec<_>>();
+    if let Some(index) = components
+        .iter()
+        .rposition(|component| matches!(component, Component::Normal(part) if *part == "assets"))
+    {
+        let asset_root = components[..=index]
+            .iter()
+            .fold(PathBuf::new(), |mut root, component| {
+                root.push(component.as_os_str());
+                root
+            });
+        let current_dir = std::env::current_dir()?.canonicalize()?;
+        let requested_root = if asset_root.is_absolute() {
+            asset_root
+        } else {
+            current_dir.join(asset_root)
+        }
+        .canonicalize()
+        .context("RGP asset directory does not exist")?;
+        ensure!(
+            requested_root.starts_with(&current_dir),
+            "RGP asset directory is outside the current directory"
+        );
+        let requested_file = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            current_dir.join(path)
+        }
+        .canonicalize()
+        .with_context(|| format!("asset not found: {}", path.display()))?;
+        ensure!(
+            requested_file.starts_with(&requested_root),
+            "RGP asset path resolves outside its assets directory"
+        );
+        return Ok(requested_file);
+    }
+
+    let root = runtime_asset_root()
+        .canonicalize()
+        .context("Ratty runtime asset directory does not exist")?;
+    let resolved = root.join(candidate).canonicalize()?;
+    ensure!(
+        resolved.starts_with(&root),
+        "RGP asset path resolves outside Ratty's runtime asset directory"
+    );
+    Ok(resolved)
+}
+
 /// Loads an object source from inline bytes.
 ///
 /// # Errors
@@ -332,6 +468,7 @@ pub fn load_object_source_from_bytes_with_options(
             // Bevy scene loading still goes through the asset server, so payload-backed GLB/GLTF
             // assets need to be materialized under the asset root before they can be instantiated.
             let extension = if format == "gltf" { "gltf" } else { "glb" };
+            validate_gltf_embedded_resources(extension, bytes)?;
             let stem = Path::new(display_name)
                 .file_stem()
                 .and_then(|stem| stem.to_str())
@@ -350,6 +487,55 @@ pub fn load_object_source_from_bytes_with_options(
         }
         _ => bail!("unsupported object format for {}", display_name),
     }
+}
+
+fn validate_gltf_embedded_resources(extension: &str, bytes: &[u8]) -> anyhow::Result<()> {
+    let json_bytes = if extension == "glb" {
+        ensure!(
+            bytes.len() >= 20 && &bytes[..4] == b"glTF",
+            "invalid GLB header"
+        );
+        let declared_len = u32::from_le_bytes(bytes[8..12].try_into()?) as usize;
+        ensure!(declared_len == bytes.len(), "invalid GLB length");
+        let mut offset = 12;
+        let mut json = None;
+        while offset + 8 <= bytes.len() {
+            let chunk_len = u32::from_le_bytes(bytes[offset..offset + 4].try_into()?) as usize;
+            let chunk_type = &bytes[offset + 4..offset + 8];
+            let chunk_start = offset + 8;
+            let chunk_end = chunk_start
+                .checked_add(chunk_len)
+                .context("invalid GLB chunk length")?;
+            ensure!(chunk_end <= bytes.len(), "invalid GLB chunk length");
+            if chunk_type == b"JSON" {
+                json = Some(&bytes[chunk_start..chunk_end]);
+                break;
+            }
+            offset = chunk_end;
+        }
+        json.context("GLB has no JSON chunk")?
+    } else {
+        bytes
+    };
+
+    let document: serde_json::Value =
+        serde_json::from_slice(json_bytes).context("invalid glTF JSON document")?;
+    for collection in ["buffers", "images"] {
+        for resource in document
+            .get(collection)
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(uri) = resource.get("uri").and_then(serde_json::Value::as_str) {
+                ensure!(
+                    uri.starts_with("data:"),
+                    "RGP glTF {collection} must be embedded (external URI: {uri})"
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn ensure_scene_asset_path(
@@ -376,6 +562,13 @@ fn ensure_scene_asset_path(
 
 fn object_asset_path(path: &Path) -> anyhow::Result<String> {
     let components = path.components().collect::<Vec<_>>();
+    ensure!(
+        !components
+            .iter()
+            .any(|component| matches!(component, Component::ParentDir | Component::CurDir)),
+        "asset path contains traversal components: {}",
+        path.display()
+    );
     if let Some(index) = components
         .iter()
         .position(|component| matches!(component, Component::Normal(part) if *part == "assets"))
@@ -412,6 +605,38 @@ fn object_asset_path(path: &Path) -> anyhow::Result<String> {
         .strip_prefix("assets/")
         .unwrap_or(&candidate)
         .to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rgp_asset_paths_reject_parent_traversal() {
+        for path in ["../../secret.obj", "assets/../secret.obj"] {
+            assert!(object_asset_path(Path::new(path)).is_err(), "{path}");
+        }
+    }
+
+    #[test]
+    fn rgp_asset_paths_keep_assets_relative_names() {
+        assert_eq!(
+            object_asset_path(Path::new("assets/widget/model.obj")).unwrap(),
+            "widget/model.obj"
+        );
+    }
+
+    #[test]
+    fn rgp_gltf_rejects_external_resources() {
+        let gltf = br#"{"buffers":[{"uri":"../../secret.bin"}]}"#;
+        assert!(validate_gltf_embedded_resources("gltf", gltf).is_err());
+    }
+
+    #[test]
+    fn rgp_gltf_accepts_embedded_resources() {
+        let gltf = br#"{"buffers":[{"uri":"data:application/octet-stream;base64,AA=="}]}"#;
+        assert!(validate_gltf_embedded_resources("gltf", gltf).is_ok());
+    }
 }
 
 fn load_stl_meshes_from_path(path: &Path) -> anyhow::Result<Mesh> {
