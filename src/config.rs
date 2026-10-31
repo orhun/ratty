@@ -384,7 +384,7 @@ impl Default for FontConfig {
             italic: None,
             bold_italic: None,
             style: FontStyleConfig::Regular,
-            size: 18,
+            size: 21,
             line_height: 1.0,
         }
     }

@@ -30,7 +30,7 @@ family = "DejaVu Sans Mono"
 # italic = "fonts/IosevkaFixed-Italic.ttf"
 # bold_italic = "fonts/IosevkaFixed-BoldItalic.ttf"
 style = "Regular"
-size = 12
+size = 21
 # Row height as a multiple of the font's natural line height.
 # line_height = 1.0
 
