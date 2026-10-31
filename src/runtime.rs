@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 use std::env;
 use std::io::{ErrorKind, Read, Write};
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
@@ -146,6 +147,8 @@ pub struct TerminalRuntime {
     master: SyncCell<Option<Box<dyn MasterPty + Send>>>,
     /// Child process handle.
     child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
+    /// Root directory allowed for Kitty local-file transfers.
+    local_file_root: PathBuf,
     /// PTY reader thread.
     reader_thread: Option<JoinHandle<()>>,
     /// Terminal parser: the VT state machine plus the screen it drives.
@@ -284,6 +287,12 @@ impl TerminalRuntime {
             cmd
         };
 
+        let local_file_root = options
+            .working_dir
+            .as_deref()
+            .unwrap_or(Path::new("."))
+            .canonicalize()
+            .context("failed to resolve terminal working directory")?;
         if let Some(working_dir) = &options.working_dir {
             cmd.cwd(working_dir);
         }
@@ -338,6 +347,7 @@ impl TerminalRuntime {
             writer: Arc::new(Mutex::new(Some(writer))),
             master: SyncCell::new(Some(pair.master)),
             child: Some(child),
+            local_file_root,
             reader_thread: Some(reader_thread),
             parser,
             sink: TerminalParserSink::default(),
@@ -354,6 +364,11 @@ impl TerminalRuntime {
             last_parser_size: (cols, rows),
             pending_resize: None,
         })
+    }
+
+    /// Returns the canonical directory permitted for Kitty local-file transfers.
+    pub(crate) fn local_file_root(&self) -> &Path {
+        &self.local_file_root
     }
 
     /// Feeds bytes from the PTY into the VT state machine.
@@ -828,6 +843,7 @@ mod resize_tests {
             writer: Arc::new(Mutex::new(None)),
             master: SyncCell::new(Some(master)),
             child: None,
+            local_file_root: std::env::current_dir().expect("test working directory"),
             reader_thread: None,
             parser: Parser::with_options(
                 fux_vt::Size::new(24, 80).expect("valid size"),

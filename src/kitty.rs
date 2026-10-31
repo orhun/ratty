@@ -1,6 +1,9 @@
 //! Kitty graphics protocol parsing.
 
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::Read;
+use std::path::Path;
 
 use base64::Engine as _;
 
@@ -27,6 +30,7 @@ impl KittyParserState {
         &mut self,
         sequence: &[u8],
         cursor_position: (u16, u16),
+        local_file_root: &Path,
     ) -> Option<KittyOperation> {
         if !sequence.starts_with(KITTY_APC_START) {
             return None;
@@ -52,15 +56,22 @@ impl KittyParserState {
             params.insert(key, value);
         }
 
-        let action = params.get("a").copied().unwrap_or("T");
+        let action = params.get("a").copied().unwrap_or("t");
         match action {
-            "T" | "t" => {
+            // Kitty's protocol detection query is answered over the PTY. Some
+            // clients only need to know whether the APC protocol is present;
+            // they don't depend on an image being retained for this command.
+            "q" => Some(KittyOperation::Query {
+                image_id: params
+                    .get("i")
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(0),
+            }),
+            "T" | "t" | "f" => {
                 let starts_new_transfer = self.transfer.is_none()
-                    || params.contains_key("a")
-                    || params.contains_key("f")
-                    || params.contains_key("s")
-                    || params.contains_key("v")
-                    || params.contains_key("i");
+                    || params.keys().any(|key| {
+                        !matches!(*key, "a" | "m" | "q") || (*key == "a" && action != "f")
+                    });
                 if starts_new_transfer {
                     let object_id = params
                         .get("i")
@@ -78,6 +89,7 @@ impl KittyParserState {
                         height: params.get("v").and_then(|value| value.parse().ok()),
                         columns: params.get("c").and_then(|value| value.parse().ok()),
                         rows: params.get("r").and_then(|value| value.parse().ok()),
+                        delay_ms: params.get("z").and_then(|value| value.parse().ok()),
                         uses_placeholders: params.get("U").copied() == Some("1"),
                         anchor_row: cursor_position.0,
                         anchor_col: cursor_position.1,
@@ -89,6 +101,38 @@ impl KittyParserState {
                 let chunk = base64::engine::general_purpose::STANDARD
                     .decode(payload)
                     .ok()?;
+                let chunk = match params.get("t").copied().unwrap_or("d") {
+                    "d" => chunk,
+                    // Kitty's local-file transport base64-encodes the path, not
+                    // the image data. Presenterm's kitty-local backend uses it.
+                    "f" => {
+                        let path = std::str::from_utf8(&chunk).ok()?;
+                        let path = Path::new(path);
+                        let path = if path.is_absolute() {
+                            path.to_path_buf()
+                        } else {
+                            local_file_root.join(path)
+                        };
+                        let path = path.canonicalize().ok()?;
+                        if !path.starts_with(local_file_root) {
+                            return None;
+                        }
+                        let file = File::open(path).ok()?;
+                        let metadata = file.metadata().ok()?;
+                        if !metadata.is_file() || metadata.len() > 64 * 1024 * 1024 {
+                            return None;
+                        }
+                        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+                        file.take(64 * 1024 * 1024 + 1)
+                            .read_to_end(&mut bytes)
+                            .ok()?;
+                        if bytes.len() > 64 * 1024 * 1024 {
+                            return None;
+                        }
+                        bytes
+                    }
+                    _ => return Some(KittyOperation::Ignored),
+                };
                 transfer.bytes.extend_from_slice(&chunk);
 
                 if params.get("m").copied().unwrap_or("0") == "1" {
@@ -97,6 +141,13 @@ impl KittyParserState {
 
                 let transfer = self.transfer.take()?;
                 let image = transfer.finalize()?;
+                if transfer.action == "f" {
+                    return Some(KittyOperation::AddFrame {
+                        object_id: transfer.object_id,
+                        image,
+                        delay_ms: transfer.delay_ms.unwrap_or(100),
+                    });
+                }
                 if transfer.action == "T" {
                     return Some(KittyOperation::TransmitAndPlace {
                         object_id: transfer.object_id,
@@ -114,6 +165,10 @@ impl KittyParserState {
                     image,
                 })
             }
+            "a" => Some(KittyOperation::AnimationControl {
+                object_id: params.get("i")?.parse().ok()?,
+                start: params.get("s").and_then(|value| value.parse::<u8>().ok()) == Some(3),
+            }),
             "p" => Some(KittyOperation::PlaceExisting {
                 object_id: params.get("i")?.parse().ok()?,
                 anchor: KittyAnchor {
@@ -129,12 +184,17 @@ impl KittyParserState {
                         .unwrap_or(1),
                 },
             }),
-            "d" => Some(match params.get("i").and_then(|value| value.parse().ok()) {
-                Some(object_id) => KittyOperation::Delete {
-                    object_id: Some(object_id),
-                },
-                None => KittyOperation::Delete { object_id: None },
-            }),
+            "d" => match params.get("d").copied().unwrap_or("a") {
+                "a" => Some(KittyOperation::DeleteAll),
+                "A" => Some(KittyOperation::DeleteAllPlacements),
+                "i" => Some(KittyOperation::Delete {
+                    object_id: params.get("i").and_then(|value| value.parse().ok()),
+                }),
+                "I" => Some(KittyOperation::DeletePlacements {
+                    object_id: params.get("i").and_then(|value| value.parse().ok())?,
+                }),
+                _ => Some(KittyOperation::Ignored),
+            },
             _ => Some(KittyOperation::Ignored),
         }
     }
@@ -156,6 +216,7 @@ pub struct KittyImage {
 impl KittyImage {
     /// Converts the decoded image into an inline object.
     pub fn rasterize(self) -> KittyInlineObject {
+        let tracks_scroll = !self.uses_placeholders;
         KittyInlineObject {
             raster: RasterObject {
                 width: self.width,
@@ -164,7 +225,17 @@ impl KittyImage {
                 handle: None,
             },
             uses_placeholders: self.uses_placeholders,
+            tracks_scroll,
             plane: None,
+            frames: Default::default(),
+            animation_root: None,
+            animation_root_delay_secs: 0.1,
+            streaming_animation: false,
+            current_frame_delay_secs: 0.1,
+            playing: false,
+            animation_finished: true,
+            frame_index: 0,
+            frame_elapsed: 0.0,
         }
     }
 }
@@ -188,6 +259,27 @@ pub enum KittyOperation {
     Pending,
     /// Indicates the sequence was ignored.
     Ignored,
+    /// Kitty graphics protocol support query.
+    Query {
+        /// Image identifier echoed in the response, or zero if omitted.
+        image_id: u32,
+    },
+    /// Adds a full image frame to an existing image.
+    AddFrame {
+        /// Root image identifier.
+        object_id: u32,
+        /// Decoded frame pixels.
+        image: KittyImage,
+        /// Delay before the frame advances, in milliseconds.
+        delay_ms: u32,
+    },
+    /// Starts or stops terminal-side animation playback.
+    AnimationControl {
+        /// Root image identifier.
+        object_id: u32,
+        /// Whether looping playback should run.
+        start: bool,
+    },
     /// Image registration without placement.
     TransmitOnly {
         /// Object identifier.
@@ -216,6 +308,15 @@ pub enum KittyOperation {
         /// Optional object identifier.
         object_id: Option<u32>,
     },
+    /// Removes one image's visible placements while retaining its image data.
+    DeletePlacements {
+        /// Image identifier.
+        object_id: u32,
+    },
+    /// Removes all images and their placements.
+    DeleteAll,
+    /// Removes visible image placements while retaining transmitted image data.
+    DeleteAllPlacements,
 }
 
 struct KittyTransfer {
@@ -226,6 +327,7 @@ struct KittyTransfer {
     height: Option<u32>,
     columns: Option<u32>,
     rows: Option<u32>,
+    delay_ms: Option<u32>,
     uses_placeholders: bool,
     anchor_row: u16,
     anchor_col: u16,

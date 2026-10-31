@@ -214,7 +214,14 @@ pub fn drain_pty_output(
     loop {
         match runtime.try_recv() {
             Ok(chunk) => {
-                let track_scroll = inline_objects.has_scroll_tracked_anchors();
+                // Full-screen terminal applications such as Presenterm redraw
+                // slides by replacing rows in the alternate screen. Matching
+                // repeated rows across those redraws can look like a scroll to
+                // `infer_upward_scroll`, incorrectly moving inline images off
+                // screen. The alternate screen has no scrollback, so its
+                // placements should stay at their reported coordinates.
+                let track_scroll = inline_objects.has_scroll_tracked_anchors()
+                    && !runtime.screen().mode(fux_vt::Mode::AlternateScreen);
                 let prev_rows = track_scroll.then(|| runtime.visible_row_texts());
                 let mut replies = inline_objects.consume_pty_output(
                     &chunk,
@@ -226,9 +233,14 @@ pub fn drain_pty_output(
                 for reply in replies {
                     runtime.write_input(&reply);
                 }
-                if let Some(prev_rows) = prev_rows {
+                if let Some(prev_rows) =
+                    prev_rows.filter(|_| !runtime.screen().mode(fux_vt::Mode::AlternateScreen))
+                {
                     let next_rows = runtime.visible_row_texts();
                     let scrolled = infer_upward_scroll(&prev_rows, &next_rows);
+                    if scrolled > 0 {
+                        bevy::log::debug!("inferred {scrolled} rows of upward terminal scroll");
+                    }
                     inline_objects.apply_scroll(scrolled);
                 }
                 inline_objects.refresh_placeholder_anchors(runtime.screen());
@@ -241,6 +253,7 @@ pub fn drain_pty_output(
             }
         }
     }
+    inline_objects.finish_screen_redraw();
     drained
 }
 
@@ -942,6 +955,103 @@ fn inline_layout(
         local_height: anchor.rows as f32 / rows,
         pixel_width: anchor.columns as f32 * cell_width,
         pixel_height: anchor.rows as f32 * cell_height,
+    }
+}
+
+/// Advances Kitty graphics protocol animations and updates their shared GPU image.
+pub(crate) fn animate_inline_kitty_images(
+    time: Res<Time>,
+    mut inline_objects: ResMut<TerminalInlineObjects>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    let delta = time.delta_secs();
+    let inline_objects = &mut *inline_objects;
+    let anchors = &inline_objects.anchors;
+    for (object_id, object) in &mut inline_objects.objects {
+        if !anchors.contains_key(object_id) {
+            continue;
+        }
+        let InlineObject::KittyImage(object) = object else {
+            continue;
+        };
+        if !object.playing {
+            continue;
+        }
+        let Some(handle) = object.raster.handle.as_ref() else {
+            continue;
+        };
+        if object.streaming_animation {
+            if object.frames.is_empty() {
+                continue;
+            }
+            object.frame_elapsed += delta;
+            if object.frame_elapsed < object.current_frame_delay_secs {
+                continue;
+            }
+            object.frame_elapsed %= object.current_frame_delay_secs;
+            let Some(frame) = object.frames.pop_front() else {
+                continue;
+            };
+            object.current_frame_delay_secs = frame.delay_secs;
+            if let Some(mut image) = images.get_mut(handle) {
+                if let Some(image_data) = image.data.as_mut() {
+                    if image_data.len() == frame.rgba.len() {
+                        image_data.copy_from_slice(&frame.rgba);
+                    } else {
+                        *image_data = frame.rgba;
+                    }
+                } else {
+                    image.data = Some(frame.rgba);
+                }
+            }
+            continue;
+        }
+        if object.frames.is_empty() {
+            continue;
+        }
+        if object.animation_root.is_none() {
+            object.animation_root = images.get(handle).and_then(|image| image.data.clone());
+        }
+        object.frame_elapsed += delta;
+        let delay = if object.frame_index == 0 {
+            object.animation_root_delay_secs
+        } else {
+            object.frames[object.frame_index - 1].delay_secs
+        };
+        if object.frame_elapsed < delay {
+            continue;
+        }
+        object.frame_elapsed %= delay;
+        let next_frame = object.frame_index + 1;
+        // Keep the animation moving while its decoder is still producing
+        // frames. Holding on the last decoded frame makes long GIFs appear
+        // frozen for seconds while the worker catches up (the globe GIF has
+        // hundreds of frames). Newly decoded frames are appended to `frames`
+        // and join the loop naturally.
+        object.frame_index = if next_frame > object.frames.len() {
+            0
+        } else {
+            next_frame
+        };
+        let data = if object.frame_index == 0 {
+            object.animation_root.as_deref()
+        } else {
+            Some(object.frames[object.frame_index - 1].rgba.as_slice())
+        };
+        let Some(data) = data else {
+            continue;
+        };
+        if let Some(mut image) = images.get_mut(handle) {
+            if let Some(image_data) = image.data.as_mut() {
+                if image_data.len() == data.len() {
+                    image_data.copy_from_slice(data);
+                } else {
+                    *image_data = data.to_vec();
+                }
+            } else {
+                image.data = Some(data.to_vec());
+            }
+        }
     }
 }
 

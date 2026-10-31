@@ -26,7 +26,7 @@ Inspired by TempleOS | Built with Rust & Ratatui
 - Traditional 2D and [new 3D mode](#3d-mode)!
 - [Inline 3D objects](#inline-3d-objects)
 - [GPU-backed text rendering](#rendering-pipeline)
-- Image support (via Kitty Graphics Protocol >:\()
+- Image support via the Kitty Graphics Protocol and iTerm2's OSC 1337 protocol
 
 ▶️ [Watch the demo video here!](https://youtu.be/cY9AX5j-osY)  
 📚 [Read the behind the scenes blog post here!](https://blog.orhun.dev/introducing-ratty)
