@@ -349,13 +349,33 @@ fn default_bindings() -> Vec<KeyBinding> {
 }
 
 impl TerminalKeyBindings {
-    fn action_for(&self, key_code: KeyCode, modifiers: BindingModifiers) -> Option<BindingAction> {
+    fn action_for(
+        &self,
+        key_code: KeyCode,
+        logical_key: &Key,
+        modifiers: BindingModifiers,
+    ) -> Option<BindingAction> {
         self.bindings
             .iter()
-            .filter(|binding| binding.key_code == key_code && binding.modifiers.matches(modifiers))
+            .filter(|binding| {
+                binding_key_matches(binding.key_code, key_code, logical_key)
+                    && binding.modifiers.matches(modifiers)
+            })
             .max_by_key(|binding| binding.modifiers.count())
             .map(|binding| binding.action)
     }
+}
+
+fn binding_key_matches(binding_key: KeyCode, event_key: KeyCode, logical_key: &Key) -> bool {
+    binding_key == event_key || logical_character_key_code(logical_key) == Some(binding_key)
+}
+
+fn logical_character_key_code(logical_key: &Key) -> Option<KeyCode> {
+    let Key::Character(character) = logical_key else {
+        return None;
+    };
+
+    parse_key_code(character)
 }
 
 /// Keyboard modifier state.
@@ -459,7 +479,10 @@ pub fn handle_keyboard_input(
         let binding_key_code = navigation_key_code(&event.logical_key).unwrap_or(event.key_code);
         let modifiers = current_modifiers(&params.keys).union(keyboard.modifiers());
         if event.state == ButtonState::Pressed
-            && let Some(action) = params.bindings.action_for(binding_key_code, modifiers)
+            && let Some(action) =
+                params
+                    .bindings
+                    .action_for(binding_key_code, &event.logical_key, modifiers)
             && !(is_scroll_action(action)
                 && params.runtime.screen().mode(fux_vt::Mode::AlternateScreen))
         {
@@ -779,7 +802,6 @@ impl BindingModifiers {
     }
 }
 
-#[derive(Clone, Copy)]
 struct KeyBinding {
     key_code: KeyCode,
     modifiers: BindingModifiers,
@@ -1474,6 +1496,29 @@ mod key_code_tests {
         assert_eq!(parse_key_code("Digit0"), Some(KeyCode::Digit0));
         assert_eq!(parse_key_code("KeyP"), Some(KeyCode::KeyP));
         assert_eq!(parse_key_code("ArrowUp"), Some(KeyCode::ArrowUp));
+        assert_eq!(parse_key_code("Equal"), Some(KeyCode::Equal));
+        assert_eq!(parse_key_code("+"), Some(KeyCode::Equal));
+        assert_eq!(parse_key_code("-"), Some(KeyCode::Minus));
+    }
+
+    #[test]
+    fn logical_bindings_match_characters_independent_of_physical_key() {
+        let bindings = TerminalKeyBindings {
+            bindings: default_bindings(),
+        };
+        let control = BindingModifiers {
+            control: true,
+            ..default()
+        };
+
+        assert_eq!(
+            bindings.action_for(KeyCode::BracketRight, &Key::Character("+".into()), control),
+            Some(BindingAction::IncreaseFontSize)
+        );
+        assert_eq!(
+            bindings.action_for(KeyCode::Digit1, &Key::Character("-".into()), control),
+            Some(BindingAction::DecreaseFontSize)
+        );
     }
 
     #[test]
@@ -1516,11 +1561,15 @@ mod key_code_tests {
         };
 
         assert_eq!(
-            bindings.action_for(KeyCode::Digit0, control_alt),
+            bindings.action_for(KeyCode::Digit0, &Key::Character("0".into()), control_alt),
             Some(BindingAction::ResetFontSize)
         );
         assert_eq!(
-            bindings.action_for(KeyCode::Digit0, control_alt_shift),
+            bindings.action_for(
+                KeyCode::Digit0,
+                &Key::Character("0".into()),
+                control_alt_shift
+            ),
             Some(BindingAction::ActivateCameraSlot0)
         );
     }
